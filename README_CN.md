@@ -340,7 +340,7 @@ go test ./internal/services/...
 - **项目主页**: [GitHub Repository](https://github.com/Corphon/SceneIntruderMCP)
 - **问题反馈**: [GitHub Issues](https://github.com/Corphon/SceneIntruderMCP/issues)
 - **功能建议**: [GitHub Discussions](https://github.com/Corphon/SceneIntruderMCP/discussions)
-- **邮件联系**: [project@sceneintruder.dev](mailto:project@sceneintruder.dev)
+- **邮件联系**: [project@sceneintruder.dev](mailto:songkf@foxmail.com)
 
 ---
 
