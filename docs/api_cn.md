@@ -1210,7 +1210,7 @@ print(f"情感状态: {response['data']['emotion']}")
 ## 🔗 相关链接
 
 - [主要文档](../README_CN.md)
-- [部署指南](deployment.md)
+- [部署指南](deployment_cn.md)
 - [GitHub仓库](https://github.com/Corphon/SceneIntruderMCP)
 - [问题反馈](https://github.com/Corphon/SceneIntruderMCP/issues)
 
