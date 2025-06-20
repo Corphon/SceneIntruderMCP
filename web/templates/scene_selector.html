@@ -1,0 +1,26 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2>场景列表</h2>
+    <a href="/scenes/create" class="btn btn-primary">
+        <i class="bi bi-plus"></i> 创建场景
+    </a>
+</div>
+
+<div class="row" id="scenes-container">
+    {{range .Scenes}}
+    <div class="col-md-6 col-lg-4 mb-4">
+        <div class="card h-100">
+            <div class="card-body">
+                <h5 class="card-title">{{.Title}}</h5>
+                <p class="card-text">{{.Description}}</p>
+                <div class="d-flex justify-content-between align-items-center">
+                    <small class="text-muted">{{len .Characters}} 个角色</small>
+                    <a href="/scenes/{{.ID}}" class="btn btn-sm btn-primary">进入</a>
+                </div>
+            </div>
+        </div>
+    </div>
+    {{end}}
+</div>
+{{end}}
