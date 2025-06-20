@@ -42,10 +42,10 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 - **Progress Tracking**: Real-time story completion and statistical analysis
 
 #### 🔗 **Multi-LLM Support**
-- **OpenAI GPT**: GPT-3.5/4/4o series
-- **Anthropic Claude**: Claude-3/3.5 series
+- **OpenAI GPT**: GPT-4.1/4o series
+- **Anthropic Claude**: Claude-4/3.5 series
 - **DeepSeek**: Chinese-optimized models
-- **Google Gemini**: Gemini-2.0 series
+- **Google Gemini**: Gemini-2.5/2.0 series
 - **Open Source Models**: Support via OpenRouter/GitHub Models
 
 ## 🏗️ Technical Architecture
