@@ -1,0 +1,883 @@
+/* 全局CSS变量 - 颜色系统 */
+:root {
+  /* 主色调 */
+  --primary-color: #007bff;
+  --primary-light: #4da3ff;
+  --primary-dark: #0056b3;
+
+  /* 辅助色 */
+  --secondary-color: #6c757d;
+  --secondary-light: #868e96;
+  --secondary-dark: #495057;
+
+  /* 情感色 */
+  --emotion-happy: #FFD700;
+  /* 黄金色 */
+  --emotion-sad: #6495ED;
+  /* 宝石蓝 */
+  --emotion-angry: #FF4500;
+  /* 红橙色 */
+  --emotion-confused: #9370DB;
+  /* 紫色 */
+  --emotion-neutral: #808080;
+  /* 灰色 */
+  --emotion-scared: #9ACD32;
+  /* 黄绿色 */
+  --emotion-surprised: #FF69B4;
+  /* 粉红色 */
+
+  /* 功能色 */
+  --success: #28a745;
+  --warning: #ffc107;
+  --danger: #dc3545;
+  --info: #17a2b8;
+
+  /* 中性色 */
+  --gray-100: #f8f9fa;
+  --gray-200: #e9ecef;
+  --gray-300: #dee2e6;
+  --gray-400: #ced4da;
+  --gray-500: #adb5bd;
+  --gray-600: #6c757d;
+  --gray-700: #495057;
+  --gray-800: #343a40;
+  --gray-900: #212529;
+
+  /* 背景色 */
+  --bg-light: #f5f7fa;
+  --bg-dark: #343a40;
+
+  /* 阴影 */
+  --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.15);
+
+  /* 圆角 */
+  --border-radius-sm: 4px;
+  --border-radius-md: 8px;
+  --border-radius-lg: 12px;
+  --border-radius-xl: 16px;
+
+  /* 间距 */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 16px;
+  --spacing-lg: 24px;
+  --spacing-xl: 32px;
+
+  /* 过渡 */
+  --transition-fast: 0.2s ease;
+  --transition-normal: 0.3s ease;
+  --transition-slow: 0.5s ease;
+}
+
+/* 基本样式 */
+body {
+  background: linear-gradient(135deg, var(--bg-light) 0%, #e4edf5 100%);
+  color: var(--gray-800);
+  line-height: 1.6;
+  font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+.card {
+  border-radius: var(--border-radius-md);
+  border: none;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast);
+  overflow: hidden;
+}
+
+.card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.card-header {
+  background-color: var(--gray-100);
+  border-bottom: 1px solid var(--gray-300);
+  padding: var(--spacing-md) var(--spacing-lg);
+}
+
+/* 聊天相关样式 */
+.chat-container {
+  height: 60vh;
+  overflow-y: auto;
+  padding: var(--spacing-md);
+  background-color: rgba(255, 255, 255, 0.7);
+  border-radius: var(--border-radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.chat-message {
+  margin-bottom: var(--spacing-lg);
+  position: relative;
+  clear: both;
+}
+
+.message-content {
+  max-width: 80%;
+  border-radius: var(--border-radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--spacing-md);
+  position: relative;
+  word-wrap: break-word;
+}
+
+.user-message .message-content {
+  background-color: var(--primary-color);
+  color: white;
+  margin-left: auto;
+  border-bottom-right-radius: var(--border-radius-sm);
+}
+
+.character-message .message-content {
+  background-color: white;
+  border-bottom-left-radius: var(--border-radius-sm);
+}
+
+.system-message .message-content {
+  background-color: var(--danger);
+  color: white;
+  border-radius: var(--border-radius-xl);
+  padding: var(--spacing-sm) var(--spacing-md);
+  font-size: 0.9rem;
+  max-width: 90%;
+  margin: 0 auto;
+  text-align: center;
+}
+
+.message-bubble {
+  position: relative;
+  border-radius: var(--border-radius-md);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+  max-width: 75%;
+}
+
+.user-message {
+  background-color: #DCF8C6;
+  margin-left: auto;
+}
+
+.character-message {
+  background-color: white;
+  margin-right: auto;
+  box-shadow: var(--shadow-sm);
+}
+
+.message-time {
+  font-size: 0.7rem;
+  color: var(--gray-600);
+  text-align: right;
+  margin-top: var(--spacing-xs);
+}
+
+.message-sender {
+  font-weight: bold;
+  margin-bottom: var(--spacing-xs);
+}
+
+/* 角色列表样式 */
+.character-selection {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-md);
+  margin-bottom: var(--spacing-lg);
+}
+
+.character-item {
+  position: relative;
+  width: 100px;
+  padding: var(--spacing-md);
+  text-align: center;
+  cursor: pointer;
+  border-radius: var(--border-radius-md);
+  background-color: white;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+}
+
+.character-item:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-md);
+}
+
+.character-item.active {
+  background-color: var(--gray-200);
+  border-left: 4px solid var(--primary-color);
+}
+
+.character-item.active::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 3px;
+  background: linear-gradient(to right, var(--primary-color), var(--primary-light));
+}
+
+.character-avatar {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background-color: var(--gray-200);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto var(--spacing-sm);
+  border: 2px solid transparent;
+  transition: border-color var(--transition-fast);
+}
+
+.character-item.active .character-avatar {
+  border-color: var(--primary-color);
+}
+
+.character-name {
+  font-size: 0.9rem;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.character-preview {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--gray-600);
+}
+
+.has-active-effects .character-avatar {
+  box-shadow: 0 0 0 2px var(--warning);
+}
+
+/* 打字指示器动画 */
+.typing-indicator {
+  background-color: var(--gray-200);
+  border-radius: 20px;
+  padding: var(--spacing-sm) var(--spacing-md);
+  display: inline-flex;
+  align-items: center;
+  margin-bottom: var(--spacing-md);
+}
+
+.typing-dots {
+  display: flex;
+}
+
+.dot {
+  background-color: var(--gray-600);
+  border-radius: 50%;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  animation: typing-dot 1.4s infinite ease-in-out both;
+}
+
+.dot:nth-child(1) {
+  animation-delay: -0.32s;
+}
+
+.dot:nth-child(2) {
+  animation-delay: -0.16s;
+}
+
+@keyframes typing-dot {
+
+  0%,
+  80%,
+  100% {
+    transform: scale(0);
+  }
+
+  40% {
+    transform: scale(1);
+  }
+}
+
+/* 场景卡片样式 */
+.scene-card {
+  margin-bottom: var(--spacing-lg);
+}
+
+.scene-card .card {
+  transition: transform var(--transition-normal), box-shadow var(--transition-normal);
+  height: 100%;
+}
+
+.scene-card .card:hover {
+  transform: translateY(-5px);
+  box-shadow: var(--shadow-lg);
+}
+
+.scene-card .card-img-top {
+  height: 180px;
+  object-fit: cover;
+}
+
+.scene-card .card-title {
+  font-size: 1.25rem;
+  font-weight: 600;
+  margin-bottom: var(--spacing-sm);
+}
+
+.scene-card .card-text {
+  color: var(--gray-700);
+  height: 4.5em;
+  overflow: hidden;
+}
+
+.scene-card .card-footer {
+  background-color: transparent;
+  border-top: 1px solid var(--gray-200);
+  padding: var(--spacing-md);
+}
+
+/* 创建场景页面样式 */
+#text-input {
+  min-height: 200px;
+  border-radius: var(--border-radius-md);
+  padding: var(--spacing-md);
+  border-color: var(--gray-300);
+  resize: vertical;
+}
+
+.form-control:focus {
+  border-color: var(--primary-light);
+  box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+/* 进度条自定义样式 */
+.progress {
+  height: 10px;
+  border-radius: var(--border-radius-sm);
+  background-color: var(--gray-200);
+  margin: var(--spacing-md) 0;
+}
+
+.progress-bar {
+  background-color: var(--primary-color);
+}
+
+/* 情绪相关样式 */
+.emotion-indicator {
+  position: absolute;
+  left: -30px;
+  top: 8px;
+  font-size: 20px;
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--spacing-sm);
+}
+
+.emotion-label {
+  font-size: 0.75rem;
+  font-weight: bold;
+  color: var(--gray-700);
+  padding: 1px 5px;
+  border-radius: 10px;
+  background: var(--gray-100);
+  margin-right: 5px;
+}
+
+.emotion-intensity-bar {
+  height: 4px;
+  width: 60px;
+  background-color: var(--gray-300);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.emotion-intensity-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.5s ease-in-out;
+}
+
+.action-text {
+  font-style: italic;
+  color: var(--gray-600);
+  font-size: 0.9em;
+  margin-top: var(--spacing-xs);
+}
+
+/* 情绪样式 */
+.emotion-happy {
+  color: var(--emotion-happy);
+}
+
+.emotion-sad {
+  color: var(--emotion-sad);
+}
+
+.emotion-angry {
+  color: var(--emotion-angry);
+}
+
+.emotion-confused {
+  color: var(--emotion-confused);
+}
+
+.emotion-neutral {
+  color: var(--emotion-neutral);
+}
+
+.emotion-scared {
+  color: var(--emotion-scared);
+}
+
+.emotion-surprised {
+  color: var(--emotion-surprised);
+}
+
+/* 情绪动画效果 */
+.emotion-effect {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 10;
+  border-radius: inherit;
+}
+
+.pulse-red {
+  animation: pulse-red 1.5s infinite;
+  background: radial-gradient(circle, rgba(255, 0, 0, 0) 0%, rgba(255, 0, 0, 0.1) 100%);
+}
+
+.sparkles {
+  background-image: url('/static/images/sparkles.png');
+  background-repeat: repeat;
+  animation: sparkle 3s linear infinite;
+}
+
+.rain-drops {
+  background-image: url('/static/images/rain.png');
+  background-repeat: repeat;
+  animation: rain 1s linear infinite;
+}
+
+@keyframes pulse-red {
+  0% {
+    transform: scale(1);
+    opacity: 0.2;
+  }
+
+  50% {
+    transform: scale(1.05);
+    opacity: 0.3;
+  }
+
+  100% {
+    transform: scale(1);
+    opacity: 0.2;
+  }
+}
+
+@keyframes sparkle {
+  0% {
+    background-position: 0 0;
+  }
+
+  100% {
+    background-position: 100px 100px;
+  }
+}
+
+@keyframes rain {
+  0% {
+    background-position: 0 0;
+  }
+
+  100% {
+    background-position: 0 50px;
+  }
+}
+
+/* 故事分支可视化 */
+.branch-list {
+  list-style: none;
+  padding-left: 0;
+  margin-bottom: 0;
+}
+
+.branch-list .branch-list {
+  padding-left: 25px;
+  border-left: 2px dashed var(--gray-300);
+  margin-left: 10px;
+}
+
+.branch-item {
+  margin-bottom: var(--spacing-md);
+  position: relative;
+}
+
+.branch-node {
+  background-color: white;
+  border: 1px solid var(--gray-300);
+  border-radius: var(--border-radius-md);
+  padding: var(--spacing-md);
+  transition: all var(--transition-normal);
+  box-shadow: var(--shadow-sm);
+}
+
+.branch-node:hover {
+  transform: translateX(3px);
+  box-shadow: var(--shadow-md);
+}
+
+.branch-item.current>.branch-node {
+  background-color: #e8f4ff;
+  border-color: var(--primary-light);
+  box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.3);
+}
+
+.branch-item.current::before {
+  content: '当前';
+  position: absolute;
+  top: -8px;
+  left: 10px;
+  font-size: 0.7rem;
+  font-weight: bold;
+  color: white;
+  background: var(--primary-color);
+  padding: 2px 8px;
+  border-radius: 10px;
+  z-index: 1;
+}
+
+.node-content {
+  margin-bottom: var(--spacing-md);
+}
+
+.node-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--spacing-sm);
+}
+
+/* 角色动作描述 */
+.character-action {
+  font-size: 0.85rem;
+  color: var(--gray-600);
+  font-style: italic;
+  margin-top: var(--spacing-sm);
+}
+
+/* 道具和技能系统样式 */
+.item-card,
+.skill-card {
+  position: relative;
+  border-radius: var(--border-radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-normal);
+  margin-bottom: var(--spacing-md);
+  background-color: white;
+}
+
+.item-card:hover,
+.skill-card:hover {
+  transform: translateY(-4px);
+  box-shadow: var(--shadow-md);
+}
+
+.item-header,
+.skill-header {
+  padding: var(--spacing-sm) var(--spacing-md);
+  background-color: var(--gray-100);
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--gray-200);
+}
+
+.item-content,
+.skill-content {
+  padding: var(--spacing-md);
+}
+
+.item-icon,
+.skill-icon {
+  font-size: 1.5rem;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 40px;
+  height: 40px;
+  background: var(--gray-200);
+  border-radius: 50%;
+  margin-right: var(--spacing-md);
+  color: var(--gray-700);
+}
+
+.item-title,
+.skill-title {
+  font-weight: 600;
+  margin-bottom: 0;
+}
+
+.effect-entry,
+.skill-effect-entry {
+  background-color: var(--gray-100);
+  border-radius: var(--border-radius-sm);
+  padding: var(--spacing-md);
+  margin-bottom: var(--spacing-md);
+  border-left: 3px solid var(--primary-color);
+  font-size: 0.9rem;
+}
+
+.cooldown-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  color: white;
+  font-size: 1.2rem;
+  font-weight: bold;
+  z-index: 5;
+}
+
+.probability-slider {
+  height: 4px;
+  background: linear-gradient(to right, var(--danger), var(--warning), var(--success));
+  border-radius: 2px;
+}
+
+/* 场景探索样式 */
+.location-marker {
+  position: relative;
+  padding-left: 20px;
+  margin-bottom: var(--spacing-sm);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.location-marker::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 8px;
+  height: 8px;
+  background-color: var(--gray-500);
+  border-radius: 50%;
+  transition: all var(--transition-normal);
+}
+
+.location-marker:hover {
+  color: var(--primary-color);
+}
+
+.location-marker:hover::before {
+  background-color: var(--primary-color);
+}
+
+.location-marker.active::before {
+  background-color: var(--primary-color);
+  box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.3);
+}
+
+.location-marker.locked {
+  color: var(--gray-500);
+  cursor: not-allowed;
+}
+
+.location-marker.locked::before {
+  background-color: var(--gray-400);
+}
+
+/* 通知和反馈系统 */
+.notification-container {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 1050;
+  max-width: 300px;
+}
+
+.toast-notification {
+  background-color: white;
+  border-radius: var(--border-radius-md);
+  box-shadow: var(--shadow-md);
+  margin-bottom: var(--spacing-md);
+  overflow: hidden;
+  animation: slide-in 0.3s ease-out;
+}
+
+.toast-notification.closing {
+  animation: slide-out 0.3s ease-in forwards;
+}
+
+.toast-header {
+  display: flex;
+  align-items: center;
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-bottom: 1px solid var(--gray-200);
+}
+
+.toast-body {
+  padding: var(--spacing-md);
+}
+
+.toast-notification.info {
+  border-left: 4px solid var(--info);
+}
+
+.toast-notification.success {
+  border-left: 4px solid var(--success);
+}
+
+.toast-notification.warning {
+  border-left: 4px solid var(--warning);
+}
+
+.toast-notification.error {
+  border-left: 4px solid var(--danger);
+}
+
+@keyframes slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes slide-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* 响应式调整 */
+@media (max-width: 992px) {
+  .chat-container {
+    height: 50vh;
+  }
+}
+
+@media (max-width: 768px) {
+  .message-content {
+    max-width: 90%;
+  }
+
+  .character-selection {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: var(--spacing-md);
+  }
+
+  .character-item {
+    min-width: 80px;
+  }
+
+  .branch-list .branch-list {
+    padding-left: 15px;
+  }
+}
+
+@media (max-width: 576px) {
+  .chat-container {
+    height: calc(100vh - 320px);
+  }
+
+  .emotion-indicator {
+    left: -20px;
+    font-size: 16px;
+  }
+
+  .navbar-brand {
+    font-size: 1rem;
+  }
+
+  .card-header {
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+
+  .item-card,
+  .skill-card {
+    margin-bottom: var(--spacing-sm);
+  }
+}
+
+/* 故事系统相关样式 */
+.story-container {
+  max-height: 400px;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.story-node {
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  padding: 15px;
+  margin-bottom: 15px;
+  border-left: 4px solid #6c757d;
+  transition: all 0.3s ease;
+}
+
+.story-node-branch {
+  border-left-color: #198754;
+}
+
+.story-node-exploration {
+  border-left-color: #0d6efd;
+}
+
+.story-node-auto {
+  border-left-color: #fd7e14;
+}
+
+.story-choices-container {
+  margin-top: 15px;
+}
+
+.choice-button {
+  width: 100%;
+  text-align: left;
+  margin-bottom: 8px;
+}
+
+.tasks-container {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.task-item {
+  background-color: #f8f9fa;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.task-item.completed {
+  background-color: #d1e7dd;
+}
+
+.objectives-list {
+  list-style: none;
+  padding-left: 10px;
+  margin-top: 10px;
+}
