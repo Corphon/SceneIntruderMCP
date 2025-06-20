@@ -1,0 +1,73 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h4 class="mb-0">系统设置</h4>
+            </div>
+            <div class="card-body">
+                <form id="settings-form">
+                    <!-- LLM 配置 -->
+                    <div class="mb-4">
+                        <h5>LLM 配置</h5>
+                        <div class="mb-3">
+                            <label for="llm-provider" class="form-label">LLM 提供商</label>
+                            <select class="form-select" id="llm-provider" name="llm_provider">
+                                <option value="">选择提供商...</option>
+                                <option value="openai">OpenAI</option>
+                                <option value="anthropic">Anthropic</option>
+                                <option value="local">本地模型</option>
+                            </select>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="api-key" class="form-label">API Key</label>
+                            <input type="password" class="form-control" id="api-key" 
+                                   name="api_key" placeholder="输入您的API密钥...">
+                            <div class="form-text">
+                                API密钥将安全存储，仅用于与LLM服务通信
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="model-name" class="form-label">模型名称</label>
+                            <input type="text" class="form-control" id="model-name" 
+                                   name="model" placeholder="例如: gpt-3.5-turbo">
+                        </div>
+                    </div>
+                    
+                    <!-- 应用设置 -->
+                    <div class="mb-4">
+                        <h5>应用设置</h5>
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" 
+                                   id="debug-mode" name="debug_mode">
+                            <label class="form-check-label" for="debug-mode">
+                                启用调试模式
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <button type="button" class="btn btn-outline-danger" id="test-connection">
+                            测试连接
+                        </button>
+                        <button type="submit" class="btn btn-primary">
+                            保存设置
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    window.SceneApp.initSettings();
+});
+</script>
+{{end}}
