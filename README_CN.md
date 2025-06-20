@@ -11,7 +11,7 @@
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
-[English](README_EN.md) | 简体中文
+[English](README.md) | 简体中文
 
 </div>
 
