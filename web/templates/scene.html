@@ -1,0 +1,72 @@
+{{template "layout.html" .}}
+{{define "content"}}
+<div class="row">
+    <!-- 角色选择 -->
+    <div class="col-md-3">
+        <div class="card">
+            <div class="card-header">
+                <h6 class="mb-0">角色</h6>
+            </div>
+            <div class="card-body p-2">
+                <div id="characters-list">
+                    {{range .characters}}
+                    <div class="character-item p-2 border rounded mb-2" 
+                         data-character-id="{{.ID}}" style="cursor: pointer;">
+                        <div class="d-flex align-items-center">
+                            <img src="{{.Avatar}}" alt="{{.Name}}" 
+                                 style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;"
+                                 class="me-2"
+                                 onerror="this.src='/static/images/default-character.jpg'">
+                            <div>
+                                <div class="fw-bold">{{.Name}}</div>
+                                <small class="text-muted">{{.Role}}</small>
+                            </div>
+                        </div>
+                    </div>
+                    {{end}}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 对话区域 -->
+    <div class="col-md-9">
+        <div class="card h-100">
+            <div class="card-header">
+                <h6 class="mb-0">{{.Scene.Title}}</h6>
+            </div>
+            <div class="card-body d-flex flex-column">
+                <!-- 聊天历史 -->
+                <div id="chat-container" class="flex-grow-1 overflow-auto mb-3 p-3" 
+                     style="height: 400px; background-color: #f8f9fa; border-radius: 8px;">
+                    <!-- 对话内容会在这里动态添加 -->
+                </div>
+
+                <!-- 输入区域 -->
+                <div class="input-group">
+                    <input type="text" id="message-input" class="form-control" 
+                           placeholder="输入消息..." disabled>
+                    <button id="send-btn" class="btn btn-primary" disabled>
+                        <i class="bi bi-send"></i>
+                    </button>
+                </div>
+
+                <!-- 选择的角色显示 -->
+                <div id="selected-character" class="mt-2 text-muted small">
+                    请先选择一个角色
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<input type="hidden" id="scene-id" value="{{.Scene.ID}}">
+{{end}}
+
+{{define "scripts"}}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    window.SceneApp.initScene();
+});
+</script>
+{{end}}
