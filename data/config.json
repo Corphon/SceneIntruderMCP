@@ -1,0 +1,13 @@
+{
+  "port": "8081",
+  "data_dir": "data",
+  "static_dir": "static",
+  "templates_dir": "web/templates",
+  "log_dir": "logs",
+  "debug_mode": true,
+  "llm_provider": "",
+  "llm_config": {
+    "api_key": "",
+    "default_model": ""
+  }
+}
