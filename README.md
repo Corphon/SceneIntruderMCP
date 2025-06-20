@@ -340,7 +340,7 @@ Thanks to all developers and users who have contributed to this project!
 - **Project Homepage**: [GitHub Repository](https://github.com/Corphon/SceneIntruderMCP)
 - **Issue Reports**: [GitHub Issues](https://github.com/Corphon/SceneIntruderMCP/issues)
 - **Feature Requests**: [GitHub Discussions](https://github.com/Corphon/SceneIntruderMCP/discussions)
-- **Email Contact**: [project@sceneintruder.dev](mailto:project@sceneintruder.dev)
+- **Email Contact**: [songkf@foxmail.com](mailto:songkf@foxmail.com)
 
 ---
 
