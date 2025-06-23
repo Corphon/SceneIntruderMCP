@@ -147,7 +147,9 @@ POST   /api/users/{user_id}/items          # 添加用户道具
 GET    /api/users/{user_id}/items/{item_id} # 获取特定道具
 PUT    /api/users/{user_id}/items/{item_id} # 更新用户道具
 DELETE /api/users/{user_id}/items/{item_id} # 删除用户道具
-
+```
+#### 用户技能系统
+```
 GET    /api/users/{user_id}/skills           # 获取用户技能
 POST   /api/users/{user_id}/skills          # 添加用户技能
 GET    /api/users/{user_id}/skills/{skill_id} # 获取特定技能
