@@ -42,11 +42,16 @@ SceneIntruderMCP 是一个革命性的AI驱动互动叙事平台，它将传统�
 - **进度追踪**: 实时故事完成度和统计分析
 
 #### 🔗 **多LLM支持**
-- **OpenAI GPT**: GPT-3.5/4/4o 系列
-- **Anthropic Claude**: Claude-3/3.5 系列
+- **OpenAI GPT**: GPT-4.1/4o 系列
+- **Anthropic Claude**: Claude-4/3.7 系列
 - **DeepSeek**: 中文优化模型
-- **Google Gemini**: Gemini-2.0 系列
-- **开源模型**: 通过 OpenRouter/GitHub Models 支持
+- **Google Gemini**: Gemini-2.5/2.0 系列
+- **Grok**: xAI的Grok3/2模型
+- **Mistral**: Mistral系列模型
+- **Qwen**: 阿里云千问qwen3系列
+- **GitHub Models**: 通过GitHub Models平台
+- **OpenRouter**: 开源模型聚合平台
+- **GLM**: 智谱AI的GLM-4系列
 
 ## 🏗️ 技术架构
 
@@ -234,17 +239,14 @@ POST   /api/settings/test-connection  # 测试连接
 GET    /api/llm/models               # 获取可用模型
 ```
 
-#### 用户道具系统
+#### 用户道具和技能系统
 ```http
 GET    /api/users/{user_id}/items           # 获取用户道具
 POST   /api/users/{user_id}/items          # 添加用户道具
 GET    /api/users/{user_id}/items/{item_id} # 获取特定道具
 PUT    /api/users/{user_id}/items/{item_id} # 更新用户道具
 DELETE /api/users/{user_id}/items/{item_id} # 删除用户道具
-```
 
-#### 用户技能系统
-```http
 GET    /api/users/{user_id}/skills           # 获取用户技能
 POST   /api/users/{user_id}/skills          # 添加用户技能
 GET    /api/users/{user_id}/skills/{skill_id} # 获取特定技能
@@ -252,7 +254,7 @@ PUT    /api/users/{user_id}/skills/{skill_id} # 更新用户技能
 DELETE /api/users/{user_id}/skills/{skill_id} # 删除用户技能
 ```
 
-详细API文档请参考: [API Documentation](docs/api_cn.md)
+详细API文档请参考: [API文档](docs/api_cn.md)
 
 ## 🧪 开发指南
 
