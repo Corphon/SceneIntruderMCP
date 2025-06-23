@@ -7,7 +7,7 @@
 **🎭 AI-Powered Immersive Interactive Storytelling Platform**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
