@@ -197,39 +197,62 @@ go build -o sceneintruder cmd/server/main.go
 
 ## 🛠️ API文档
 
-### 🔗 核心接口
+### 🔗 实际可用的API端点
 
 #### 场景管理
 ```http
-POST   /api/scenes                    # 创建场景
 GET    /api/scenes                    # 获取场景列表
+POST   /api/scenes                    # 创建场景  
 GET    /api/scenes/{id}               # 获取场景详情
-DELETE /api/scenes/{id}               # 删除场景
+GET    /api/scenes/{id}/characters    # 获取场景角色
+GET    /api/scenes/{id}/aggregate     # 获取场景聚合数据
+```
+
+#### 文本分析
+```http
+POST   /api/analyze                   # 分析文本内容
+GET    /api/progress/{taskID}         # 获取分析进度
+POST   /api/cancel/{taskID}           # 取消分析任务
+POST   /api/upload                    # 上传文件
 ```
 
 #### 角色互动
 ```http
-POST   /api/scenes/{id}/characters/{cid}/chat    # 与角色对话
-GET    /api/scenes/{id}/characters               # 获取场景角色
-POST   /api/characters/interaction               # 角色间互动
+POST   /api/chat                      # 与角色对话
+POST   /api/interactions/trigger      # 触发角色互动
+POST   /api/interactions/simulate     # 模拟角色对话
+POST   /api/interactions/aggregate    # 聚合交互处理
+GET    /api/interactions/{scene_id}   # 获取互动历史
+GET    /api/conversations/{scene_id}  # 获取对话历史
 ```
 
-#### 故事系统
+#### 系统配置
 ```http
-GET    /api/scenes/{id}/story                    # 获取故事数据
-POST   /api/scenes/{id}/story/choice             # 做出故事选择
-POST   /api/scenes/{id}/story/branch             # 创建故事分支
+GET    /api/settings                  # 获取系统设置
+POST   /api/settings                  # 更新系统设置
+POST   /api/settings/test-connection  # 测试连接
+GET    /api/llm/models               # 获取可用模型
 ```
 
-#### 用户系统
+#### 用户道具系统
 ```http
-GET    /api/users/{id}                           # 获取用户信息
-PUT    /api/users/{id}/preferences               # 更新用户偏好
-POST   /api/users/{id}/items                     # 添加用户道具
-POST   /api/users/{id}/skills                    # 添加用户技能
+GET    /api/users/{user_id}/items           # 获取用户道具
+POST   /api/users/{user_id}/items          # 添加用户道具
+GET    /api/users/{user_id}/items/{item_id} # 获取特定道具
+PUT    /api/users/{user_id}/items/{item_id} # 更新用户道具
+DELETE /api/users/{user_id}/items/{item_id} # 删除用户道具
 ```
 
-详细API文档请参考: [API Documentation](docs/api.md)
+#### 用户技能系统
+```http
+GET    /api/users/{user_id}/skills           # 获取用户技能
+POST   /api/users/{user_id}/skills          # 添加用户技能
+GET    /api/users/{user_id}/skills/{skill_id} # 获取特定技能
+PUT    /api/users/{user_id}/skills/{skill_id} # 更新用户技能
+DELETE /api/users/{user_id}/skills/{skill_id} # 删除用户技能
+```
+
+详细API文档请参考: [API Documentation](docs/api_cn.md)
 
 ## 🧪 开发指南
 
