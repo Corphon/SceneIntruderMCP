@@ -62,17 +62,20 @@ go build -o sceneintruder cmd/server/main.go
 ### 2. 环境配置
 
 ```bash
-# 创建配置文件
-cp data/config.json.example data/config.json
+# 应用会自动创建配置文件，无需手动复制
+# 首次运行时会在 data/config.json 中生成默认配置
 
-# 编辑配置文件
-nano data/config.json
+# 可以通过环境变量配置
+export PORT=8080
+export OPENAI_API_KEY=your-openai-api-key
+export DEBUG_MODE=true
 ```
 
 **基础配置示例**:
 ```json
 {
   "port": "8080",
+  "openai_api_key": "your-api-key",
   "data_dir": "data",
   "static_dir": "static",
   "templates_dir": "web/templates",
@@ -112,7 +115,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
   cmd/server/main.go
 
 # 验证二进制文件
-./sceneintruder-linux-amd64 --version
+./sceneintruder-linux-amd64
 ```
 
 ### 2. 系统服务配置
@@ -167,7 +170,6 @@ sudo chown -R sceneintruder:sceneintruder /opt/sceneintruder
 sudo cp sceneintruder-linux-amd64 /opt/sceneintruder/sceneintruder
 sudo cp -r static/* /opt/sceneintruder/static/
 sudo cp -r web/* /opt/sceneintruder/web/
-sudo cp data/config.json /opt/sceneintruder/data/
 
 # 4. 设置权限
 sudo chmod +x /opt/sceneintruder/sceneintruder
@@ -220,19 +222,13 @@ WORKDIR /app
 COPY --from=builder /app/sceneintruder .
 COPY --from=builder /app/static ./static
 COPY --from=builder /app/web ./web
-COPY --from=builder /app/data/config.json.example ./data/config.json
 
 # 创建必要目录
-RUN mkdir -p data/scenes data/stories data/users data/exports logs && \
-    chown -R sceneintruder:sceneintruder /app
+RUN mkdir -p data data/scenes temp logs static static/css static/js static/images
 
 USER sceneintruder
 
 EXPOSE 8080
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
 
 CMD ["./sceneintruder"]
 ```
@@ -254,12 +250,6 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
 
   # 可选：Nginx 反向代理
   nginx:
@@ -606,7 +596,7 @@ scrape_configs:
 #!/bin/bash
 # health-check.sh
 
-ENDPOINT="http://localhost:8080/health"
+ENDPOINT="http://localhost:8080/"
 TIMEOUT=5
 
 response=$(curl -s -w "%{http_code}" -o /dev/null --connect-timeout $TIMEOUT $ENDPOINT)
@@ -630,8 +620,8 @@ fi
 # 检查日志
 sudo journalctl -u sceneintruder -f
 
-# 检查配置
-sudo -u sceneintruder /opt/sceneintruder/sceneintruder --config-check
+# 检查配置文件
+sudo -u sceneintruder test -f /opt/sceneintruder/data/config.json && echo "配置文件存在"
 
 # 检查端口占用
 sudo netstat -tlnp | grep :8080
@@ -665,38 +655,6 @@ sudo setsebool -P httpd_can_network_connect 1
 # 检查内存使用
 free -h
 ps aux | grep sceneintruder
-
-# 调整配置
-# 在 config.json 中添加:
-{
-  "performance": {
-    "max_concurrent_requests": 50,
-    "request_timeout": 30,
-    "memory_limit": "512MB"
-  }
-}
-```
-
-### 性能优化
-
-```json
-// 生产环境优化配置
-{
-  "performance": {
-    "cache_enabled": true,
-    "cache_ttl": 3600,
-    "max_connections": 1000,
-    "read_timeout": 30,
-    "write_timeout": 30,
-    "compression_enabled": true
-  },
-  "llm_config": {
-    "connection_pool_size": 10,
-    "request_timeout": 60,
-    "max_retries": 3,
-    "backoff_strategy": "exponential"
-  }
-}
 ```
 
 ### 备份和恢复
