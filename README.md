@@ -42,11 +42,16 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 - **Progress Tracking**: Real-time story completion and statistical analysis
 
 #### 🔗 **Multi-LLM Support**
-- **OpenAI GPT**: GPT-4.1/4o series
-- **Anthropic Claude**: Claude-4/3.5 series
+- **OpenAI GPT**: GPT-3.5/4/4o series
+- **Anthropic Claude**: Claude-3/3.5 series
 - **DeepSeek**: Chinese-optimized models
-- **Google Gemini**: Gemini-2.5/2.0 series
-- **Open Source Models**: Support via OpenRouter/GitHub Models
+- **Google Gemini**: Gemini-2.0 series
+- **Grok**: xAI's Grok models
+- **Mistral**: Mistral series models
+- **Qwen**: Alibaba Cloud Qwen series
+- **GitHub Models**: Via GitHub Models platform
+- **OpenRouter**: Open source model aggregation platform
+- **GLM**: Zhipu AI's GLM series
 
 ## 🏗️ Technical Architecture
 
@@ -234,17 +239,14 @@ POST   /api/settings/test-connection  # Test connection
 GET    /api/llm/models               # Get available models
 ```
 
-#### User Items System
+#### User Items & Skills System
 ```http
 GET    /api/users/{user_id}/items           # Get user items
 POST   /api/users/{user_id}/items          # Add user item
 GET    /api/users/{user_id}/items/{item_id} # Get specific item
 PUT    /api/users/{user_id}/items/{item_id} # Update user item
 DELETE /api/users/{user_id}/items/{item_id} # Delete user item
-```
 
-#### User Skills System
-```http
 GET    /api/users/{user_id}/skills           # Get user skills
 POST   /api/users/{user_id}/skills          # Add user skill
 GET    /api/users/{user_id}/skills/{skill_id} # Get specific skill
@@ -252,7 +254,7 @@ PUT    /api/users/{user_id}/skills/{skill_id} # Update user skill
 DELETE /api/users/{user_id}/skills/{skill_id} # Delete user skill
 ```
 
-For detailed API documentation, see: [API Documentation](docs/api_EN.md)
+For detailed API documentation, see: [API Documentation](docs/api.md)
 
 ## 🧪 Development Guide
 
