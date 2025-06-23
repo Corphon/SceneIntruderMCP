@@ -53,7 +53,7 @@ func Load() (*Config, error) {
 
 	// 创建配置
 	config := &Config{
-		Port:         getEnv("PORT", "8081"),
+		Port:         getEnv("PORT", "8080"),
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
 		DataDir:      getEnvPath("DATA_DIR", "data"),
 		StaticDir:    getEnvPath("STATIC_DIR", "static"),
