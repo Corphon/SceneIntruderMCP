@@ -197,39 +197,62 @@ Open browser: http://localhost:8080
 
 ## 🛠️ API Documentation
 
-### 🔗 Core Endpoints
+### 🔗 Actually Available API Endpoints
 
 #### Scene Management
 ```http
-POST   /api/scenes                    # Create scene
 GET    /api/scenes                    # Get scene list
+POST   /api/scenes                    # Create scene  
 GET    /api/scenes/{id}               # Get scene details
-DELETE /api/scenes/{id}               # Delete scene
+GET    /api/scenes/{id}/characters    # Get scene characters
+GET    /api/scenes/{id}/aggregate     # Get scene aggregate data
+```
+
+#### Text Analysis
+```http
+POST   /api/analyze                   # Analyze text content
+GET    /api/progress/{taskID}         # Get analysis progress
+POST   /api/cancel/{taskID}           # Cancel analysis task
+POST   /api/upload                    # Upload file
 ```
 
 #### Character Interaction
 ```http
-POST   /api/scenes/{id}/characters/{cid}/chat    # Chat with character
-GET    /api/scenes/{id}/characters               # Get scene characters
-POST   /api/characters/interaction               # Character interactions
+POST   /api/chat                      # Chat with characters
+POST   /api/interactions/trigger      # Trigger character interactions
+POST   /api/interactions/simulate     # Simulate character dialogue
+POST   /api/interactions/aggregate    # Aggregate interaction processing
+GET    /api/interactions/{scene_id}   # Get interaction history
+GET    /api/conversations/{scene_id}  # Get conversation history
 ```
 
-#### Story System
+#### System Configuration
 ```http
-GET    /api/scenes/{id}/story                    # Get story data
-POST   /api/scenes/{id}/story/choice             # Make story choice
-POST   /api/scenes/{id}/story/branch             # Create story branch
+GET    /api/settings                  # Get system settings
+POST   /api/settings                  # Update system settings
+POST   /api/settings/test-connection  # Test connection
+GET    /api/llm/models               # Get available models
 ```
 
-#### User System
+#### User Items System
 ```http
-GET    /api/users/{id}                           # Get user info
-PUT    /api/users/{id}/preferences               # Update user preferences
-POST   /api/users/{id}/items                     # Add user items
-POST   /api/users/{id}/skills                    # Add user skills
+GET    /api/users/{user_id}/items           # Get user items
+POST   /api/users/{user_id}/items          # Add user item
+GET    /api/users/{user_id}/items/{item_id} # Get specific item
+PUT    /api/users/{user_id}/items/{item_id} # Update user item
+DELETE /api/users/{user_id}/items/{item_id} # Delete user item
 ```
 
-For detailed API documentation, see: [API Documentation](docs/api.md)
+#### User Skills System
+```http
+GET    /api/users/{user_id}/skills           # Get user skills
+POST   /api/users/{user_id}/skills          # Add user skill
+GET    /api/users/{user_id}/skills/{skill_id} # Get specific skill
+PUT    /api/users/{user_id}/skills/{skill_id} # Update user skill
+DELETE /api/users/{user_id}/skills/{skill_id} # Delete user skill
+```
+
+For detailed API documentation, see: [API Documentation](docs/api_EN.md)
 
 ## 🧪 Development Guide
 
