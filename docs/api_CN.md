@@ -6,7 +6,7 @@
 
 版本: v1.0.0 | 更新时间: 2025-06-20
 
-[返回主页](../README_CN.md) | [English Version](api_en.md)
+[返回主页](../README_CN.md) | [English Version](api.md)
 
 </div>
 
