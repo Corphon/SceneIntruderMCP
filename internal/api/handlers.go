@@ -429,6 +429,255 @@ func (h *Handler) ChatWithEmotion(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+// GetStoryData 获取指定场景的故事数据
+func (h *Handler) GetStoryData(c *gin.Context) {
+	sceneID := c.Param("scene_id")
+	storyService := h.getStoryService()
+
+	storyData, err := storyService.GetStoryData(sceneID, nil)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "故事数据不存在"})
+		return
+	}
+
+	c.JSON(http.StatusOK, storyData)
+}
+
+// MakeStoryChoice 处理故事选择逻辑
+func (h *Handler) MakeStoryChoice(c *gin.Context) {
+	sceneID := c.Param("scene_id")
+
+	var req struct {
+		NodeID   string `json:"node_id" binding:"required"`   // 当前节点ID
+		ChoiceID string `json:"choice_id" binding:"required"` // 选择ID
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+
+	// 验证参数
+	if sceneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		return
+	}
+
+	// 获取StoryService实例
+	storyService := h.getStoryService()
+	if storyService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		return
+	}
+
+	// 解析用户偏好（可选）
+	var preferences *models.UserPreferences
+	if prefJSON := c.Query("preferences"); prefJSON != "" {
+		preferences = &models.UserPreferences{}
+		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
+			preferences = nil // 解析失败使用默认值
+		}
+	}
+
+	// 创建超时上下文
+	_, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	// 执行故事选择
+	nextNode, err := storyService.MakeChoice(sceneID, req.NodeID, req.ChoiceID, preferences)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("执行故事选择失败: %v", err)})
+		return
+	}
+
+	// 获取更新后的故事数据
+	storyData, err := storyService.GetStoryData(sceneID, preferences)
+	if err != nil {
+		// 即使获取完整数据失败，也返回新节点
+		log.Printf("Warning: Failed to get updated story data: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"success":   true,
+			"message":   "选择已执行",
+			"next_node": nextNode,
+		})
+		return
+	}
+
+	// 构建分支视图数据
+	branchView := buildStoryBranchView(storyData)
+
+	// 记录API使用情况
+	if h.StatsService != nil {
+		h.StatsService.RecordAPIRequest(5) // 估算token使用量
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"message":       "选择已执行",
+		"next_node":     nextNode,
+		"story_data":    branchView,
+		"progress":      storyData.Progress,
+		"current_state": storyData.CurrentState,
+	})
+}
+
+// AdvanceStory 推进故事情节
+func (h *Handler) AdvanceStory(c *gin.Context) {
+	sceneID := c.Param("scene_id")
+
+	// 验证参数
+	if sceneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		return
+	}
+
+	// 获取StoryService实例
+	storyService := h.getStoryService()
+	if storyService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		return
+	}
+
+	// 解析用户偏好（可选）
+	var preferences *models.UserPreferences
+	if prefJSON := c.Query("preferences"); prefJSON != "" {
+		preferences = &models.UserPreferences{}
+		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
+			preferences = nil // 解析失败使用默认值
+		}
+	}
+
+	// 如果没有偏好设置，使用默认值
+	if preferences == nil {
+		preferences = &models.UserPreferences{
+			CreativityLevel:   models.CreativityBalanced,
+			AllowPlotTwists:   true,
+			ResponseLength:    "medium",
+			LanguageStyle:     "casual",
+			NotificationLevel: "important",
+			DarkMode:          false,
+		}
+	}
+
+	// 创建超时上下文
+	_, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	// 推进故事
+	storyUpdate, err := storyService.AdvanceStory(sceneID, preferences)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("推进故事失败: %v", err)})
+		return
+	}
+
+	// 获取更新后的故事数据
+	storyData, err := storyService.GetStoryData(sceneID, preferences)
+	if err != nil {
+		// 即使获取完整数据失败，也返回更新信息
+		log.Printf("Warning: Failed to get updated story data: %v", err)
+		c.JSON(http.StatusOK, gin.H{
+			"success":      true,
+			"message":      "故事已推进",
+			"story_update": storyUpdate,
+		})
+		return
+	}
+
+	// 构建分支视图数据
+	branchView := buildStoryBranchView(storyData)
+
+	// 记录API使用情况
+	if h.StatsService != nil {
+		h.StatsService.RecordAPIRequest(15) // 故事推进通常需要更多token
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":       true,
+		"message":       "故事已推进",
+		"story_update":  storyUpdate,
+		"story_data":    branchView,
+		"progress":      storyData.Progress,
+		"current_state": storyData.CurrentState,
+		"new_content":   storyUpdate.Title,
+	})
+}
+
+// RewindStory 回溯故事到指定节点
+func (h *Handler) RewindStory(c *gin.Context) {
+	sceneID := c.Param("scene_id")
+
+	var req struct {
+		NodeID string `json:"node_id" binding:"required"` // 目标节点ID
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		return
+	}
+
+	// 验证参数
+	if sceneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		return
+	}
+
+	// 获取StoryService实例
+	storyService := h.getStoryService()
+	if storyService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		return
+	}
+
+	// 创建超时上下文
+	_, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	// 执行回溯操作
+	storyData, err := storyService.RewindToNode(sceneID, req.NodeID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("回溯故事失败: %v", err)})
+		return
+	}
+
+	// 构建分支视图数据
+	branchView := buildStoryBranchView(storyData)
+
+	// 获取回溯到的节点信息
+	var targetNode *models.StoryNode
+	for i := range storyData.Nodes {
+		if storyData.Nodes[i].ID == req.NodeID {
+			targetNode = &storyData.Nodes[i]
+			break
+		}
+	}
+
+	// 记录API使用情况
+	if h.StatsService != nil {
+		h.StatsService.RecordAPIRequest(2) // 回溯操作相对简单
+	}
+
+	response := gin.H{
+		"success":        true,
+		"message":        "故事已成功回溯",
+		"story_data":     branchView,
+		"progress":       storyData.Progress,
+		"current_state":  storyData.CurrentState,
+		"target_node_id": req.NodeID,
+	}
+
+	// 添加目标节点信息（如果找到）
+	if targetNode != nil {
+		response["target_node"] = map[string]interface{}{
+			"id":         targetNode.ID,
+			"content":    targetNode.Content,
+			"type":       targetNode.Type,
+			"created_at": targetNode.CreatedAt,
+		}
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
 // GetStoryBranches 获取场景的所有故事分支
 func (h *Handler) GetStoryBranches(c *gin.Context) {
 	sceneID := c.Param("sceneId")
