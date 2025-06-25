@@ -1,3 +1,4 @@
+```http
 /api/
 ├── settings/               # 系统设置
 ├── llm/                    # LLM相关
@@ -10,3 +11,4 @@
     └── :user_id/
         ├── items/          # 道具管理
         └── skills/         # 技能管理
+```
