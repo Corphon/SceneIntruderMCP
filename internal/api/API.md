@@ -1,4 +1,4 @@
-```http
+```
 /api/
 ├── settings/               # 系统设置
 ├── llm/                    # LLM相关
