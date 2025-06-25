@@ -48,11 +48,11 @@ func SetupRouter() (*gin.Engine, error) {
 		return nil, fmt.Errorf("LLM服务未正确初始化")
 	}
 
-	// 初始化进度服务（新增）
+	// 初始化进度服务
 	progressService := services.NewProgressService()
 	container.Register("progress", progressService)
 
-	// 初始化分析服务（新增）
+	// 初始化分析服务
 	analyzerService := services.NewAnalyzerServiceWithProvider(llmService.GetProvider())
 	container.Register("analyzer", analyzerService)
 
@@ -95,116 +95,161 @@ func SetupRouter() (*gin.Engine, error) {
 	// 启用CORS
 	r.Use(corsMiddleware())
 
-	//使用HTTPS
-	/*
-		if !cfg.DebugMode { // 根据config.json中的debug_mode配置决定是否启用
-			r.Use(func(c *gin.Context) {
-				if c.Request.Header.Get("X-Forwarded-Proto") != "https" {
-					c.Redirect(http.StatusPermanentRedirect,
-						"https://"+c.Request.Host+c.Request.URL.Path)
-					return
-				}
-				c.Next()
-			})
-		}
-	*/
+	// HTTPS重定向（生产环境）
+	if !cfg.DebugMode {
+		r.Use(func(c *gin.Context) {
+			if c.Request.Header.Get("X-Forwarded-Proto") != "https" {
+				c.Redirect(http.StatusPermanentRedirect,
+					"https://"+c.Request.Host+c.Request.URL.Path)
+				return
+			}
+			c.Next()
+		})
+	}
+
 	// 静态文件服务
 	r.Static("/static", cfg.StaticDir)
 
 	// HTML模板
 	r.LoadHTMLGlob(filepath.Join(cfg.TemplatesDir, "*.html"))
 
+	// ===============================
 	// 页面路由
+	// ===============================
 	r.GET("/", handler.IndexPage)
 	r.GET("/scenes", handler.SceneSelectorPage)
 	r.GET("/scenes/create", handler.CreateScenePage)
 	r.GET("/scenes/:id", handler.ScenePage)
 	r.GET("/settings", handler.SettingsPage)
 
-	// API路由
+	// ===============================
+	// API路由组
+	// ===============================
 	api := r.Group("/api")
 	{
 		// 聚合API端点
 		api.GET("/scenes/:id/aggregate", handler.GetSceneAggregate)
 		api.POST("/interactions/aggregate", handler.ProcessInteractionAggregate)
 
+		// ===============================
 		// 设置相关路由
+		// ===============================
 		settingsGroup := api.Group("/settings")
 		{
-			settingsGroup.GET("", handler.GetSettings)                     // GET /api/settings
-			settingsGroup.POST("", handler.SaveSettings)                   // POST /api/settings
-			settingsGroup.POST("/test-connection", handler.TestConnection) // POST /api/settings/test-connection
+			settingsGroup.GET("", handler.GetSettings)
+			settingsGroup.POST("", handler.SaveSettings)
+			settingsGroup.POST("/test-connection", handler.TestConnection)
 		}
 
-		// 保留现有的细粒度API（向后兼容）
-		api.GET("/scenes", handler.GetScenes)
-		api.GET("/scenes/:id", handler.GetScene)
-		api.GET("/scenes/:id/characters", handler.GetCharacters)
-		api.POST("/chat", handler.Chat)
+		// ===============================
+		// LLM配置相关路由 - 修正和整理
+		// ===============================
+		llmGroup := api.Group("/llm")
+		{
+			llmGroup.GET("/status", handler.GetLLMStatus)    // 修正: /config/llm/status -> /llm/status
+			llmGroup.GET("/models", handler.GetLLMModels)    // 修正: 统一使用api组
+			llmGroup.PUT("/config", handler.UpdateLLMConfig) // 修正: /config/llm -> /llm/config
+		}
 
-		//LLM相关
-		api.GET("/config/llm/status", handler.GetLLMStatus)
-		r.GET("/api/llm/models", handler.GetLLMModels)
-		api.PUT("/config/llm", handler.UpdateLLMConfig)
+		// ===============================
+		// 场景相关路由 - 去除重复
+		// ===============================
+		scenesGroup := api.Group("/scenes")
+		{
+			scenesGroup.GET("", handler.GetScenes)                          // 获取场景列表
+			scenesGroup.POST("", handler.CreateScene)                       // 创建场景
+			scenesGroup.GET("/:id", handler.GetScene)                       // 获取单个场景
+			scenesGroup.GET("/:id/characters", handler.GetCharacters)       // 获取场景角色
+			scenesGroup.GET("/:id/conversations", handler.GetConversations) // 获取对话历史
 
-		// 场景相关
-		api.GET("/scenes", handler.GetScenes)
-		api.GET("/scenes/:id", handler.GetScene)
-		api.POST("/scenes", handler.CreateScene)
+			// 场景故事相关
+			scenesGroup.GET("/:id/story/branches", handler.GetStoryBranches)
+			scenesGroup.POST("/:id/story/rewind", handler.RewindStoryToNode)
 
-		// 角色相关
-		api.GET("/scenes/:id/characters", handler.GetCharacters)
+			// 场景导出相关
+			exportGroup := scenesGroup.Group("/:scene_id/export")
+			{
+				exportGroup.GET("/interactions", handler.ExportInteractionSummary)
+				exportGroup.GET("/story", handler.ExportStoryDocument)
+				exportGroup.GET("/scene", handler.ExportSceneData)
+			}
+		}
 
-		// 聊天相关
-		api.POST("/chat", handler.Chat)
-		api.GET("/scenes/:id/conversations", handler.GetConversations)
+		// ===============================
+		// 聊天相关路由
+		// ===============================
+		chatGroup := api.Group("/chat")
+		{
+			chatGroup.POST("", handler.Chat)                    // 普通聊天
+			chatGroup.POST("/emotion", handler.ChatWithEmotion) // 带情绪聊天
+		}
 
+		// ===============================
+		// 故事系统路由
+		// ===============================
+		storyGroup := api.Group("/story")
+		{
+			storyGroup.GET("/:scene_id", handler.GetStoryData)
+			storyGroup.POST("/:scene_id/choice", handler.MakeStoryChoice)
+			storyGroup.POST("/:scene_id/advance", handler.AdvanceStory)
+			storyGroup.GET("/:scene_id/branches", handler.GetStoryBranches)
+			storyGroup.POST("/:scene_id/rewind", handler.RewindStory)
+		}
+
+		// ===============================
+		// 角色互动相关路由
+		// ===============================
+		interactionsGroup := api.Group("/interactions")
+		{
+			interactionsGroup.POST("/trigger", handler.TriggerCharacterInteraction)
+			interactionsGroup.POST("/simulate", handler.SimulateCharactersConversation)
+			interactionsGroup.GET("/:scene_id", handler.GetCharacterInteractions)
+			interactionsGroup.GET("/:scene_id/:character1_id/:character2_id", handler.GetCharacterToCharacterInteractions)
+		}
+
+		// ===============================
 		// 文件上传
+		// ===============================
 		api.POST("/upload", handler.UploadFile)
 
+		// ===============================
 		// 分析和进度相关
+		// ===============================
 		api.POST("/analyze", handler.AnalyzeTextWithProgress)
 		api.GET("/progress/:taskID", handler.SubscribeProgress)
 		api.POST("/cancel/:taskID", handler.CancelAnalysisTask)
 
-		// 故事相关路由
-		api.GET("/scenes/:id/story/branches", handler.GetStoryBranches)
-		api.POST("/scenes/:id/story/rewind", handler.RewindStoryToNode)
+		// ===============================
+		// 用户管理路由 - 去除重复，统一组织
+		// ===============================
+		usersGroup := api.Group("/users/:user_id")
+		{
+			// 用户档案
+			usersGroup.GET("", handler.GetUserProfile)
+			usersGroup.PUT("", handler.UpdateUserProfile)
+			usersGroup.GET("/preferences", handler.GetUserPreferences)
+			usersGroup.PUT("/preferences", handler.UpdateUserPreferences)
 
-		// 角色情绪聊天
-		api.POST("/chat/emotion", handler.ChatWithEmotion)
+			// 道具管理
+			itemsGroup := usersGroup.Group("/items")
+			{
+				itemsGroup.GET("", handler.GetUserItems)
+				itemsGroup.POST("", handler.AddUserItem)
+				itemsGroup.GET("/:item_id", handler.GetUserItem)
+				itemsGroup.PUT("/:item_id", handler.UpdateUserItem)
+				itemsGroup.DELETE("/:item_id", handler.DeleteUserItem)
+			}
 
-		// 角色互动相关路由
-		api.POST("/interactions/trigger", handler.TriggerCharacterInteraction)
-		api.POST("/interactions/simulate", handler.SimulateCharactersConversation)
-		api.GET("/interactions/:scene_id", handler.GetCharacterInteractions)
-		api.GET("/interactions/:scene_id/:character1_id/:character2_id", handler.GetCharacterToCharacterInteractions)
-
-		// 交流导出路由
-		api.GET("/scenes/:scene_id/export/interactions", handler.ExportInteractionSummary)
-		// 故事导出路由
-		api.GET("/scenes/:scene_id/export/story", handler.ExportStoryDocument)
-		// 场景导出路由
-		api.GET("/scenes/:scene_id/export/scene", handler.ExportSceneData)
-	}
-
-	// 用户道具和技能路由
-	userItemsGroup := r.Group("/api/users/:user_id/items")
-	{
-		userItemsGroup.GET("", handler.GetUserItems)
-		userItemsGroup.POST("", handler.AddUserItem)
-		userItemsGroup.GET("/:item_id", handler.GetUserItem)
-		userItemsGroup.PUT("/:item_id", handler.UpdateUserItem)
-		userItemsGroup.DELETE("/:item_id", handler.DeleteUserItem)
-	}
-
-	userSkillsGroup := r.Group("/api/users/:user_id/skills")
-	{
-		userSkillsGroup.GET("", handler.GetUserSkills)
-		userSkillsGroup.POST("", handler.AddUserSkill)
-		userSkillsGroup.GET("/:skill_id", handler.GetUserSkill)
-		userSkillsGroup.PUT("/:skill_id", handler.UpdateUserSkill)
-		userSkillsGroup.DELETE("/:skill_id", handler.DeleteUserSkill)
+			// 技能管理
+			skillsGroup := usersGroup.Group("/skills")
+			{
+				skillsGroup.GET("", handler.GetUserSkills)
+				skillsGroup.POST("", handler.AddUserSkill)
+				skillsGroup.GET("/:skill_id", handler.GetUserSkill)
+				skillsGroup.PUT("/:skill_id", handler.UpdateUserSkill)
+				skillsGroup.DELETE("/:skill_id", handler.DeleteUserSkill)
+			}
+		}
 	}
 
 	return r, nil
