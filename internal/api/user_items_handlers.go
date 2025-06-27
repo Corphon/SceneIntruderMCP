@@ -10,8 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// 用户道具相关处理器
-// ----------------------------------------
+// 用户道具相关处理器----------------------------------------
 
 // AddUserItem 添加用户自定义道具
 func (h *Handler) AddUserItem(c *gin.Context) {
@@ -23,7 +22,9 @@ func (h *Handler) AddUserItem(c *gin.Context) {
 		return
 	}
 
-	if err := h.UserService.AddUserItem(userID, item); err != nil {
+	// 修正：确保方法签名匹配
+	err := h.UserService.AddUserItem(userID, item)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("添加道具失败: %v", err)})
 		return
 	}
@@ -69,7 +70,8 @@ func (h *Handler) UpdateUserItem(c *gin.Context) {
 		return
 	}
 
-	if err := h.UserService.UpdateUserItem(userID, itemID, item); err != nil {
+	err := h.UserService.UpdateUserItem(userID, itemID, item)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("更新道具失败: %v", err)})
 		return
 	}
@@ -103,7 +105,8 @@ func (h *Handler) AddUserSkill(c *gin.Context) {
 		return
 	}
 
-	if err := h.UserService.AddUserSkill(userID, skill); err != nil {
+	err := h.UserService.AddUserSkill(userID, skill)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("添加技能失败: %v", err)})
 		return
 	}
@@ -149,7 +152,8 @@ func (h *Handler) UpdateUserSkill(c *gin.Context) {
 		return
 	}
 
-	if err := h.UserService.UpdateUserSkill(userID, skillID, skill); err != nil {
+	err := h.UserService.UpdateUserSkill(userID, skillID, skill)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("更新技能失败: %v", err)})
 		return
 	}
@@ -162,7 +166,8 @@ func (h *Handler) DeleteUserSkill(c *gin.Context) {
 	userID := c.Param("user_id")
 	skillID := c.Param("skill_id")
 
-	if err := h.UserService.DeleteUserSkill(userID, skillID); err != nil {
+	err := h.UserService.DeleteUserSkill(userID, skillID)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("删除技能失败: %v", err)})
 		return
 	}
