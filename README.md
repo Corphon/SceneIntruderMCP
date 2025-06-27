@@ -7,11 +7,11 @@
 **🎭 AI-Powered Immersive Interactive Storytelling Platform**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
-English | [简体中文](README_CN.md)
+English | [简体中文](README_EN.md)
 
 </div>
 
@@ -206,53 +206,243 @@ Open browser: http://localhost:8080
 
 #### Scene Management
 ```http
-GET    /api/scenes                    # Get scene list
-POST   /api/scenes                    # Create scene  
-GET    /api/scenes/{id}               # Get scene details
-GET    /api/scenes/{id}/characters    # Get scene characters
-GET    /api/scenes/{id}/aggregate     # Get scene aggregate data
+GET    /api/scenes                      # Get scene list
+POST   /api/scenes                      # Create scene  
+GET    /api/scenes/{id}                 # Get scene details
+GET    /api/scenes/{id}/characters      # Get scene characters
+GET    /api/scenes/{id}/conversations   # Get scene conversations
+GET    /api/scenes/{id}/aggregate       # Get scene aggregate data
 ```
 
-#### Text Analysis
+#### Story System
 ```http
-POST   /api/analyze                   # Analyze text content
-GET    /api/progress/{taskID}         # Get analysis progress
-POST   /api/cancel/{taskID}           # Cancel analysis task
-POST   /api/upload                    # Upload file
+GET    /api/scenes/{id}/story           # Get story data
+POST   /api/scenes/{id}/story/choice    # Make story choice
+POST   /api/scenes/{id}/story/advance   # Advance story
+POST   /api/scenes/{id}/story/rewind    # Rewind story
+GET    /api/scenes/{id}/story/branches  # Get story branches
+POST   /api/scenes/{id}/story/rewind    # Rewind story to specific node
 ```
 
-#### Character Interaction
+#### Export Functions
 ```http
-POST   /api/chat                      # Chat with characters
-POST   /api/interactions/trigger      # Trigger character interactions
-POST   /api/interactions/simulate     # Simulate character dialogue
-POST   /api/interactions/aggregate    # Aggregate interaction processing
-GET    /api/interactions/{scene_id}   # Get interaction history
-GET    /api/conversations/{scene_id}  # Get conversation history
+GET    /api/scenes/{id}/export/scene        # Export scene data
+GET    /api/scenes/{id}/export/interactions # Export interactions
+GET    /api/scenes/{id}/export/story        # Export story document
 ```
 
-#### System Configuration
+#### Text Analysis & File Upload
 ```http
-GET    /api/settings                  # Get system settings
-POST   /api/settings                  # Update system settings
-POST   /api/settings/test-connection  # Test connection
-GET    /api/llm/models               # Get available models
+POST   /api/analyze                     # Analyze text content
+GET    /api/progress/{taskID}           # Get analysis progress
+POST   /api/cancel/{taskID}             # Cancel analysis task
+POST   /api/upload                      # Upload file
 ```
 
-#### User Items & Skills System
+#### Character Interaction & Chat
 ```http
+POST   /api/chat                        # Basic chat with characters
+POST   /api/chat/emotion                # Chat with emotion analysis
+POST   /api/interactions/trigger        # Trigger character interactions
+POST   /api/interactions/simulate       # Simulate character dialogue
+POST   /api/interactions/aggregate      # Aggregate interaction processing
+GET    /api/interactions/{scene_id}     # Get interaction history
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # Get specific character interactions
+```
+
+#### System Configuration & LLM Management
+```http
+GET    /api/settings                    # Get system settings
+POST   /api/settings                    # Update system settings
+POST   /api/settings/test-connection    # Test connection
+
+GET    /api/llm/status                  # Get LLM service status
+GET    /api/llm/models                  # Get available models
+PUT    /api/llm/config                  # Update LLM configuration
+```
+
+#### User Management System
+```http
+# User Profile
+GET    /api/users/{user_id}             # Get user profile
+PUT    /api/users/{user_id}             # Update user profile
+GET    /api/users/{user_id}/preferences # Get user preferences
+PUT    /api/users/{user_id}/preferences # Update user preferences
+
+# User Items Management
 GET    /api/users/{user_id}/items           # Get user items
-POST   /api/users/{user_id}/items          # Add user item
+POST   /api/users/{user_id}/items           # Add user item
 GET    /api/users/{user_id}/items/{item_id} # Get specific item
 PUT    /api/users/{user_id}/items/{item_id} # Update user item
 DELETE /api/users/{user_id}/items/{item_id} # Delete user item
 
+# User Skills Management
 GET    /api/users/{user_id}/skills           # Get user skills
-POST   /api/users/{user_id}/skills          # Add user skill
+POST   /api/users/{user_id}/skills           # Add user skill
 GET    /api/users/{user_id}/skills/{skill_id} # Get specific skill
 PUT    /api/users/{user_id}/skills/{skill_id} # Update user skill
 DELETE /api/users/{user_id}/skills/{skill_id} # Delete user skill
 ```
+
+#### WebSocket Support
+```http
+WS     /ws/scene/{id}                   # Scene WebSocket connection
+WS     /ws/user/status                  # User status WebSocket connection
+```
+
+#### Debug & Development
+```http
+GET    /api/ws/status                   # Get WebSocket connection status
+```
+
+### 📋 **API Usage Examples**
+
+#### Story Interaction Flow
+```javascript
+// 1. Get story data
+const storyData = await fetch('/api/scenes/scene123/story');
+
+// 2. Make a choice
+const choiceResult = await fetch('/api/scenes/scene123/story/choice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        node_id: 'node_1',
+        choice_id: 'choice_a'
+    })
+});
+
+// 3. Export story
+const storyExport = await fetch('/api/scenes/scene123/export/story?format=markdown');
+```
+
+#### Character Interaction
+```javascript
+// 1. Basic chat
+const chatResponse = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        scene_id: 'scene123',
+        character_id: 'char456',
+        message: 'Hello, how are you?'
+    })
+});
+
+// 2. Trigger character interaction
+const interaction = await fetch('/api/interactions/trigger', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        scene_id: 'scene123',
+        character_ids: ['char1', 'char2'],
+        topic: 'Discussing the mysterious artifact'
+    })
+});
+```
+
+#### User Customization
+```javascript
+// 1. Add custom item
+const newItem = await fetch('/api/users/user123/items', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        name: 'Magic Sword',
+        description: 'A legendary sword with mystical powers',
+        type: 'weapon',
+        properties: { attack: 50, magic: 30 }
+    })
+});
+
+// 2. Add skill
+const newSkill = await fetch('/api/users/user123/skills', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        name: 'Fireball',
+        description: 'Cast a powerful fireball spell',
+        type: 'magic',
+        level: 3
+    })
+});
+```
+
+### 🔗 **WebSocket Integration**
+
+#### Scene WebSocket Connection
+```javascript
+// Connect to scene WebSocket
+const sceneWs = new WebSocket(`ws://localhost:8080/ws/scene/scene123?user_id=user456`);
+
+sceneWs.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log('Scene update:', data);
+};
+
+// Send character interaction
+sceneWs.send(JSON.stringify({
+    type: 'character_interaction',
+    character_id: 'char123',
+    message: 'Hello everyone!'
+}));
+```
+
+#### User Status WebSocket
+```javascript
+// Connect to user status WebSocket
+const statusWs = new WebSocket(`ws://localhost:8080/ws/user/status?user_id=user456`);
+
+statusWs.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'heartbeat') {
+        console.log('Connection alive');
+    }
+};
+```
+
+### 📊 **Response Formats**
+
+#### Standard Success Response
+```json
+{
+    "success": true,
+    "data": {
+        // Response data
+    },
+    "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+#### Error Response
+```json
+{
+    "success": false,
+    "error": "Error message description",
+    "code": "ERROR_CODE",
+    "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+#### Export Response
+```json
+{
+    "file_path": "/exports/story_20240101_120000.md",
+    "content": "# Story Export\n\n...",
+    "format": "markdown",
+    "size": 1024,
+    "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+### 🛡️ **Authentication & Security**
+
+Currently, the API uses session-based authentication for user management. For production deployment, consider implementing:
+
+- **JWT Authentication**: Token-based authentication for API access
+- **Rate Limiting**: API call frequency limits
+- **Input Validation**: Strict parameter validation and sanitization
+- **HTTPS Only**: Force HTTPS for all production traffic
 
 For detailed API documentation, see: [API Documentation](docs/api.md)
 
@@ -365,7 +555,7 @@ Thanks to all developers and users who have contributed to this project!
 - **Project Homepage**: [GitHub Repository](https://github.com/Corphon/SceneIntruderMCP)
 - **Issue Reports**: [GitHub Issues](https://github.com/Corphon/SceneIntruderMCP/issues)
 - **Feature Requests**: [GitHub Discussions](https://github.com/Corphon/SceneIntruderMCP/discussions)
-- **Email Contact**: [songkf@foxmail.com](mailto:songkf@foxmail.com)
+- **Email Contact**: [project@sceneintruder.dev](mailto:songkf@foxmail.com)
 
 ---
 
