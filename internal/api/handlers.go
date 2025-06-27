@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
@@ -19,7 +20,42 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
 	"github.com/Corphon/SceneIntruderMCP/internal/services"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
+
+// WebSocket 升级器配置
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		// 在生产环境中应该进行更严格的检查
+		return true
+	},
+}
+
+// WebSocket 连接管理器
+type WebSocketManager struct {
+	connections map[string]map[*websocket.Conn]bool // sceneID -> connections
+	broadcast   chan []byte
+	register    chan *WebSocketClient
+	unregister  chan *WebSocketClient
+	mutex       sync.RWMutex
+}
+
+type WebSocketClient struct {
+	conn    *websocket.Conn
+	sceneID string
+	userID  string
+	send    chan []byte
+}
+
+// 全局 WebSocket 管理器
+var wsManager = &WebSocketManager{
+	connections: make(map[string]map[*websocket.Conn]bool),
+	broadcast:   make(chan []byte),
+	register:    make(chan *WebSocketClient),
+	unregister:  make(chan *WebSocketClient),
+}
 
 // Handler 处理API请求
 type Handler struct {
@@ -50,6 +86,569 @@ type SimulateConversationRequest struct {
 	NumberOfTurns    int      `json:"number_of_turns"`   // 对话轮数
 }
 
+// -----------------------------------------------------------------------------
+// 初始化 WebSocket 管理器
+func init() {
+	go wsManager.run()
+}
+
+// 运行 WebSocket 管理器
+func (manager *WebSocketManager) run() {
+	for {
+		select {
+		case client := <-manager.register:
+			manager.mutex.Lock()
+			if manager.connections[client.sceneID] == nil {
+				manager.connections[client.sceneID] = make(map[*websocket.Conn]bool)
+			}
+			manager.connections[client.sceneID][client.conn] = true
+			manager.mutex.Unlock()
+
+			log.Printf("✅ WebSocket 客户端已连接到场景 %s", client.sceneID)
+
+		case client := <-manager.unregister:
+			manager.mutex.Lock()
+			if connections, ok := manager.connections[client.sceneID]; ok {
+				if _, ok := connections[client.conn]; ok {
+					delete(connections, client.conn)
+					close(client.send)
+
+					// 如果场景没有连接了，清理映射
+					if len(connections) == 0 {
+						delete(manager.connections, client.sceneID)
+					}
+				}
+			}
+			manager.mutex.Unlock()
+
+			log.Printf("❌ WebSocket 客户端已断开场景 %s", client.sceneID)
+
+		case message := <-manager.broadcast:
+			manager.mutex.RLock()
+			for _, connections := range manager.connections {
+				for conn := range connections {
+					if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+						log.Printf("❌ 广播消息失败: %v", err)
+						conn.Close()
+						delete(connections, conn)
+					}
+				}
+			}
+			manager.mutex.RUnlock()
+		}
+	}
+}
+
+// SceneWebSocket 处理场景 WebSocket 连接
+func (h *Handler) SceneWebSocket(c *gin.Context) {
+	sceneID := c.Param("id")
+
+	// 验证场景是否存在
+	_, err := h.SceneService.LoadScene(sceneID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "场景不存在"})
+		return
+	}
+
+	// 升级 HTTP 连接到 WebSocket
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("❌ WebSocket 升级失败: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// 获取用户ID（从查询参数或会话中）
+	userID := c.DefaultQuery("user_id", "anonymous")
+
+	// 创建客户端
+	client := &WebSocketClient{
+		conn:    conn,
+		sceneID: sceneID,
+		userID:  userID,
+		send:    make(chan []byte, 256),
+	}
+
+	// 注册客户端
+	wsManager.register <- client
+	defer func() {
+		wsManager.unregister <- client
+	}()
+
+	// 启动读写协程
+	go h.handleWebSocketWrites(client)
+	go h.handleWebSocketReads(client)
+
+	// 发送连接确认消息
+	welcomeMsg := map[string]interface{}{
+		"type":      "connected",
+		"scene_id":  sceneID,
+		"user_id":   userID,
+		"timestamp": time.Now().Format(time.RFC3339),
+		"message":   "WebSocket 连接已建立",
+	}
+
+	if msgBytes, err := json.Marshal(welcomeMsg); err == nil {
+		select {
+		case client.send <- msgBytes:
+		default:
+			// 队列满，跳过初始消息
+		}
+	}
+
+	// 保持连接活跃 - 使用更好的方式
+	<-c.Request.Context().Done()
+	log.Printf("📱 场景 %s 的 WebSocket 连接已关闭", sceneID)
+}
+
+// UserStatusWebSocket 处理用户状态 WebSocket 连接
+func (h *Handler) UserStatusWebSocket(c *gin.Context) {
+	// 升级 HTTP 连接到 WebSocket
+	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("❌ 用户状态 WebSocket 升级失败: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// 获取用户ID
+	userID := c.DefaultQuery("user_id", "anonymous")
+	log.Printf("📱 用户状态 WebSocket 连接已建立: %s", userID)
+
+	// 创建客户端
+	client := &WebSocketClient{
+		conn:    conn,
+		sceneID: "user_status", // 特殊的场景ID用于用户状态
+		userID:  userID,
+		send:    make(chan []byte, 256),
+	}
+
+	// 注册客户端
+	wsManager.register <- client
+	defer func() {
+		wsManager.unregister <- client
+	}()
+
+	// 启动读写协程
+	go h.handleWebSocketWrites(client)
+	go h.handleWebSocketReads(client)
+
+	// 发送连接确认消息
+	welcomeMsg := map[string]interface{}{
+		"type":      "user_status_connected",
+		"user_id":   userID,
+		"timestamp": time.Now().Format(time.RFC3339),
+		"message":   "用户状态连接已建立",
+	}
+	if msgBytes, err := json.Marshal(welcomeMsg); err == nil {
+		select {
+		case client.send <- msgBytes:
+		default:
+			// 队列满，跳过初始消息
+		}
+	}
+
+	// 定期发送心跳和状态更新
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// 发送心跳消息
+			heartbeat := map[string]interface{}{
+				"type":      "heartbeat",
+				"timestamp": time.Now().Unix(),
+			}
+			if msgBytes, err := json.Marshal(heartbeat); err == nil {
+				select {
+				case client.send <- msgBytes:
+				default:
+					return // 客户端断开连接
+				}
+			}
+		case <-c.Request.Context().Done():
+			// HTTP 请求上下文取消，退出循环
+			return
+		}
+	}
+}
+
+// handleWebSocketReads 处理 WebSocket 读取
+func (h *Handler) handleWebSocketReads(client *WebSocketClient) {
+	defer func() {
+		wsManager.unregister <- client
+		client.conn.Close()
+	}()
+
+	// 设置读取超时
+	client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	client.conn.SetPongHandler(func(string) error {
+		client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		return nil
+	})
+
+	for {
+		var message map[string]interface{}
+		err := client.conn.ReadJSON(&message)
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				log.Printf("❌ WebSocket 读取错误: %v", err)
+			}
+			break
+		}
+
+		// 处理收到的消息
+		h.handleWebSocketMessage(client, message)
+	}
+}
+
+// handleWebSocketWrites 处理 WebSocket 写入
+func (h *Handler) handleWebSocketWrites(client *WebSocketClient) {
+	ticker := time.NewTicker(54 * time.Second)
+	defer func() {
+		ticker.Stop()
+		client.conn.Close()
+	}()
+
+	for {
+		select {
+		case message, ok := <-client.send:
+			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if !ok {
+				client.conn.WriteMessage(websocket.CloseMessage, []byte{})
+				return
+			}
+
+			if err := client.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				return
+			}
+
+		case <-ticker.C:
+			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// handleWebSocketMessage 处理 WebSocket 消息
+func (h *Handler) handleWebSocketMessage(client *WebSocketClient, message map[string]interface{}) {
+	msgType, ok := message["type"].(string)
+	if !ok {
+		log.Printf("⚠️ 收到无效的消息类型")
+		return
+	}
+
+	switch msgType {
+	case "character_interaction":
+		h.handleCharacterInteractionMessage(client, message)
+
+	case "story_choice":
+		h.handleStoryChoiceMessage(client, message)
+
+	case "user_status_update":
+		h.handleUserStatusUpdateMessage(client, message)
+
+	case "ping":
+		// 响应 ping 消息
+		pong := map[string]interface{}{
+			"type":      "pong",
+			"timestamp": time.Now().Unix(),
+		}
+		if msgBytes, err := json.Marshal(pong); err == nil {
+			select {
+			case client.send <- msgBytes:
+			default:
+				// 发送队列满，跳过
+			}
+		}
+
+	default:
+		log.Printf("⚠️ 未知的消息类型: %s", msgType)
+	}
+}
+
+// handleCharacterInteractionMessage 处理角色交互消息
+func (h *Handler) handleCharacterInteractionMessage(client *WebSocketClient, message map[string]interface{}) {
+	characterID, ok := message["character_id"].(string)
+	if !ok {
+		h.sendErrorMessage(client, "缺少角色ID")
+		return
+	}
+
+	userMessage, ok := message["message"].(string)
+	if !ok {
+		h.sendErrorMessage(client, "缺少消息内容")
+		return
+	}
+
+	// 生成角色回应
+	response, err := h.CharacterService.GenerateResponse(client.sceneID, characterID, userMessage)
+	if err != nil {
+		h.sendErrorMessage(client, "生成回应失败: "+err.Error())
+		return
+	}
+
+	// 广播新对话给场景中的所有客户端
+	conversationMsg := map[string]interface{}{
+		"type":         "conversation:new",
+		"scene_id":     client.sceneID,
+		"character_id": characterID,
+		"speaker_id":   characterID,
+		"conversation": response,
+		"timestamp":    time.Now().Format(time.RFC3339),
+	}
+
+	h.broadcastToScene(client.sceneID, conversationMsg)
+}
+
+// handleStoryChoiceMessage 处理故事选择消息
+func (h *Handler) handleStoryChoiceMessage(client *WebSocketClient, message map[string]interface{}) {
+	nodeID, ok := message["node_id"].(string)
+	if !ok {
+		h.sendErrorMessage(client, "缺少节点ID")
+		return
+	}
+
+	choiceID, ok := message["choice_id"].(string)
+	if !ok {
+		h.sendErrorMessage(client, "缺少选择ID")
+		return
+	}
+
+	// 获取故事服务
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.sendErrorMessage(client, "故事服务未初始化")
+		return
+	}
+
+	// 执行故事选择
+	nextNode, err := storyService.MakeChoice(client.sceneID, nodeID, choiceID, nil)
+	if err != nil {
+		h.sendErrorMessage(client, "执行故事选择失败: "+err.Error())
+		return
+	}
+
+	// 广播故事更新给场景中的所有客户端
+	storyUpdateMsg := map[string]interface{}{
+		"type":      "story:choice_made",
+		"scene_id":  client.sceneID,
+		"node_id":   nodeID,
+		"choice_id": choiceID,
+		"next_node": nextNode,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	h.broadcastToScene(client.sceneID, storyUpdateMsg)
+}
+
+// handleUserStatusUpdateMessage 处理用户状态更新消息
+func (h *Handler) handleUserStatusUpdateMessage(client *WebSocketClient, message map[string]interface{}) {
+	status, ok := message["status"].(string)
+	if !ok {
+		h.sendErrorMessage(client, "缺少状态信息")
+		return
+	}
+
+	// 广播用户状态更新
+	statusUpdateMsg := map[string]interface{}{
+		"type":      "user:presence",
+		"user_id":   client.userID,
+		"scene_id":  client.sceneID,
+		"status":    status,
+		"action":    message["action"], // joined, left, etc.
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	h.broadcastToScene(client.sceneID, statusUpdateMsg)
+}
+
+// sendErrorMessage 发送错误消息给客户端
+func (h *Handler) sendErrorMessage(client *WebSocketClient, errorMsg string) {
+	errorResponse := map[string]interface{}{
+		"type":      "error",
+		"error":     errorMsg,
+		"timestamp": time.Now().Format(time.RFC3339),
+	}
+
+	if msgBytes, err := json.Marshal(errorResponse); err == nil {
+		select {
+		case client.send <- msgBytes:
+		default:
+			// 客户端发送队列已满，跳过
+			log.Printf("⚠️ 无法发送错误消息到客户端，队列已满")
+		}
+	}
+}
+
+// broadcastToScene 向场景中的所有客户端广播消息
+func (h *Handler) broadcastToScene(sceneID string, message map[string]interface{}) {
+	msgBytes, err := json.Marshal(message)
+	if err != nil {
+		log.Printf("❌ 序列化广播消息失败: %v", err)
+		return
+	}
+
+	wsManager.mutex.RLock()
+	connections, exists := wsManager.connections[sceneID]
+	wsManager.mutex.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	for conn := range connections {
+		if err := conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
+			log.Printf("❌ 广播消息失败: %v", err)
+			conn.Close()
+
+			// 清理断开的连接
+			wsManager.mutex.Lock()
+			delete(connections, conn)
+			wsManager.mutex.Unlock()
+		}
+	}
+}
+
+// BroadcastToScene 提供外部调用的广播方法
+func (h *Handler) BroadcastToScene(sceneID string, message map[string]interface{}) {
+	h.broadcastToScene(sceneID, message)
+}
+
+// GetWebSocketStatus 获取 WebSocket 连接状态（调试用）
+func (h *Handler) GetWebSocketStatus(c *gin.Context) {
+	wsManager.mutex.RLock()
+	status := make(map[string]int)
+	totalConnections := 0
+
+	for sceneID, connections := range wsManager.connections {
+		count := len(connections)
+		status[sceneID] = count
+		totalConnections += count
+	}
+	wsManager.mutex.RUnlock()
+
+	c.JSON(http.StatusOK, gin.H{
+		"total_connections": totalConnections,
+		"scene_connections": status,
+		"timestamp":         time.Now().Format(time.RFC3339),
+	})
+}
+
+// ========================================
+// 导出功能处理器
+// ========================================
+
+// ExportScene 导出场景数据
+func (h *Handler) ExportScene(c *gin.Context) {
+	sceneID := c.Param("id")
+	format := c.DefaultQuery("format", "json")
+	includeConversations := c.DefaultQuery("include_conversations", "false") == "true"
+
+	// 获取导出服务
+	exportService := h.getExportService()
+	if exportService == nil {
+		h.respondWithError(c, http.StatusInternalServerError, "导出服务未初始化")
+		return
+	}
+
+	// 导出场景数据
+	result, err := exportService.ExportSceneData(c.Request.Context(), sceneID, format, includeConversations)
+	if err != nil {
+		h.respondWithError(c, http.StatusInternalServerError, "导出场景数据失败: "+err.Error())
+		return
+	}
+
+	// 统一处理导出响应
+	h.handleExportResponse(c, result, format)
+}
+
+// ExportInteractions 导出互动摘要
+func (h *Handler) ExportInteractions(c *gin.Context) {
+	sceneID := c.Param("id")
+	format := c.DefaultQuery("format", "json")
+
+	// 获取导出服务
+	exportService := h.getExportService()
+	if exportService == nil {
+		h.respondWithError(c, http.StatusInternalServerError, "导出服务未初始化")
+		return
+	}
+
+	// 导出互动摘要
+	result, err := exportService.ExportInteractionSummary(c.Request.Context(), sceneID, format)
+	if err != nil {
+		h.respondWithError(c, http.StatusInternalServerError, "导出互动摘要失败: "+err.Error())
+		return
+	}
+
+	// 统一处理导出响应
+	h.handleExportResponse(c, result, format)
+}
+
+// ExportStory 导出故事文档
+func (h *Handler) ExportStory(c *gin.Context) {
+	sceneID := c.Param("id")
+	format := c.DefaultQuery("format", "json")
+
+	// 获取导出服务
+	exportService := h.getExportService()
+	if exportService == nil {
+		h.respondWithError(c, http.StatusInternalServerError, "导出服务未初始化")
+		return
+	}
+
+	// 导出故事文档
+	result, err := exportService.ExportStoryAsDocument(c.Request.Context(), sceneID, format)
+	if err != nil {
+		h.respondWithError(c, http.StatusInternalServerError, "导出故事文档失败: "+err.Error())
+		return
+	}
+
+	// 统一处理导出响应
+	h.handleExportResponse(c, result, format)
+}
+
+// getExportService 获取导出服务实例
+func (h *Handler) getExportService() *services.ExportService {
+	container := di.GetContainer()
+
+	// 尝试从容器获取
+	if service, ok := container.Get("export").(*services.ExportService); ok {
+		return service
+	}
+
+	// 如果不存在，创建新实例
+	exportService := services.NewExportService(h.ContextService, h.getStoryService(), h.SceneService)
+
+	// 注册到容器
+	container.Register("export", exportService)
+
+	return exportService
+}
+
+// handleExportResponse 统一处理导出响应
+func (h *Handler) handleExportResponse(c *gin.Context, result *models.ExportResult, format string) {
+	switch strings.ToLower(format) {
+	case "json":
+		c.JSON(http.StatusOK, result)
+	case "markdown", "txt":
+		c.Header("Content-Type", "text/plain; charset=utf-8")
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(result.FilePath)))
+		c.String(http.StatusOK, result.Content)
+	case "html":
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(result.FilePath)))
+		c.String(http.StatusOK, result.Content)
+	default:
+		c.JSON(http.StatusOK, result)
+	}
+}
+
+// ---------------------------------------------------------
 // NewHandler 创建API处理器
 func NewHandler(
 	sceneService *services.SceneService,
@@ -155,7 +754,7 @@ func (h *Handler) Chat(c *gin.Context) {
 
 // GetConversations 获取对话历史
 func (h *Handler) GetConversations(c *gin.Context) {
-	sceneID := c.Param("sceneId")
+	sceneID := c.Param("id")
 	limitStr := c.DefaultQuery("limit", "20")
 
 	var limit int
@@ -431,7 +1030,7 @@ func (h *Handler) ChatWithEmotion(c *gin.Context) {
 
 // GetStoryData 获取指定场景的故事数据
 func (h *Handler) GetStoryData(c *gin.Context) {
-	sceneID := c.Param("scene_id")
+	sceneID := c.Param("id")
 	storyService := h.getStoryService()
 
 	storyData, err := storyService.GetStoryData(sceneID, nil)
@@ -1766,4 +2365,30 @@ func (h *Handler) ExportInteractionSummary(c *gin.Context) {
 	default:
 		c.JSON(http.StatusOK, result)
 	}
+}
+
+// 故事视图页面处理器
+func (h *Handler) StoryViewPage(c *gin.Context) {
+	sceneID := c.Param("id")
+	sceneData, err := h.SceneService.LoadScene(sceneID)
+	if err != nil {
+		c.HTML(http.StatusNotFound, "error.html", gin.H{
+			"error": "Scene not found",
+		})
+		return
+	}
+
+	c.HTML(http.StatusOK, "story_view.html", gin.H{
+		"scene":      sceneData.Scene,
+		"characters": sceneData.Characters,
+	})
+}
+
+// 标准化错误响应格式
+func (h *Handler) respondWithError(c *gin.Context, statusCode int, message string) {
+	c.JSON(statusCode, gin.H{
+		"error":     message,
+		"timestamp": time.Now().Format(time.RFC3339),
+		"path":      c.Request.URL.Path,
+	})
 }
