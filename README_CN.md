@@ -7,7 +7,7 @@
 **🎭 AI驱动的沉浸式互动叙事平台**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
@@ -42,16 +42,11 @@ SceneIntruderMCP 是一个革命性的AI驱动互动叙事平台，它将传统�
 - **进度追踪**: 实时故事完成度和统计分析
 
 #### 🔗 **多LLM支持**
-- **OpenAI GPT**: GPT-4.1/4o 系列
-- **Anthropic Claude**: Claude-4/3.7 系列
+- **OpenAI GPT**: GPT-3.5/4/4o 系列
+- **Anthropic Claude**: Claude-3/3.5 系列
 - **DeepSeek**: 中文优化模型
-- **Google Gemini**: Gemini-2.5/2.0 系列
-- **Grok**: xAI的Grok3/2模型
-- **Mistral**: Mistral系列模型
-- **Qwen**: 阿里云千问qwen3系列
-- **GitHub Models**: 通过GitHub Models平台
-- **OpenRouter**: 开源模型聚合平台
-- **GLM**: 智谱AI的GLM-4系列
+- **Google Gemini**: Gemini-2.0 系列
+- **开源模型**: 通过 OpenRouter/GitHub Models 支持
 
 ## 🏗️ 技术架构
 
@@ -200,61 +195,331 @@ go build -o sceneintruder cmd/server/main.go
 2. **故事文档**: 生成结构化的故事文档
 3. **统计分析**: 角色互动和故事进展统计
 
-## 🛠️ API文档
+## 🛠️ API 接口文档
 
-### 🔗 实际可用的API端点
+### 🔗 实际可用的 API 端点
 
 #### 场景管理
 ```http
-GET    /api/scenes                    # 获取场景列表
-POST   /api/scenes                    # 创建场景  
-GET    /api/scenes/{id}               # 获取场景详情
-GET    /api/scenes/{id}/characters    # 获取场景角色
-GET    /api/scenes/{id}/aggregate     # 获取场景聚合数据
+GET    /api/scenes                      # 获取场景列表
+POST   /api/scenes                      # 创建场景  
+GET    /api/scenes/{id}                 # 获取场景详情
+GET    /api/scenes/{id}/characters      # 获取场景角色
+GET    /api/scenes/{id}/conversations   # 获取场景对话
+GET    /api/scenes/{id}/aggregate       # 获取场景聚合数据
 ```
 
-#### 文本分析
+#### 故事系统
 ```http
-POST   /api/analyze                   # 分析文本内容
-GET    /api/progress/{taskID}         # 获取分析进度
-POST   /api/cancel/{taskID}           # 取消分析任务
-POST   /api/upload                    # 上传文件
+GET    /api/scenes/{id}/story           # 获取故事数据
+POST   /api/scenes/{id}/story/choice    # 进行故事选择
+POST   /api/scenes/{id}/story/advance   # 推进故事情节
+POST   /api/scenes/{id}/story/rewind    # 回溯故事
+GET    /api/scenes/{id}/story/branches  # 获取故事分支
+POST   /api/scenes/{id}/story/rewind    # 回溯到指定故事节点
 ```
 
-#### 角色互动
+#### 导出功能
 ```http
-POST   /api/chat                      # 与角色对话
-POST   /api/interactions/trigger      # 触发角色互动
-POST   /api/interactions/simulate     # 模拟角色对话
-POST   /api/interactions/aggregate    # 聚合交互处理
-GET    /api/interactions/{scene_id}   # 获取互动历史
-GET    /api/conversations/{scene_id}  # 获取对话历史
+GET    /api/scenes/{id}/export/scene        # 导出场景数据
+GET    /api/scenes/{id}/export/interactions # 导出互动记录
+GET    /api/scenes/{id}/export/story        # 导出故事文档
 ```
 
-#### 系统配置
+#### 文本分析与文件上传
 ```http
-GET    /api/settings                  # 获取系统设置
-POST   /api/settings                  # 更新系统设置
-POST   /api/settings/test-connection  # 测试连接
-GET    /api/llm/models               # 获取可用模型
+POST   /api/analyze                     # 分析文本内容
+GET    /api/progress/{taskID}           # 获取分析进度
+POST   /api/cancel/{taskID}             # 取消分析任务
+POST   /api/upload                      # 上传文件
 ```
 
-#### 用户道具和技能系统
+#### 角色互动与聊天
 ```http
+POST   /api/chat                        # 基础角色聊天
+POST   /api/chat/emotion                # 带情绪分析的聊天
+POST   /api/interactions/trigger        # 触发角色互动
+POST   /api/interactions/simulate       # 模拟角色对话
+POST   /api/interactions/aggregate      # 聚合互动处理
+GET    /api/interactions/{scene_id}     # 获取互动历史
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # 获取特定角色间互动
+```
+
+#### 系统配置与 LLM 管理
+```http
+GET    /api/settings                    # 获取系统设置
+POST   /api/settings                    # 更新系统设置
+POST   /api/settings/test-connection    # 测试连接
+
+GET    /api/llm/status                  # 获取 LLM 服务状态
+GET    /api/llm/models                  # 获取可用模型
+PUT    /api/llm/config                  # 更新 LLM 配置
+```
+
+#### 用户管理系统
+```http
+# 用户档案
+GET    /api/users/{user_id}             # 获取用户档案
+PUT    /api/users/{user_id}             # 更新用户档案
+GET    /api/users/{user_id}/preferences # 获取用户偏好
+PUT    /api/users/{user_id}/preferences # 更新用户偏好
+
+# 用户道具管理
 GET    /api/users/{user_id}/items           # 获取用户道具
-POST   /api/users/{user_id}/items          # 添加用户道具
+POST   /api/users/{user_id}/items           # 添加用户道具
 GET    /api/users/{user_id}/items/{item_id} # 获取特定道具
 PUT    /api/users/{user_id}/items/{item_id} # 更新用户道具
 DELETE /api/users/{user_id}/items/{item_id} # 删除用户道具
 
+# 用户技能管理
 GET    /api/users/{user_id}/skills           # 获取用户技能
-POST   /api/users/{user_id}/skills          # 添加用户技能
+POST   /api/users/{user_id}/skills           # 添加用户技能
 GET    /api/users/{user_id}/skills/{skill_id} # 获取特定技能
 PUT    /api/users/{user_id}/skills/{skill_id} # 更新用户技能
 DELETE /api/users/{user_id}/skills/{skill_id} # 删除用户技能
 ```
 
-详细API文档请参考: [API文档](docs/api_cn.md)
+#### WebSocket 支持
+```http
+WS     /ws/scene/{id}                   # 场景 WebSocket 连接
+WS     /ws/user/status                  # 用户状态 WebSocket 连接
+```
+
+#### 调试与开发
+```http
+GET    /api/ws/status                   # 获取 WebSocket 连接状态
+```
+
+### 📋 **API 使用示例**
+
+#### 故事互动流程
+```javascript
+// 1. 获取故事数据
+const storyData = await fetch('/api/scenes/scene123/story');
+
+// 2. 进行故事选择
+const choiceResult = await fetch('/api/scenes/scene123/story/choice', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        node_id: 'node_1',
+        choice_id: 'choice_a'
+    })
+});
+
+// 3. 导出故事
+const storyExport = await fetch('/api/scenes/scene123/export/story?format=markdown');
+```
+
+#### 角色互动
+```javascript
+// 1. 基础聊天
+const chatResponse = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        scene_id: 'scene123',
+        character_id: 'char456',
+        message: '你好，最近怎么样？'
+    })
+});
+
+// 2. 触发角色互动
+const interaction = await fetch('/api/interactions/trigger', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        scene_id: 'scene123',
+        character_ids: ['char1', 'char2'],
+        topic: '讨论神秘的古老文物'
+    })
+});
+```
+
+#### 用户自定义
+```javascript
+// 1. 添加自定义道具
+const newItem = await fetch('/api/users/user123/items', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        name: '魔法剑',
+        description: '一把拥有神秘力量的传奇之剑',
+        type: 'weapon',
+        properties: { attack: 50, magic: 30 }
+    })
+});
+
+// 2. 添加技能
+const newSkill = await fetch('/api/users/user123/skills', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+        name: '火球术',
+        description: '释放强力火球魔法',
+        type: 'magic',
+        level: 3
+    })
+});
+```
+
+### 🔗 **WebSocket 集成**
+
+#### 场景 WebSocket 连接
+```javascript
+// 连接到场景 WebSocket
+const sceneWs = new WebSocket(`ws://localhost:8080/ws/scene/scene123?user_id=user456`);
+
+sceneWs.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log('场景更新:', data);
+};
+
+// 发送角色互动
+sceneWs.send(JSON.stringify({
+    type: 'character_interaction',
+    character_id: 'char123',
+    message: '大家好！'
+}));
+```
+
+#### 用户状态 WebSocket
+```javascript
+// 连接到用户状态 WebSocket
+const statusWs = new WebSocket(`ws://localhost:8080/ws/user/status?user_id=user456`);
+
+statusWs.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === 'heartbeat') {
+        console.log('连接保持活跃');
+    }
+};
+```
+
+### 📊 **响应格式**
+
+#### 标准成功响应
+```json
+{
+    "success": true,
+    "data": {
+        // 响应数据
+    },
+    "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+#### 错误响应
+```json
+{
+    "success": false,
+    "error": "错误信息描述",
+    "code": "ERROR_CODE",
+    "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+#### 导出响应
+```json
+{
+    "file_path": "/exports/story_20240101_120000.md",
+    "content": "# 故事导出\n\n...",
+    "format": "markdown",
+    "size": 1024,
+    "timestamp": "2024-01-01T12:00:00Z"
+}
+```
+
+### 🛡️ **身份验证与安全**
+
+当前 API 使用基于会话的身份验证进行用户管理。对于生产环境部署，建议实施：
+
+- **JWT 身份验证**：基于令牌的 API 访问认证
+- **频率限制**：API 调用频次限制
+- **输入验证**：严格的参数验证和清理
+- **仅 HTTPS**：生产环境强制使用 HTTPS
+
+详细的 API 文档，请参见：[API 文档](docs/api.md)
+
+### 🎯 **请求参数说明**
+
+#### 故事选择参数
+```javascript
+{
+    "node_id": "string",      // 当前故事节点ID
+    "choice_id": "string",    // 选择的选项ID
+    "user_preferences": {     // 可选：用户偏好设置
+        "creativity": "balanced",  // 创意度：strict|balanced|expansive
+        "language": "zh-cn"        // 语言偏好
+    }
+}
+```
+
+#### 角色互动参数
+```javascript
+{
+    "scene_id": "string",          // 场景ID
+    "character_ids": ["string"],   // 参与互动的角色ID列表
+    "topic": "string",             // 互动主题
+    "context": "string",           // 可选：互动背景
+    "interaction_type": "string"   // 互动类型：dialogue|action|conflict
+}
+```
+
+#### 用户道具/技能参数
+```javascript
+// 道具参数
+{
+    "name": "string",           // 道具名称
+    "description": "string",    // 道具描述
+    "type": "string",          // 道具类型：weapon|armor|tool|consumable
+    "properties": {            // 道具属性
+        "attack": 0,           // 攻击力
+        "defense": 0,          // 防御力
+        "magic": 0,            // 魔法力
+        "durability": 100      // 耐久度
+    },
+    "rarity": "common"         // 稀有度：common|rare|epic|legendary
+}
+
+// 技能参数
+{
+    "name": "string",           // 技能名称
+    "description": "string",    // 技能描述
+    "type": "string",          // 技能类型：combat|magic|social|crafting
+    "level": 1,                // 技能等级
+    "requirements": {          // 技能需求
+        "min_level": 1,        // 最低等级
+        "prerequisites": []    // 前置技能
+    },
+    "effects": {               // 技能效果
+        "damage": 0,           // 伤害值
+        "heal": 0,             // 治疗值
+        "duration": 0          // 持续时间（秒）
+    }
+}
+```
+
+### 📈 **API 限制与配额**
+
+#### 频率限制
+- **聊天 API**：每分钟最多 30 次请求
+- **分析 API**：每小时最多 10 次请求  
+- **导出 API**：每小时最多 50 次请求
+- **其他 API**：每分钟最多 100 次请求
+
+#### 内容限制
+- **文本长度**：单次分析最大 50,000 字符
+- **文件大小**：上传文件最大 10MB
+- **并发连接**：每用户最多 5 个 WebSocket 连接
+
+#### 响应时间
+- **一般 API**：< 2 秒
+- **AI 聊天**：< 10 秒
+- **文本分析**：< 30 秒
+- **导出功能**：< 60 秒
+
+更多详细信息，请查看：[开发者文档](docs/developer.md)
 
 ## 🧪 开发指南
 
@@ -365,7 +630,7 @@ go test ./internal/services/...
 - **项目主页**: [GitHub Repository](https://github.com/Corphon/SceneIntruderMCP)
 - **问题反馈**: [GitHub Issues](https://github.com/Corphon/SceneIntruderMCP/issues)
 - **功能建议**: [GitHub Discussions](https://github.com/Corphon/SceneIntruderMCP/discussions)
-- **邮件联系**: [songkf@foxmail.com](mailto:songkf@foxmail.com)
+- **邮件联系**: [project@sceneintruder.dev](mailto:songkf@foxmail.com)
 
 ---
 
