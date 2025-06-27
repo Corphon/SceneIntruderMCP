@@ -107,54 +107,84 @@ Content-Type: application/json
 
 #### Scene Management
 ```http
-GET    /api/scenes                    # Get scene list
-POST   /api/scenes                    # Create scene  
-GET    /api/scenes/{id}               # Get scene details
-GET    /api/scenes/{id}/characters    # Get scene characters
-GET    /api/scenes/{id}/aggregate     # Get scene aggregate data
+GET    /api/scenes                      # Get scene list
+POST   /api/scenes                      # Create scene  
+GET    /api/scenes/{id}                 # Get scene details
+GET    /api/scenes/{id}/characters      # Get scene characters
+GET    /api/scenes/{id}/conversations   # Get scene conversations
+GET    /api/scenes/{id}/aggregate       # Get scene aggregate data
 ```
 
-#### Text Analysis
+#### Story System
 ```http
-POST   /api/analyze                   # Analyze text content
-GET    /api/progress/{taskID}         # Get analysis progress
-POST   /api/cancel/{taskID}           # Cancel analysis task
-POST   /api/upload                    # Upload file
+GET    /api/scenes/{id}/story           # Get story data
+POST   /api/scenes/{id}/story/choice    # Make story choice
+POST   /api/scenes/{id}/story/advance   # Advance story
+POST   /api/scenes/{id}/story/rewind    # Rewind story
+GET    /api/scenes/{id}/story/branches  # Get story branches
+```
+
+#### Export Features
+```http
+GET    /api/scenes/{id}/export/scene        # Export scene data
+GET    /api/scenes/{id}/export/interactions # Export interactions
+GET    /api/scenes/{id}/export/story        # Export story document
 ```
 
 #### Character Interaction
 ```http
-POST   /api/chat                      # Chat with characters
-POST   /api/interactions/trigger      # Trigger character interactions
-POST   /api/interactions/simulate     # Simulate character dialogue
-POST   /api/interactions/aggregate    # Aggregate interaction processing
-GET    /api/interactions/{scene_id}   # Get interaction history
-GET    /api/conversations/{scene_id}  # Get conversation history
+POST   /api/chat                        # Basic chat with characters
+POST   /api/chat/emotion                # Chat with emotion analysis (NEW)
+POST   /api/interactions/trigger        # Trigger character interactions
+POST   /api/interactions/simulate       # Simulate character dialogue
+POST   /api/interactions/aggregate      # Aggregate interaction processing
+GET    /api/interactions/{scene_id}     # Get interaction history
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # Get specific character interactions
 ```
 
-#### System Configuration
+#### System Configuration & LLM Management
 ```http
-GET    /api/settings                  # Get system settings
-POST   /api/settings                  # Update system settings
-POST   /api/settings/test-connection  # Test connection
-GET    /api/llm/models               # Get available models
+GET    /api/settings                    # Get system settings
+POST   /api/settings                    # Update system settings
+POST   /api/settings/test-connection    # Test connection
+
+GET    /api/llm/status                  # Get LLM service status (NEW)
+GET    /api/llm/models                  # Get available models (NEW)
+PUT    /api/llm/config                  # Update LLM configuration (NEW)
 ```
 
-#### User System
+#### User Management System
 ```http
+# User Profile
+GET    /api/users/{user_id}             # Get user profile
+PUT    /api/users/{user_id}             # Update user profile
+GET    /api/users/{user_id}/preferences # Get user preferences
+PUT    /api/users/{user_id}/preferences # Update user preferences
+
+# User Items Management
 GET    /api/users/{user_id}/items           # Get user items
-POST   /api/users/{user_id}/items          # Add user item
+POST   /api/users/{user_id}/items           # Add user item
 GET    /api/users/{user_id}/items/{item_id} # Get specific item
 PUT    /api/users/{user_id}/items/{item_id} # Update user item
 DELETE /api/users/{user_id}/items/{item_id} # Delete user item
-```
-#### User Skills System
-```http
+
+# User Skills Management
 GET    /api/users/{user_id}/skills           # Get user skills
-POST   /api/users/{user_id}/skills          # Add user skill
+POST   /api/users/{user_id}/skills           # Add user skill
 GET    /api/users/{user_id}/skills/{skill_id} # Get specific skill
 PUT    /api/users/{user_id}/skills/{skill_id} # Update user skill
 DELETE /api/users/{user_id}/skills/{skill_id} # Delete user skill
+```
+
+#### WebSocket Support
+```http
+WS     /ws/scene/{id}                   # Scene WebSocket connection
+WS     /ws/user/status                  # User status WebSocket connection
+```
+
+#### Debug & Development
+```http
+GET    /api/ws/status                   # Get WebSocket connection status
 ```
 
 ## 🎬 Scene Management API
@@ -349,6 +379,128 @@ POST /api/chat
     "timestamp": "2025-06-20T10:30:00Z"
   }
 }
+```
+## 📖 Story System API
+
+### Get Story Data
+
+Get story data for a specific scene.
+
+```http
+GET /api/scenes/{scene_id}/story
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "scene_id": "scene_001",
+    "intro": "Welcome to the mysterious castle...",
+    "main_objective": "Explore the castle and uncover its secrets",
+    "current_state": {
+      "current_node_id": "node_001",
+      "current_location": "castle_entrance"
+    },
+    "progress": {
+      "completion_percentage": 25,
+      "nodes_visited": 5,
+      "choices_made": 3
+    },
+    "nodes": [
+      {
+        "id": "node_001",
+        "title": "The Entrance",
+        "content": "You stand before the massive castle doors...",
+        "choices": [
+          {
+            "id": "choice_001",
+            "text": "Push open the doors",
+            "consequences": "You enter the main hall"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Make Story Choice
+
+Make a choice in the story progression.
+
+```http
+POST /api/scenes/{scene_id}/story/choice
+```
+
+**Request Body:**
+```json
+{
+  "node_id": "node_001",
+  "choice_id": "choice_001"
+}
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "message": "Choice executed successfully",
+  "next_node": {
+    "id": "node_002",
+    "title": "The Main Hall",
+    "content": "You find yourself in a vast hall..."
+  },
+  "story_data": {
+    "current_state": {...},
+    "progress": {...}
+  }
+}
+```
+
+### Advance Story
+
+Automatically advance the story based on current context.
+
+```http
+POST /api/scenes/{scene_id}/story/advance
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "message": "Story advanced",
+  "story_update": {
+    "title": "A New Discovery",
+    "content": "As you explore further, you discover...",
+    "new_characters": [...],
+    "new_items": [...]
+  }
+}
+```
+
+### Rewind Story
+
+Rewind the story to a previous node.
+
+```http
+POST /api/scenes/{scene_id}/story/rewind
+```
+
+**Request Body:**
+```json
+{
+  "node_id": "node_001"
+}
+```
+
+### Get Story Branches
+
+Get all story branches and paths.
+
+```http
+GET /api/scenes/{scene_id}/story/branches
 ```
 
 ### Get Scene Character List
@@ -574,36 +726,81 @@ POST /api/settings/test-connection
 
 ## 👤 User System API
 
-### Get User Items
+### Get User Profile
 
-Get user's custom items.
+Get complete user profile information.
 
 ```http
-GET /api/users/{user_id}/items?category=weapon&rarity=rare
+GET /api/users/{user_id}
 ```
 
 **Response Example:**
 ```json
 {
   "success": true,
-  "data": [
-    {
-      "id": "custom_item_001",
-      "name": "Lucky Charm",
-      "description": "Magical charm that increases luck",
-      "category": "accessory",
-      "rarity": "rare",
-      "effects": [
-        {
-          "target": "self",
-          "type": "luck",
-          "value": 5,
-          "probability": 1.0
-        }
-      ],
-      "created_at": "2025-06-20T10:00:00Z"
-    }
-  ]
+  "data": {
+    "id": "user_123",
+    "username": "player01",
+    "display_name": "Adventure Player",
+    "bio": "Love fantasy adventures",
+    "avatar": "avatar_url",
+    "created_at": "2025-06-20T10:00:00Z",
+    "preferences": {
+      "creativity_level": "balanced",
+      "language": "zh-cn",
+      "auto_save": true
+    },
+    "items_count": 15,
+    "skills_count": 8,
+    "saved_scenes": ["scene_001", "scene_002"]
+  }
+}
+```
+
+### Update User Profile
+
+Update user profile information.
+
+```http
+PUT /api/users/{user_id}
+```
+
+**Request Body:**
+```json
+{
+  "display_name": "New Display Name",
+  "bio": "Updated bio",
+  "preferences": {
+    "creativity_level": "expansive",
+    "auto_save": false
+  }
+}
+```
+
+### Get User Preferences
+
+Get user preferences settings.
+
+```http
+GET /api/users/{user_id}/preferences
+```
+
+### Update User Preferences
+
+Update user preferences.
+
+```http
+PUT /api/users/{user_id}/preferences
+```
+
+**Request Body:**
+```json
+{
+  "creativity_level": "balanced",
+  "language": "zh-cn",
+  "auto_save": true,
+  "notification_enabled": true,
+  "theme": "dark"
 }
 ```
 
@@ -693,99 +890,168 @@ Delete a specific user item.
 DELETE /api/users/{user_id}/items/{item_id}
 ```
 
----
+## 📤 Export Features API
 
-## 🛠️ SDK Examples
+### Export Scene Data
 
-### JavaScript SDK
+Export complete scene data in various formats.
+
+```http
+GET /api/scenes/{scene_id}/export/scene?format=json&include_conversations=true
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `format` | string | Export format: `json`, `markdown`, `html` |
+| `include_conversations` | boolean | Whether to include conversation history |
+
+**Response Example:**
+```json
+{
+  "file_path": "/exports/scene_001_20250620.json",
+  "content": "...",
+  "format": "json",
+  "size": 2048,
+  "timestamp": "2025-06-20T10:30:00Z"
+}
+```
+
+### Export Interactions
+
+Export interaction summary.
+
+```http
+GET /api/scenes/{scene_id}/export/interactions?format=markdown
+```
+
+### Export Story Document
+
+Export story as a readable document.
+
+```http
+GET /api/scenes/{scene_id}/export/story?format=html
+```
+
+## 🔄 WebSocket API
+
+### Scene WebSocket Connection
+
+Connect to a scene for real-time updates.
 
 ```javascript
-// Initialize API client
+// Connect to scene WebSocket
+const ws = new WebSocket('ws://localhost:8080/ws/scene/scene_001?user_id=user123');
+
+// Listen for messages
+ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log('Received:', data);
+};
+
+// Send character interaction
+ws.send(JSON.stringify({
+    type: 'character_interaction',
+    character_id: 'char_001',
+    message: 'Hello everyone!'
+}));
+```
+
+**Message Types:**
+
+| Type | Description | Direction |
+|------|-------------|-----------|
+| `character_interaction` | Character message | Client → Server |
+| `story_choice` | Story choice selection | Client → Server |
+| `user_status_update` | User status update | Client → Server |
+| `conversation:new` | New conversation | Server → Client |
+| `story:choice_made` | Story choice result | Server → Client |
+| `user:presence` | User presence update | Server → Client |
+
+### User Status WebSocket
+
+Connect for user status updates.
+
+```javascript
+const statusWs = new WebSocket('ws://localhost:8080/ws/user/status?user_id=user123');
+```
+
+---
+## 🛠️ SDK Examples
+
+### JavaScript SDK (Enhanced)
+
+```javascript
 class SceneIntruderAPI {
-    constructor(baseURL = 'http://localhost:8080/api') {
-        this.baseURL = baseURL;
+    // ... existing methods ...
+
+    // Story System APIs
+    async getStoryData(sceneId) {
+        return this.request(`/scenes/${sceneId}/story`);
     }
 
-    async request(endpoint, options = {}) {
-        const url = `${this.baseURL}${endpoint}`;
-        const config = {
-            headers: {
-                'Content-Type': 'application/json',
-                ...options.headers
-            },
-            ...options
-        };
+    async makeStoryChoice(sceneId, nodeId, choiceId) {
+        return this.request(`/scenes/${sceneId}/story/choice`, {
+            method: 'POST',
+            body: { node_id: nodeId, choice_id: choiceId }
+        });
+    }
 
-        if (config.body && typeof config.body === 'object') {
-            config.body = JSON.stringify(config.body);
-        }
+    async advanceStory(sceneId) {
+        return this.request(`/scenes/${sceneId}/story/advance`, {
+            method: 'POST'
+        });
+    }
 
-        const response = await fetch(url, config);
+    // Export APIs
+    async exportSceneData(sceneId, format = 'json', includeConversations = false) {
+        return this.request(`/scenes/${sceneId}/export/scene?format=${format}&include_conversations=${includeConversations}`);
+    }
+
+    // User Management APIs
+    async getUserProfile(userId) {
+        return this.request(`/users/${userId}`);
+    }
+
+    async updateUserProfile(userId, profileData) {
+        return this.request(`/users/${userId}`, {
+            method: 'PUT',
+            body: profileData
+        });
+    }
+
+    async getUserPreferences(userId) {
+        return this.request(`/users/${userId}/preferences`);
+    }
+
+    // WebSocket connection helper
+    connectToScene(sceneId, userId) {
+        const ws = new WebSocket(`ws://localhost:8080/ws/scene/${sceneId}?user_id=${userId}`);
         
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        ws.onopen = () => console.log('Connected to scene WebSocket');
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            this.handleWebSocketMessage(data);
+        };
+        
+        return ws;
+    }
+
+    handleWebSocketMessage(data) {
+        switch (data.type) {
+            case 'conversation:new':
+                this.onNewConversation(data);
+                break;
+            case 'story:choice_made':
+                this.onStoryChoiceMade(data);
+                break;
+            case 'user:presence':
+                this.onUserPresenceUpdate(data);
+                break;
         }
-
-        return await response.json();
-    }
-
-    // Scene management
-    async createScene(data) {
-        return this.request('/scenes', {
-            method: 'POST',
-            body: data
-        });
-    }
-
-    async getScene(sceneId) {
-        return this.request(`/scenes/${sceneId}`);
-    }
-
-    // Character interaction
-    async chatWithCharacter(sceneId, characterId, message) {
-        return this.request('/chat', {
-            method: 'POST',
-            body: {
-                scene_id: sceneId,
-                character_id: characterId,
-                message: message,
-                include_emotion: true
-            }
-        });
-    }
-
-    // User items
-    async getUserItems(userId) {
-        return this.request(`/users/${userId}/items`);
-    }
-
-    async addUserItem(userId, itemData) {
-        return this.request(`/users/${userId}/items`, {
-            method: 'POST',
-            body: itemData
-        });
     }
 }
-
-// Usage example
-const api = new SceneIntruderAPI();
-
-// Create scene
-const scene = await api.createScene({
-    name: "Test Scene",
-    text_content: "Once upon a time, there was a brave knight...",
-    creativity_level: "BALANCED"
-});
-
-// Chat with character
-const response = await api.chatWithCharacter(
-    scene.data.scene_id,
-    "char_001", 
-    "Hello!"
-);
-
-console.log('Character reply:', response.data.message);
-console.log('Emotion state:', response.data.emotion);
 ```
 
 ### Python SDK
@@ -899,6 +1165,49 @@ curl -X POST http://localhost:8080/api/users/user_123/items \
     "category": "weapon",
     "rarity": "legendary"
   }'
+
+# Story System Examples
+# Get story data
+curl -X GET http://localhost:8080/api/scenes/scene_001/story
+
+# Make story choice
+curl -X POST http://localhost:8080/api/scenes/scene_001/story/choice \
+  -H "Content-Type: application/json" \
+  -d '{
+    "node_id": "node_001",
+    "choice_id": "choice_a"
+  }'
+
+# Export scene data
+curl -X GET "http://localhost:8080/api/scenes/scene_001/export/scene?format=markdown&include_conversations=true"
+
+# User Profile Management
+# Get user profile
+curl -X GET http://localhost:8080/api/users/user_123
+
+# Update user preferences
+curl -X PUT http://localhost:8080/api/users/user_123/preferences \
+  -H "Content-Type: application/json" \
+  -d '{
+    "creativity_level": "balanced",
+    "language": "zh-cn",
+    "auto_save": true
+  }'
+
+# LLM Configuration
+# Get LLM status
+curl -X GET http://localhost:8080/api/llm/status
+
+# Update LLM config
+curl -X PUT http://localhost:8080/api/llm/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "openai",
+    "config": {
+      "api_key": "your-api-key",
+      "model": "gpt-4"
+    }
+  }'
 ```
 
 ---
@@ -911,12 +1220,6 @@ curl -X POST http://localhost:8080/api/users/user_123/items \
 - Character interaction system implementation
 - Story branching functionality added
 - Multi-LLM provider support integrated
-
-### Planned Features
-- v1.1.0: WebSocket real-time communication
-- v1.2.0: Batch operation APIs
-- v1.3.0: GraphQL support
-- v2.0.0: Microservices architecture refactoring
 
 ---
 
