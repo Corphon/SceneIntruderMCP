@@ -10,13 +10,12 @@
             <div class="card-body p-2">
                 <div id="characters-list">
                     {{range .characters}}
-                    <div class="character-item p-2 border rounded mb-2" 
-                         data-character-id="{{.ID}}" style="cursor: pointer;">
+                    <div class="character-item p-2 border rounded mb-2" data-character-id="{{.ID}}"
+                        style="cursor: pointer;">
                         <div class="d-flex align-items-center">
-                            <img src="{{.Avatar}}" alt="{{.Name}}" 
-                                 style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;"
-                                 class="me-2"
-                                 onerror="this.src='/static/images/default-character.jpg'">
+                            <img src="{{.Avatar}}" alt="{{.Name}}"
+                                style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;" class="me-2"
+                                onerror="this.src='/static/images/default-character.jpg'">
                             <div>
                                 <div class="fw-bold">{{.Name}}</div>
                                 <small class="text-muted">{{.Role}}</small>
@@ -36,37 +35,216 @@
                 <h6 class="mb-0">{{.Scene.Title}}</h6>
             </div>
             <div class="card-body d-flex flex-column">
-                <!-- 聊天历史 -->
-                <div id="chat-container" class="flex-grow-1 overflow-auto mb-3 p-3" 
-                     style="height: 400px; background-color: #f8f9fa; border-radius: 8px;">
-                    <!-- 对话内容会在这里动态添加 -->
-                </div>
+                <!-- 新增导出功能按钮组 -->
+                <div class="scene-actions">
+                    <div class="btn-group btn-group-sm" role="group">
+                        <button type="button" class="btn btn-outline-secondary" onclick="refreshScene()" title="刷新场景">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
 
-                <!-- 输入区域 -->
-                <div class="input-group">
-                    <input type="text" id="message-input" class="form-control" 
-                           placeholder="输入消息..." disabled>
-                    <button id="send-btn" class="btn btn-primary" disabled>
-                        <i class="bi bi-send"></i>
-                    </button>
+                        <!-- 导出功能 -->
+                        <div class="btn-group btn-group-sm">
+                            <button type="button" class="btn btn-outline-success export-btn" onclick="showExportModal()"
+                                title="导出数据">
+                                <i class="bi bi-download"></i>
+                            </button>
+                            <button type="button" class="btn btn-outline-success dropdown-toggle dropdown-toggle-split"
+                                data-bs-toggle="dropdown" aria-expanded="false">
+                                <span class="visually-hidden">导出选项</span>
+                            </button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li>
+                                    <h6 class="dropdown-header">
+                                        <i class="bi bi-download"></i> 快速导出
+                                    </h6>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item export-btn" href="#" data-type="scene" data-format="html">
+                                        <i class="bi bi-geo-alt text-primary"></i> 导出场景数据
+                                    </a>
+                                </li>
+                                <li>
+                                    <a class="dropdown-item export-btn" href="#" data-type="interactions"
+                                        data-format="html">
+                                        <i class="bi bi-chat-dots text-success"></i> 导出对话摘要
+                                    </a>
+                                </li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li>
+                                    <a class="dropdown-item" href="#" onclick="showExportModal()">
+                                        <i class="bi bi-sliders text-info"></i> 高级导出选项
+                                    </a>
+                                </li>
+                            </ul>
+                        </div>
+                    </div>
                 </div>
+            </div>
+            <!-- 聊天历史 -->
+            <div id="chat-container" class="flex-grow-1 overflow-auto mb-3 p-3"
+                style="height: 400px; background-color: #f8f9fa; border-radius: 8px;">
+                <!-- 对话内容会在这里动态添加 -->
+            </div>
 
-                <!-- 选择的角色显示 -->
-                <div id="selected-character" class="mt-2 text-muted small">
-                    请先选择一个角色
-                </div>
+            <!-- 输入区域 -->
+            <div class="input-group">
+                <input type="text" id="message-input" class="form-control" placeholder="输入消息..." disabled>
+                <button id="send-btn" class="btn btn-primary" disabled>
+                    <i class="bi bi-send"></i>
+                </button>
+            </div>
+
+            <!-- 选择的角色显示 -->
+            <div id="selected-character" class="mt-2 text-muted small">
+                请先选择一个角色
             </div>
         </div>
     </div>
+</div>
 </div>
 
 <input type="hidden" id="scene-id" value="{{.Scene.ID}}">
 {{end}}
 
 {{define "scripts"}}
+<style>
+    /* 移动端导出按钮优化 */
+    @media (max-width: 768px) {
+        .scene-actions .btn-group {
+            flex-direction: column;
+        }
+
+        .scene-actions .btn {
+            font-size: 0.8rem;
+            padding: 0.25rem 0.5rem;
+        }
+
+        .card-header {
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .card-header h6 {
+            text-align: center;
+        }
+    }
+
+    /* 导出按钮悬停效果 */
+    .export-btn:hover {
+        transform: translateY(-1px);
+        transition: transform 0.2s ease;
+    }
+
+    /* 实时状态样式 */
+    .character-item {
+        position: relative;
+    }
+
+    .character-item.selected {
+        border-color: #0d6efd !important;
+        background-color: #e7f1ff;
+    }
+
+    .status-indicator {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid white;
+        z-index: 10;
+    }
+
+    .status-available {
+        background-color: #28a745;
+    }
+
+    .status-busy {
+        background-color: #dc3545;
+    }
+
+    .status-away {
+        background-color: #ffc107;
+    }
+
+    .status-offline {
+        background-color: #6c757d;
+    }
+
+    .realtime-notification {
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        z-index: 1050;
+        max-width: 300px;
+    }
+
+    .conversation-item.new-message {
+        animation: highlightNewMessage 2s ease-out;
+        background-color: #e3f2fd;
+    }
+
+    @keyframes highlightNewMessage {
+        0% {
+            background-color: #e3f2fd;
+        }
+
+        100% {
+            background-color: transparent;
+        }
+    }
+</style>
+
 <script>
-document.addEventListener('DOMContentLoaded', function() {
-    window.SceneApp.initScene();
-});
+    document.addEventListener('DOMContentLoaded', function () {
+        // 获取场景ID
+        const sceneId = document.getElementById('scene-id').value;
+
+        // 初始化应用
+        if (window.SceneApp) {
+            window.SceneApp.initScene();
+        }
+
+        // 初始化导出管理器
+        if (typeof ExportManager !== 'undefined') {
+            if (!window.exportManager) {
+                window.exportManager = new ExportManager();
+            }
+
+            window.exportManager
+                .onProgress((progress, status) => {
+                    console.log(`导出进度: ${progress}% - ${status}`);
+                })
+                .onComplete((result, fileName) => {
+                    if (typeof Utils !== 'undefined') {
+                        Utils.showSuccess(`导出完成: ${fileName}`);
+                    }
+                })
+                .onError((error) => {
+                    console.error('导出失败:', error);
+                });
+        }
+
+        // 初始化实时通信 - 新增
+        if (typeof RealtimeManager !== 'undefined' && sceneId) {
+            initRealtimeFeatures(sceneId);
+        }
+
+        // 添加刷新场景功能
+        window.refreshScene = function () {
+            if (window.SceneApp && window.SceneApp.initScene) {
+                window.SceneApp.initScene();
+            }
+
+            // 刷新实时连接
+            if (typeof window.refreshSceneRealtime !== 'undefined') {
+                window.refreshSceneRealtime();
+            }
+        };
+    });
+
 </script>
 {{end}}
