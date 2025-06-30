@@ -205,10 +205,29 @@ class API {
     /**
      * 执行故事选择
      */
-    static makeStoryChoice(sceneId, nodeId, choiceId) {
+    static makeStoryChoice(sceneId, nodeId, choiceId, preferences = null) {
+        // 参数验证
+        if (!sceneId || !nodeId || !choiceId) {
+            throw new Error('故事选择需要 sceneId, nodeId 和 choiceId 参数');
+        }
+
+        const requestBody = {
+            node_id: nodeId,
+            choice_id: choiceId
+        };
+        
+        // 验证并添加偏好设置
+        if (preferences) {
+            if (typeof preferences === 'object' && preferences !== null) {
+                requestBody.user_preferences = preferences;
+            } else {
+                console.warn('用户偏好必须是对象类型，已忽略');
+            }
+        }
+        
         return this.request(`/scenes/${sceneId}/story/choice`, {
             method: 'POST',
-            body: { node_id: nodeId, choice_id: choiceId }
+            body: requestBody
         });
     }
 
@@ -216,12 +235,19 @@ class API {
      * 推进故事情节
      */
     static advanceStory(sceneId, preferences = null) {
-        const url = preferences ? 
-            `/story/${sceneId}/advance?preferences=${encodeURIComponent(JSON.stringify(preferences))}` :
-            `/story/${sceneId}/advance`;
-            
-        return this.request(url, {
-            method: 'POST'
+        if (!sceneId) {
+            throw new Error('故事推进需要 sceneId 参数');
+        }
+
+        const requestBody = {};
+        
+        if (preferences && typeof preferences === 'object') {
+            requestBody.user_preferences = preferences;
+        }
+        
+        return this.request(`/scenes/${sceneId}/story/advance`, {
+            method: 'POST',
+            body: requestBody
         });
     }
 
@@ -229,22 +255,24 @@ class API {
      * 获取故事分支
      */
     static getStoryBranches(sceneId, preferences = null) {
-        const url = preferences ? 
-            `/story/${sceneId}/branches?preferences=${encodeURIComponent(JSON.stringify(preferences))}` :
-            `/story/${sceneId}/branches`;
-            
+        let url = `/scenes/${sceneId}/story/branches`; 
+        
+        if (preferences) {
+            url += `?preferences=${encodeURIComponent(JSON.stringify(preferences))}`;
+        }
+        
         return this.request(url);
     }
 
     /**
      * 回溯故事到指定节点
      */
-    static rewindStory(sceneId, nodeId) {
-        return this.request(`/story/${sceneId}/rewind`, {
+    static rewindStory(sceneId, nodeId = null) {
+        const requestBody = nodeId ? { node_id: nodeId } : {};
+        
+        return this.request(`/scenes/${sceneId}/story/rewind`, {
             method: 'POST',
-            body: {
-                node_id: nodeId
-            }
+            body: requestBody
         });
     }
 
@@ -252,7 +280,7 @@ class API {
      * 回溯故事到指定节点（兼容旧接口）
      */
     static rewindStoryToNode(sceneId, nodeId) {
-        return this.request(`/story/${sceneId}/rewind`, {
+        return this.request(`/scenes/${sceneId}/story/rewind`, { 
             method: 'POST',
             body: { node_id: nodeId }
         });
@@ -322,6 +350,9 @@ class API {
      * 获取用户档案
      */
     static getUserProfile(userId) {
+        if (!userId) {
+            throw new Error('用户ID不能为空');
+        }
         return this.request(`/users/${userId}`);
     }
 
@@ -329,9 +360,27 @@ class API {
      * 更新用户档案
      */
     static updateUserProfile(userId, profileData) {
+        if (!userId) {
+            throw new Error('用户ID不能为空');
+        }
+        
+        if (!profileData || typeof profileData !== 'object') {
+            throw new Error('档案数据格式错误');
+        }
+        
+        // 验证允许的字段
+        const allowedFields = ['username', 'display_name', 'bio', 'avatar', 'preferences'];
+        const validatedData = {};
+        
+        for (const [key, value] of Object.entries(profileData)) {
+            if (allowedFields.includes(key) && value !== undefined) {
+                validatedData[key] = value;
+            }
+        }
+        
         return this.request(`/users/${userId}`, {
             method: 'PUT',
-            body: profileData
+            body: validatedData
         });
     }
 
@@ -339,6 +388,10 @@ class API {
      * 获取用户偏好设置
      */
     static getUserPreferences(userId) {
+        if (!userId) {
+            throw new Error('用户ID不能为空');
+        }
+
         return this.request(`/users/${userId}/preferences`);
     }
 
@@ -346,6 +399,26 @@ class API {
      * 更新用户偏好设置
      */
     static updateUserPreferences(userId, preferences) {
+        if (!userId) {
+            throw new Error('用户ID不能为空');
+        }
+        
+        if (!preferences || typeof preferences !== 'object') {
+            throw new Error('偏好设置格式错误');
+        }
+        
+        // 验证创意等级枚举值
+        const validCreativityLevels = ['STRICT', 'BALANCED', 'EXPANSIVE'];
+        if (preferences.creativity_level && !validCreativityLevels.includes(preferences.creativity_level)) {
+            throw new Error('无效的创意等级值');
+        }
+        
+        // 验证响应长度
+        const validResponseLengths = ['short', 'medium', 'long'];
+        if (preferences.response_length && !validResponseLengths.includes(preferences.response_length)) {
+            throw new Error('无效的响应长度值');
+        }
+        
         return this.request(`/users/${userId}/preferences`, {
             method: 'PUT',
             body: preferences
