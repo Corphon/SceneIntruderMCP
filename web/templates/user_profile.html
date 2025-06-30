@@ -1,21 +1,16 @@
 {{define "user_profile.html"}}
 <!DOCTYPE html>
 <html lang="zh-CN">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>用户档案 | Scene Intruder</title>
-
+    
     <!-- 样式文件 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
     <link href="/static/css/style.css" rel="stylesheet">
-
-    <!-- 图表库 -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-
 <body>
     <!-- 导航栏 -->
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -35,7 +30,7 @@
     </nav>
 
     <div class="container mt-4">
-        <!-- 页面标题 -->
+        <!-- 页面标题和操作按钮 -->
         <div class="row">
             <div class="col-12">
                 <div class="d-flex justify-content-between align-items-center mb-4">
@@ -44,17 +39,22 @@
                         <p class="text-muted mb-0">管理你的道具、技能和成就</p>
                     </div>
                     <div class="profile-actions">
-                        <button type="button" class="btn btn-outline-primary" onclick="refreshProfile()">
+                        <button type="button" class="btn btn-outline-primary refresh-profile-btn">
                             <i class="bi bi-arrow-clockwise"></i>
                             刷新
                         </button>
-                        <button type="button" class="btn btn-outline-secondary" onclick="exportProfile()">
+                        <button type="button" class="btn btn-outline-secondary export-data-btn" data-type="profile">
                             <i class="bi bi-download"></i>
                             导出
                         </button>
                     </div>
                 </div>
             </div>
+        </div>
+
+        <!-- 用户统计数据容器 -->
+        <div id="user-stats-container" class="mb-4">
+            <!-- 统计卡片将由 JavaScript 动态生成 -->
         </div>
 
         <!-- 用户信息概览 -->
@@ -114,7 +114,7 @@
                             <div class="tab-pane fade show active" id="items-tab">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <h6 class="mb-0">我的道具</h6>
-                                    <button type="button" class="btn btn-sm btn-primary" onclick="showAddItemModal()">
+                                    <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addItemModal">
                                         <i class="bi bi-plus"></i> 添加道具
                                     </button>
                                 </div>
@@ -122,17 +122,20 @@
                                 <!-- 道具筛选 -->
                                 <div class="row mb-3">
                                     <div class="col-md-6">
-                                        <select class="form-select" id="item-category-filter">
+                                        <select class="form-select form-select-sm" id="item-category-filter">
                                             <option value="">所有类别</option>
                                             <option value="weapon">武器</option>
                                             <option value="armor">防具</option>
                                             <option value="accessory">饰品</option>
                                             <option value="consumable">消耗品</option>
                                             <option value="tool">工具</option>
+                                            <option value="material">材料</option>
+                                            <option value="quest">任务</option>
+                                            <option value="other">其他</option>
                                         </select>
                                     </div>
                                     <div class="col-md-6">
-                                        <select class="form-select" id="item-rarity-filter">
+                                        <select class="form-select form-select-sm" id="item-rarity-filter">
                                             <option value="">所有稀有度</option>
                                             <option value="common">普通</option>
                                             <option value="uncommon">不常见</option>
@@ -143,13 +146,13 @@
                                     </div>
                                 </div>
 
-                                <!-- 道具列表 -->
+                                <!-- 道具列表容器 -->
                                 <div id="items-container" class="items-grid">
                                     <div class="text-center p-4">
                                         <div class="spinner-border text-primary" role="status">
                                             <span class="visually-hidden">加载中...</span>
                                         </div>
-                                        <p class="mt-2 text-muted">正在加载道具...</p>
+                                        <p class="mt-2 text-muted">正在加载道具数据...</p>
                                     </div>
                                 </div>
                             </div>
@@ -158,7 +161,7 @@
                             <div class="tab-pane fade" id="skills-tab">
                                 <div class="d-flex justify-content-between align-items-center mb-3">
                                     <h6 class="mb-0">我的技能</h6>
-                                    <button type="button" class="btn btn-sm btn-primary" onclick="showAddSkillModal()">
+                                    <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#addSkillModal">
                                         <i class="bi bi-plus"></i> 添加技能
                                     </button>
                                 </div>
@@ -166,27 +169,29 @@
                                 <!-- 技能筛选 -->
                                 <div class="row mb-3">
                                     <div class="col-md-6">
-                                        <select class="form-select" id="skill-category-filter">
+                                        <select class="form-select form-select-sm" id="skill-category-filter">
                                             <option value="">所有类别</option>
                                             <option value="combat">战斗</option>
                                             <option value="magic">魔法</option>
                                             <option value="social">社交</option>
                                             <option value="mental">精神</option>
                                             <option value="physical">体能</option>
+                                            <option value="crafting">制作</option>
+                                            <option value="survival">生存</option>
                                         </select>
                                     </div>
                                     <div class="col-md-6">
-                                        <input type="text" class="form-control" id="skill-search" placeholder="搜索技能...">
+                                        <input type="text" class="form-control form-control-sm" id="skill-search" placeholder="搜索技能...">
                                     </div>
                                 </div>
 
-                                <!-- 技能列表 -->
+                                <!-- 技能列表容器 -->
                                 <div id="skills-container" class="skills-grid">
                                     <div class="text-center p-4">
                                         <div class="spinner-border text-primary" role="status">
                                             <span class="visually-hidden">加载中...</span>
                                         </div>
-                                        <p class="mt-2 text-muted">正在加载技能...</p>
+                                        <p class="mt-2 text-muted">正在加载技能数据...</p>
                                     </div>
                                 </div>
                             </div>
@@ -195,52 +200,10 @@
                             <div class="tab-pane fade" id="achievements-tab">
                                 <h6 class="mb-3">成就系统</h6>
                                 <div id="achievements-container" class="achievements-grid">
-                                    <div id="achievements-container" class="achievements-grid">
-                                        <div class="text-center p-4">
-                                            <div class="spinner-border text-primary" role="status">
-                                                <span class="visually-hidden">加载成就...</span>
-                                            </div>
-                                            <p class="mt-2 text-muted">正在加载成就数据...</p>
-                                        </div>
-                                    </div>
-                                    <div class="achievement-category mb-4">
-                                        <h6 class="achievement-category-title">
-                                            <i class="bi bi-book"></i> 故事探索
-                                        </h6>
-                                        <div class="row">
-                                            <div class="col-md-6">
-                                                <div class="achievement-item">
-                                                    <div class="achievement-icon">🏃</div>
-                                                    <div class="achievement-info">
-                                                        <div class="achievement-name">初来乍到</div>
-                                                        <div class="achievement-desc">完成第一个场景</div>
-                                                        <div class="achievement-progress">
-                                                            <div class="progress">
-                                                                <div class="progress-bar" role="progressbar"
-                                                                    style="width: 100%"></div>
-                                                            </div>
-                                                            <span class="progress-text">1/1</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                            <div class="col-md-6">
-                                                <div class="achievement-item locked">
-                                                    <div class="achievement-icon">🎭</div>
-                                                    <div class="achievement-info">
-                                                        <div class="achievement-name">角色专家</div>
-                                                        <div class="achievement-desc">与10个不同角色对话</div>
-                                                        <div class="achievement-progress">
-                                                            <div class="progress">
-                                                                <div class="progress-bar" role="progressbar"
-                                                                    style="width: 60%"></div>
-                                                            </div>
-                                                            <span class="progress-text">6/10</span>
-                                                        </div>
-                                                    </div>
-                                                </div>
-                                            </div>
-                                        </div>
+                                    <div class="text-center p-4">
+                                        <i class="bi bi-trophy display-4 text-muted"></i>
+                                        <h5 class="mt-3">成就系统</h5>
+                                        <p class="text-muted">即将推出，敬请期待！</p>
                                     </div>
                                 </div>
                             </div>
@@ -253,7 +216,7 @@
 
     <!-- 添加道具模态框 -->
     <div class="modal fade" id="addItemModal" tabindex="-1">
-        <div class="modal-dialog">
+        <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title">添加新道具</h5>
@@ -261,28 +224,30 @@
                 </div>
                 <div class="modal-body">
                     <form id="addItemForm">
-                        <!-- 在表单字段下添加验证提示 -->
                         <div class="mb-3">
                             <label for="itemName" class="form-label">道具名称 <span class="text-danger">*</span></label>
                             <input type="text" class="form-control" id="itemName" required>
-                            <div class="invalid-feedback">
-                                请输入道具名称
-                            </div>
+                            <div class="invalid-feedback">请输入道具名称</div>
                         </div>
+                        
                         <div class="mb-3">
                             <label for="itemDescription" class="form-label">描述</label>
-                            <textarea class="form-control" id="itemDescription" rows="3"></textarea>
+                            <textarea class="form-control" id="itemDescription" rows="3" placeholder="描述道具的功能和特性..."></textarea>
                         </div>
+                        
                         <div class="row">
                             <div class="col-md-6">
                                 <label for="itemCategory" class="form-label">类别</label>
                                 <select class="form-select" id="itemCategory" required>
                                     <option value="">选择类别</option>
-                                    <option value="weapon">武器</option>
-                                    <option value="armor">防具</option>
-                                    <option value="accessory">饰品</option>
-                                    <option value="consumable">消耗品</option>
-                                    <option value="tool">工具</option>
+                                    <option value="weapon">⚔️ 武器</option>
+                                    <option value="armor">🛡️ 防具</option>
+                                    <option value="accessory">💍 饰品</option>
+                                    <option value="consumable">🧪 消耗品</option>
+                                    <option value="tool">🔧 工具</option>
+                                    <option value="material">🔩 材料</option>
+                                    <option value="quest">📜 任务</option>
+                                    <option value="other">📦 其他</option>
                                 </select>
                             </div>
                             <div class="col-md-6">
@@ -297,58 +262,13 @@
                                 </select>
                             </div>
                         </div>
+                        
                         <div class="mt-3">
                             <label class="form-label">效果配置</label>
                             <div id="itemEffects">
-                                <div class="effect-item row g-2 mb-2">
-                                    <div class="col-md-2">
-                                        <select class="form-select effect-target" required>
-                                            <option value="">选择目标</option>
-                                            <option value="self">自己</option>
-                                            <option value="other">其他角色</option>
-                                            <option value="scene">场景</option>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-3">
-                                        <select class="form-select effect-type" required>
-                                            <option value="">选择类型</option>
-                                            <optgroup label="基础属性">
-                                                <option value="health">生命值</option>
-                                                <option value="mana">法力值</option>
-                                                <option value="energy">精力</option>
-                                            </optgroup>
-                                            <optgroup label="战斗属性">
-                                                <option value="attack">攻击力</option>
-                                                <option value="defense">防御力</option>
-                                                <option value="speed">速度</option>
-                                            </optgroup>
-                                            <optgroup label="社交属性">
-                                                <option value="mood">心情</option>
-                                                <option value="charisma">魅力</option>
-                                                <option value="luck">运气</option>
-                                            </optgroup>
-                                        </select>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <input type="number" class="form-control effect-value" placeholder="数值"
-                                            min="-100" max="100" required>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <input type="number" class="form-control effect-probability" placeholder="概率"
-                                            min="0" max="1" step="0.1" value="1" required>
-                                    </div>
-                                    <div class="col-md-2">
-                                        <input type="number" class="form-control effect-duration" placeholder="持续时间(秒)"
-                                            min="0" value="0">
-                                    </div>
-                                    <div class="col-md-1">
-                                        <button type="button" class="btn btn-outline-danger btn-sm remove-effect-btn">
-                                            <i class="bi bi-trash"></i>
-                                        </button>
-                                    </div>
-                                </div>
+                                <!-- 效果项将由 JavaScript 动态添加 -->
                             </div>
-                            <button type="button" class="btn btn-outline-primary btn-sm" onclick="addEffectRow()">
+                            <button type="button" class="btn btn-outline-primary btn-sm add-effect-btn mt-2">
                                 <i class="bi bi-plus"></i> 添加效果
                             </button>
                         </div>
@@ -356,7 +276,10 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-primary" onclick="saveItem()">保存道具</button>
+                    <button type="button" class="btn btn-primary save-item-btn">
+                        <span class="spinner-border spinner-border-sm d-none" role="status"></span>
+                        保存道具
+                    </button>
                 </div>
             </div>
         </div>
@@ -364,7 +287,7 @@
 
     <!-- 添加技能模态框 -->
     <div class="modal fade" id="addSkillModal" tabindex="-1">
-        <div class="modal-dialog">
+        <div class="modal-dialog modal-lg">
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title">添加新技能</h5>
@@ -373,13 +296,16 @@
                 <div class="modal-body">
                     <form id="addSkillForm">
                         <div class="mb-3">
-                            <label for="skillName" class="form-label">技能名称</label>
+                            <label for="skillName" class="form-label">技能名称 <span class="text-danger">*</span></label>
                             <input type="text" class="form-control" id="skillName" required>
+                            <div class="invalid-feedback">请输入技能名称</div>
                         </div>
+                        
                         <div class="mb-3">
                             <label for="skillDescription" class="form-label">描述</label>
-                            <textarea class="form-control" id="skillDescription" rows="3"></textarea>
+                            <textarea class="form-control" id="skillDescription" rows="3" placeholder="描述技能的效果和使用方法..."></textarea>
                         </div>
+                        
                         <div class="row">
                             <div class="col-md-4">
                                 <label for="skillCategory" class="form-label">类别</label>
@@ -387,7 +313,7 @@
                                     <option value="">选择类别</option>
                                     <option value="combat">⚔️ 战斗</option>
                                     <option value="magic">🔮 魔法</option>
-                                    <option value="social">💬 社交</option>
+                                    <option value="social">🗣️ 社交</option>
                                     <option value="mental">🧠 精神</option>
                                     <option value="physical">💪 体能</option>
                                     <option value="crafting">🔨 制作</option>
@@ -408,12 +334,9 @@
                         <div class="mt-3">
                             <label class="form-label">技能效果</label>
                             <div id="skillEffects">
-                                <!-- 默认效果行 -->
-                                <div class="effect-item row g-2 mb-2">
-                                    <!-- ... 效果配置字段 -->
-                                </div>
+                                <!-- 效果项将由 JavaScript 动态添加 -->
                             </div>
-                            <button type="button" class="btn btn-outline-primary btn-sm" onclick="addSkillEffectRow()">
+                            <button type="button" class="btn btn-outline-primary btn-sm add-effect-btn mt-2">
                                 <i class="bi bi-plus"></i> 添加效果
                             </button>
                         </div>
@@ -421,7 +344,10 @@
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
-                    <button type="button" class="btn btn-primary" onclick="saveSkill()">保存技能</button>
+                    <button type="button" class="btn btn-primary save-skill-btn">
+                        <span class="spinner-border spinner-border-sm d-none" role="status"></span>
+                        保存技能
+                    </button>
                 </div>
             </div>
         </div>
@@ -434,38 +360,11 @@
     <script>
         // 初始化用户档案系统
         document.addEventListener('DOMContentLoaded', function () {
-            // 等待 UserProfile 类加载完成
-            if (typeof window.userProfile !== 'undefined') {
-                window.userProfile.init('user_default');
-            } else {
-                // 延迟重试
-                setTimeout(() => {
-                    if (typeof window.userProfile !== 'undefined') {
-                        window.userProfile.init('user_default');
-                    }
-                }, 100);
-            }
-
-            // 使用事件委托，避免直接调用全局函数
-            document.addEventListener('click', function (e) {
-                if (e.target.matches('.btn[onclick*="showAddItemModal"]')) {
-                    e.preventDefault();
-                    window.userProfile?.showModal('addItemModal');
-                }
-
-                if (e.target.matches('.btn[onclick*="saveItem"]')) {
-                    e.preventDefault();
-                    window.userProfile?.saveNewItem();
-                }
-
-                if (e.target.matches('.btn[onclick*="saveSkill"]')) {
-                    e.preventDefault();
-                    window.userProfile?.saveNewSkill();
-                }
-            });
+            // app-loader.js 会自动加载所有必要的模块
+            // 用户档案会自动初始化
+            console.log('🎭 用户档案页面已加载');
         });
     </script>
 </body>
-
 </html>
 {{end}}
