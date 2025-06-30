@@ -12,6 +12,7 @@
                     {{range .characters}}
                     <div class="character-item p-2 border rounded mb-2" data-character-id="{{.ID}}"
                         style="cursor: pointer;">
+                        <div class="status-indicator status-available" title="在线"></div>
                         <div class="d-flex align-items-center">
                             <img src="{{.Avatar}}" alt="{{.Name}}"
                                 style="width: 40px; height: 40px; border-radius: 50%; object-fit: cover;" class="me-2"
@@ -200,51 +201,13 @@
 
 <script>
     document.addEventListener('DOMContentLoaded', function () {
-        // 获取场景ID
-        const sceneId = document.getElementById('scene-id').value;
+    const sceneId = document.getElementById('scene-id').value;
 
-        // 初始化应用
-        if (window.SceneApp) {
-            window.SceneApp.initScene();
-        }
+    // app-loader.js 会自动处理所有初始化
+    // 包括 SceneApp、ExportManager、RealtimeManager
 
-        // 初始化导出管理器
-        if (typeof ExportManager !== 'undefined') {
-            if (!window.exportManager) {
-                window.exportManager = new ExportManager();
-            }
-
-            window.exportManager
-                .onProgress((progress, status) => {
-                    console.log(`导出进度: ${progress}% - ${status}`);
-                })
-                .onComplete((result, fileName) => {
-                    if (typeof Utils !== 'undefined') {
-                        Utils.showSuccess(`导出完成: ${fileName}`);
-                    }
-                })
-                .onError((error) => {
-                    console.error('导出失败:', error);
-                });
-        }
-
-        // 初始化实时通信 - 新增
-        if (typeof RealtimeManager !== 'undefined' && sceneId) {
-            initRealtimeFeatures(sceneId);
-        }
-
-        // 添加刷新场景功能
-        window.refreshScene = function () {
-            if (window.SceneApp && window.SceneApp.initScene) {
-                window.SceneApp.initScene();
-            }
-
-            // 刷新实时连接
-            if (typeof window.refreshSceneRealtime !== 'undefined') {
-                window.refreshSceneRealtime();
-            }
-        };
-    });
+    console.log('🎭 场景页面已加载，场景ID:', sceneId);
+});
 
 </script>
 {{end}}
