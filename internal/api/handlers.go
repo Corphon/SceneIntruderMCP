@@ -418,6 +418,21 @@ func (h *Handler) handleStoryChoiceMessage(client *WebSocketClient, message map[
 		return
 	}
 
+	// 解析用户偏好（可选）
+	var preferences *models.UserPreferences
+	if prefData, exists := message["user_preferences"]; exists {
+		if prefMap, ok := prefData.(map[string]interface{}); ok {
+			preferences = &models.UserPreferences{}
+			// 解析偏好设置
+			if creativity, ok := prefMap["creativity_level"].(string); ok {
+				preferences.CreativityLevel = models.CreativityLevel(creativity)
+			}
+			if plotTwists, ok := prefMap["allow_plot_twists"].(bool); ok {
+				preferences.AllowPlotTwists = plotTwists
+			}
+		}
+	}
+
 	// 获取故事服务
 	storyService := h.getStoryService()
 	if storyService == nil {
@@ -426,23 +441,22 @@ func (h *Handler) handleStoryChoiceMessage(client *WebSocketClient, message map[
 	}
 
 	// 执行故事选择
-	nextNode, err := storyService.MakeChoice(client.sceneID, nodeID, choiceID, nil)
+	nextNode, err := storyService.MakeChoice(client.sceneID, nodeID, choiceID, preferences)
 	if err != nil {
 		h.sendErrorMessage(client, "执行故事选择失败: "+err.Error())
 		return
 	}
 
 	// 广播故事更新给场景中的所有客户端
-	storyUpdateMsg := map[string]interface{}{
-		"type":      "story:choice_made",
-		"scene_id":  client.sceneID,
-		"node_id":   nodeID,
-		"choice_id": choiceID,
-		"next_node": nextNode,
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-
-	h.broadcastToScene(client.sceneID, storyUpdateMsg)
+	h.broadcastToScene(client.sceneID, map[string]interface{}{
+		"type": "story:choice_made",
+		"data": map[string]interface{}{
+			"node_id":   nodeID,
+			"choice_id": choiceID,
+			"next_node": nextNode,
+			"user_id":   client.userID,
+		},
+	})
 }
 
 // handleUserStatusUpdateMessage 处理用户状态更新消息
@@ -1044,90 +1058,65 @@ func (h *Handler) GetStoryData(c *gin.Context) {
 
 // MakeStoryChoice 处理故事选择逻辑
 func (h *Handler) MakeStoryChoice(c *gin.Context) {
-	sceneID := c.Param("scene_id")
+	sceneID := c.Param("id")
 
 	var req struct {
-		NodeID   string `json:"node_id" binding:"required"`   // 当前节点ID
-		ChoiceID string `json:"choice_id" binding:"required"` // 选择ID
+		NodeID          string                  `json:"node_id" binding:"required"`
+		ChoiceID        string                  `json:"choice_id" binding:"required"`
+		UserPreferences *models.UserPreferences `json:"user_preferences,omitempty"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数格式错误: " + err.Error()})
 		return
 	}
 
-	// 验证参数
-	if sceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
-		return
-	}
-
-	// 获取StoryService实例
+	// 获取故事服务
 	storyService := h.getStoryService()
 	if storyService == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
 		return
 	}
 
-	// 解析用户偏好（可选）
-	var preferences *models.UserPreferences
-	if prefJSON := c.Query("preferences"); prefJSON != "" {
-		preferences = &models.UserPreferences{}
-		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
-			preferences = nil // 解析失败使用默认值
-		}
-	}
-
-	// 创建超时上下文
-	_, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-	defer cancel()
-
-	// 执行故事选择
-	nextNode, err := storyService.MakeChoice(sceneID, req.NodeID, req.ChoiceID, preferences)
+	// 使用偏好设置进行故事选择
+	nextNode, err := storyService.MakeChoice(sceneID, req.NodeID, req.ChoiceID, req.UserPreferences)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("执行故事选择失败: %v", err)})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "执行故事选择失败: " + err.Error()})
 		return
 	}
 
 	// 获取更新后的故事数据
-	storyData, err := storyService.GetStoryData(sceneID, preferences)
+	storyData, err := storyService.GetStoryData(sceneID, req.UserPreferences)
 	if err != nil {
-		// 即使获取完整数据失败，也返回新节点
-		log.Printf("Warning: Failed to get updated story data: %v", err)
-		c.JSON(http.StatusOK, gin.H{
-			"success":   true,
-			"message":   "选择已执行",
-			"next_node": nextNode,
-		})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取故事数据失败: " + err.Error()})
 		return
 	}
 
-	// 构建分支视图数据
-	branchView := buildStoryBranchView(storyData)
-
-	// 记录API使用情况
-	if h.StatsService != nil {
-		h.StatsService.RecordAPIRequest(5) // 估算token使用量
-	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"success":       true,
-		"message":       "选择已执行",
-		"next_node":     nextNode,
-		"story_data":    branchView,
-		"progress":      storyData.Progress,
-		"current_state": storyData.CurrentState,
+		"success":    true,
+		"message":    "选择执行成功",
+		"next_node":  nextNode,
+		"story_data": storyData,
 	})
 }
 
 // AdvanceStory 推进故事情节
 func (h *Handler) AdvanceStory(c *gin.Context) {
-	sceneID := c.Param("scene_id")
+	sceneID := c.Param("id")
 
-	// 验证参数
 	if sceneID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
 		return
+	}
+
+	// 解析请求体中的偏好设置
+	var req struct {
+		UserPreferences *models.UserPreferences `json:"user_preferences,omitempty"`
+	}
+
+	// 尝试解析请求体，如果失败则使用默认偏好
+	if err := c.ShouldBindJSON(&req); err != nil {
+		req.UserPreferences = nil // 使用默认偏好
 	}
 
 	// 获取StoryService实例
@@ -1137,16 +1126,8 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 		return
 	}
 
-	// 解析用户偏好（可选）
-	var preferences *models.UserPreferences
-	if prefJSON := c.Query("preferences"); prefJSON != "" {
-		preferences = &models.UserPreferences{}
-		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
-			preferences = nil // 解析失败使用默认值
-		}
-	}
-
 	// 如果没有偏好设置，使用默认值
+	preferences := req.UserPreferences
 	if preferences == nil {
 		preferences = &models.UserPreferences{
 			CreativityLevel:   models.CreativityBalanced,
@@ -1157,10 +1138,6 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 			DarkMode:          false,
 		}
 	}
-
-	// 创建超时上下文
-	_, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
-	defer cancel()
 
 	// 推进故事
 	storyUpdate, err := storyService.AdvanceStory(sceneID, preferences)
@@ -1173,7 +1150,6 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 	storyData, err := storyService.GetStoryData(sceneID, preferences)
 	if err != nil {
 		// 即使获取完整数据失败，也返回更新信息
-		log.Printf("Warning: Failed to get updated story data: %v", err)
 		c.JSON(http.StatusOK, gin.H{
 			"success":      true,
 			"message":      "故事已推进",
@@ -1182,22 +1158,11 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 		return
 	}
 
-	// 构建分支视图数据
-	branchView := buildStoryBranchView(storyData)
-
-	// 记录API使用情况
-	if h.StatsService != nil {
-		h.StatsService.RecordAPIRequest(15) // 故事推进通常需要更多token
-	}
-
 	c.JSON(http.StatusOK, gin.H{
-		"success":       true,
-		"message":       "故事已推进",
-		"story_update":  storyUpdate,
-		"story_data":    branchView,
-		"progress":      storyData.Progress,
-		"current_state": storyData.CurrentState,
-		"new_content":   storyUpdate.Title,
+		"success":      true,
+		"message":      "故事已推进",
+		"story_update": storyUpdate,
+		"story_data":   storyData,
 	})
 }
 
@@ -1279,7 +1244,7 @@ func (h *Handler) RewindStory(c *gin.Context) {
 
 // GetStoryBranches 获取场景的所有故事分支
 func (h *Handler) GetStoryBranches(c *gin.Context) {
-	sceneID := c.Param("sceneId")
+	sceneID := c.Param("id")
 
 	// 获取StoryService实例
 	storyService := h.getStoryService()
@@ -1288,13 +1253,14 @@ func (h *Handler) GetStoryBranches(c *gin.Context) {
 		return
 	}
 
-	// 获取用户偏好设置（可选）
+	// 解析用户偏好设置（支持查询参数）
 	var preferences *models.UserPreferences
-	prefJSON := c.Query("preferences")
-	if prefJSON != "" {
+	if prefJSON := c.Query("preferences"); prefJSON != "" {
 		preferences = &models.UserPreferences{}
 		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
-			preferences = nil // 解析失败使用默认值
+			// 解析失败，记录日志但继续使用默认值
+			log.Printf("解析用户偏好失败: %v", err)
+			preferences = nil
 		}
 	}
 
@@ -1461,7 +1427,7 @@ func findCurrentPath(nodes []models.StoryNode) map[string]bool {
 
 // RewindStoryToNode 回溯故事到指定节点
 func (h *Handler) RewindStoryToNode(c *gin.Context) {
-	sceneID := c.Param("sceneId")
+	sceneID := c.Param("id")
 
 	var req struct {
 		NodeID string `json:"node_id" binding:"required"` // 目标节点ID
@@ -1469,6 +1435,12 @@ func (h *Handler) RewindStoryToNode(c *gin.Context) {
 
 	if err := c.BindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数"})
+		return
+	}
+
+	// 验证参数
+	if sceneID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
 		return
 	}
 
@@ -1490,8 +1462,10 @@ func (h *Handler) RewindStoryToNode(c *gin.Context) {
 	branchView := buildStoryBranchView(storyData)
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":    "故事已成功回溯",
-		"story_data": branchView,
+		"success":     true,
+		"message":     "故事已成功回溯",
+		"story_data":  branchView,
+		"target_node": req.NodeID,
 	})
 }
 
