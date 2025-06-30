@@ -427,6 +427,62 @@ class RealtimeManager {
         });
     }
 
+    /**
+     * 发送故事选择消息 - 修正格式
+     */
+    sendStoryChoice(sceneId, nodeId, choiceId, preferences = null) {
+        const connectionId = `scene_${sceneId}`;
+        
+        const message = {
+            type: 'story_choice',
+            node_id: nodeId,
+            choice_id: choiceId
+        };
+
+        // 添加用户偏好（如果提供）
+        if (preferences && typeof preferences === 'object') {
+            message.user_preferences = preferences;
+        }
+
+        return this.sendMessage(connectionId, message);
+    }
+
+    /**
+     * 发送用户状态更新 - 标准化格式
+     */
+    sendUserStatusUpdate(status, action = null, additionalData = {}) {
+        const message = {
+            type: 'user_status_update',
+            status: status
+        };
+
+        if (action) {
+            message.action = action;
+        }
+
+        // 合并额外数据
+        Object.assign(message, additionalData);
+
+        return this.sendMessage('user_status', message);
+    }
+
+    /**
+     * 发送角色互动消息 - 验证参数
+     */
+    sendCharacterInteraction(sceneId, characterId, message, metadata = {}) {
+        if (!sceneId || !characterId || !message) {
+            console.error('发送角色互动消息缺少必要参数');
+            return false;
+        }
+
+        return this.sendMessage(`scene_${sceneId}`, {
+            type: 'character_interaction',
+            character_id: characterId,
+            message: message,
+            user_id: this.getCurrentUserId(),
+            ...metadata
+        });
+    }
     // ========================================
     // 心跳和重连机制
     // ========================================
