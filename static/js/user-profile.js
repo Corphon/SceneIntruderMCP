@@ -300,6 +300,54 @@ class UserProfile {
         this.renderAchievements();
     }
 
+    /**
+     * 创建标准化的用户偏好对象
+     */
+    createStandardPreferences(formData) {
+        return {
+            creativity_level: formData.creativity_level || "BALANCED",
+            allow_plot_twists: formData.allow_plot_twists !== false,
+            response_length: formData.response_length || "medium",
+            language_style: formData.language_style || "casual",
+            notification_level: formData.notification_enabled ? "all" : "none", 
+            preferred_model: formData.preferred_model || "",
+            dark_mode: formData.theme === "dark",
+            auto_save: formData.auto_save !== false
+        };
+    }
+
+    /**
+     * 将后端偏好转换为前端格式
+     */
+    convertPreferencesFromBackend(preferences) {
+        return {
+            creativity_level: preferences.creativity_level,
+            allow_plot_twists: preferences.allow_plot_twists,
+            response_length: preferences.response_length,
+            language_style: preferences.language_style,
+            notification_enabled: preferences.notification_level !== "none", // ✅ 转换格式
+            theme: preferences.dark_mode ? "dark" : "light", // ✅ 转换格式
+            auto_save: preferences.auto_save,
+            preferred_model: preferences.preferred_model
+        };
+    }
+
+    /**
+     * 更新用户偏好 - 使用标准化格式
+     */
+    async updateUserPreferences(userId, preferences) {
+        const standardPreferences = this.createStandardPreferences(preferences);
+        
+        try {
+            const result = await API.updateUserPreferences(userId, standardPreferences);
+            this.showSuccess('偏好设置已更新');
+            return result;
+        } catch (error) {
+            this.showError('更新偏好设置失败: ' + error.message);
+            throw error;
+        }
+    }
+
     // ========================================
     // 统计信息渲染
     // ========================================
