@@ -210,9 +210,6 @@ func SetupRouter() (*gin.Engine, error) {
 				exportGroup.GET("/interactions", handler.ExportInteractions)
 				exportGroup.GET("/story", handler.ExportStory)
 			}
-
-			// ✅ 故事回溯路由
-			scenesGroup.POST("/:id/story/rewind", handler.RewindStoryToNode)
 		}
 
 		// ===============================
