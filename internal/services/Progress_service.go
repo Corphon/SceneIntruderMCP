@@ -3,6 +3,7 @@ package services
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -25,19 +26,21 @@ type ProgressTracker struct {
 	Subscribers map[chan ProgressUpdate]bool // 订阅进度更新的通道
 	Done        chan struct{}                // 任务完成信号
 	mutex       sync.Mutex                   // 保护并发访问
-	StatusMsg   string
 }
 
 // ProgressService 管理所有进度跟踪器
 type ProgressService struct {
-	trackers map[string]*ProgressTracker
-	mutex    sync.RWMutex
+	trackers    map[string]*ProgressTracker
+	mutex       sync.RWMutex
+	cleanup     *time.Ticker
+	stopCleanup chan struct{}
 }
 
 // NewProgressService 创建进度服务实例
 func NewProgressService() *ProgressService {
 	return &ProgressService{
-		trackers: make(map[string]*ProgressTracker),
+		trackers:    make(map[string]*ProgressTracker),
+		stopCleanup: make(chan struct{}),
 	}
 }
 
@@ -94,14 +97,7 @@ func (t *ProgressTracker) UpdateProgress(progress int, message string) {
 		Status:   t.Status,
 	}
 
-	// 通知所有订阅者
-	for subscriber := range t.Subscribers {
-		// 非阻塞发送，如果通道已满则跳过
-		select {
-		case subscriber <- update:
-		default:
-		}
-	}
+	t.notifySubscribers(update, false)
 }
 
 // Complete 标记任务完成
@@ -118,22 +114,59 @@ func (t *ProgressTracker) Complete(message string) {
 	t.Status = "completed"
 	t.UpdateTime = time.Now()
 
-	// 通知所有订阅者
 	update := ProgressUpdate{
 		Progress: 100,
 		Message:  t.Message,
 		Status:   "completed",
 	}
 
-	for subscriber := range t.Subscribers {
+	t.notifySubscribers(update, true)
+
+	// 安全关闭 Done 通道
+	select {
+	case <-t.Done:
+	default:
+		close(t.Done)
+	}
+}
+
+// 自动清理机制
+func (s *ProgressService) StartAutoCleanup() {
+	s.cleanup = time.NewTicker(10 * time.Minute)
+	go func() {
+		defer s.cleanup.Stop()
+		for {
+			select {
+			case <-s.cleanup.C:
+				s.CleanupCompletedTasks(30 * time.Minute)
+			case <-s.stopCleanup:
+				return
+			}
+		}
+	}()
+}
+
+// Stop 停止自动清理
+func (s *ProgressService) Stop() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// 安全检查，防止重复关闭
+	if s.stopCleanup != nil {
 		select {
-		case subscriber <- update:
+		case <-s.stopCleanup:
+			// 通道已经关闭，不需要再次关闭
 		default:
+			close(s.stopCleanup)
+			s.stopCleanup = nil // 设置为 nil 防止重复关闭
 		}
 	}
 
-	// 通知Done通道
-	close(t.Done)
+	// 停止清理 ticker
+	if s.cleanup != nil {
+		s.cleanup.Stop()
+		s.cleanup = nil
+	}
 }
 
 // Fail 标记任务失败
@@ -145,22 +178,20 @@ func (t *ProgressTracker) Fail(errorMsg string) {
 	t.Status = "failed"
 	t.UpdateTime = time.Now()
 
-	// 通知所有订阅者
 	update := ProgressUpdate{
 		Progress: t.Progress,
 		Message:  t.Message,
 		Status:   "failed",
 	}
 
-	for subscriber := range t.Subscribers {
-		select {
-		case subscriber <- update:
-		default:
-		}
-	}
+	t.notifySubscribers(update, true)
 
-	// 通知Done通道
-	close(t.Done)
+	// 安全关闭 Done 通道
+	select {
+	case <-t.Done:
+	default:
+		close(t.Done)
+	}
 }
 
 // Subscribe 订阅进度更新
@@ -187,16 +218,27 @@ func (t *ProgressTracker) Unsubscribe(subscriber chan ProgressUpdate) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
-	delete(t.Subscribers, subscriber)
-	close(subscriber)
+	// 检查订阅者是否仍在列表中
+	if _, exists := t.Subscribers[subscriber]; exists {
+		delete(t.Subscribers, subscriber)
+
+		// 安全关闭通道
+		select {
+		case <-subscriber:
+			// 通道已经关闭，不需要再次关闭
+		default:
+			close(subscriber)
+		}
+	}
 }
 
 // CleanupCompletedTasks 清理已完成的任务
 func (s *ProgressService) CleanupCompletedTasks(maxAge time.Duration) {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
 	now := time.Now()
+	var toDelete []string
+
+	// 第一阶段：只读取，避免嵌套锁
+	s.mutex.RLock()
 	for id, tracker := range s.trackers {
 		tracker.mutex.Lock()
 		isCompleted := tracker.Status == "completed" || tracker.Status == "failed"
@@ -204,7 +246,62 @@ func (s *ProgressService) CleanupCompletedTasks(maxAge time.Duration) {
 		tracker.mutex.Unlock()
 
 		if isCompleted && isOld {
-			delete(s.trackers, id)
+			toDelete = append(toDelete, id)
 		}
 	}
+	s.mutex.RUnlock()
+
+	// 第二阶段：批量删除
+	if len(toDelete) > 0 {
+		s.mutex.Lock()
+		for _, id := range toDelete {
+			delete(s.trackers, id)
+		}
+		s.mutex.Unlock()
+
+		log.Printf("🧹 进度服务清理: 清理了 %d 个过期任务", len(toDelete))
+	}
+}
+
+// 提取通用通知方法
+func (t *ProgressTracker) notifySubscribers(update ProgressUpdate, closeChannels bool) {
+	droppedCount := 0
+
+	for subscriber := range t.Subscribers {
+		select {
+		case subscriber <- update:
+		default:
+			droppedCount++ // 简单计数，避免过多日志
+		}
+
+		if closeChannels {
+			close(subscriber)
+		}
+	}
+
+	// 只在有丢弃消息时记录一次日志
+	if droppedCount > 0 {
+		log.Printf("进度通知: %d 个订阅者通道已满，消息被丢弃", droppedCount)
+	}
+
+	if closeChannels {
+		t.Subscribers = make(map[chan ProgressUpdate]bool)
+	}
+}
+
+// GetActiveTaskCount 获取当前正在运行的任务数量
+func (s *ProgressService) GetActiveTaskCount() int {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	count := 0
+	for _, tracker := range s.trackers {
+		tracker.mutex.Lock()
+		if tracker.Status == "running" {
+			count++
+		}
+		tracker.mutex.Unlock()
+	}
+
+	return count
 }
