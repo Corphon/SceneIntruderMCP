@@ -3,6 +3,7 @@ package services
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
@@ -11,6 +12,12 @@ import (
 // ContextService 管理场景上下文和交互历史
 type ContextService struct {
 	SceneService SceneServiceInterface
+
+	// 并发控制
+	sceneLocks  sync.Map // sceneID -> *sync.RWMutex
+	cacheMutex  sync.RWMutex
+	sceneCache  map[string]*CachedSceneData
+	cacheExpiry time.Duration
 }
 
 type SceneServiceInterface interface {
@@ -20,15 +27,83 @@ type SceneServiceInterface interface {
 
 // NewContextService 创建上下文服务
 func NewContextService(sceneService SceneServiceInterface) *ContextService {
-	return &ContextService{
+	service := &ContextService{
 		SceneService: sceneService,
+		sceneCache:   make(map[string]*CachedSceneData),
+		cacheExpiry:  5 * time.Minute, // 5分钟缓存过期
 	}
+
+	// 🔧 启动后台清理协程
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute) // 每2分钟清理一次
+		defer ticker.Stop()
+
+		for range ticker.C {
+			service.cleanupExpiredCache()
+		}
+	}()
+
+	return service
+}
+
+// 场景锁
+func (s *ContextService) getSceneLock(sceneID string) *sync.RWMutex {
+	value, _ := s.sceneLocks.LoadOrStore(sceneID, &sync.RWMutex{})
+	return value.(*sync.RWMutex)
+}
+
+// 安全加载场景数据（带缓存）
+func (s *ContextService) loadSceneDataSafe(sceneID string) (*SceneData, error) {
+	lock := s.getSceneLock(sceneID)
+	lock.RLock()
+
+	// 检查缓存
+	s.cacheMutex.RLock()
+	if cached, exists := s.sceneCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			lock.RUnlock()
+			return cached.SceneData, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 缓存过期或不存在，需要重新加载
+	lock.RUnlock()
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 双重检查
+	s.cacheMutex.RLock()
+	if cached, exists := s.sceneCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached.SceneData, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 读取场景数据
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 更新缓存
+	s.cacheMutex.Lock()
+	s.sceneCache[sceneID] = &CachedSceneData{
+		SceneData: sceneData,
+		Timestamp: time.Now(),
+	}
+	s.cacheMutex.Unlock()
+
+	return sceneData, nil
 }
 
 // GetRecentConversations 获取最近的对话
 func (s *ContextService) GetRecentConversations(sceneID string, limit int) ([]models.Conversation, error) {
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	// 使用缓存加载场景数据
+	sceneData, err := s.loadSceneDataSafe(sceneID)
 	if err != nil {
 		return nil, err
 	}
@@ -47,8 +122,8 @@ func (s *ContextService) GetRecentConversations(sceneID string, limit int) ([]mo
 
 // BuildCharacterMemory 构建角色记忆
 func (s *ContextService) BuildCharacterMemory(sceneID, characterID string) (string, error) {
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	// 使用缓存加载场景数据
+	sceneData, err := s.loadSceneDataSafe(sceneID)
 	if err != nil {
 		return "", err
 	}
@@ -70,13 +145,16 @@ func (s *ContextService) BuildCharacterMemory(sceneID, characterID string) (stri
 	memory := fmt.Sprintf("我是%s，我在%s场景中。我是%s。",
 		character.Name, sceneData.Scene.Title, character.Description)
 
-	// 在实际应用中，可以基于过去的对话和事件更深入地构建记忆
 	return memory, nil
 }
 
 // AddConversation 添加对话到场景上下文，支持角色间对话记录
 func (s *ContextService) AddConversation(sceneID, speakerID, content string, metadata map[string]interface{}) error {
-	// 加载场景数据
+	lock := s.getSceneLock(sceneID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 在锁内加载最新的场景数据
 	sceneData, err := s.SceneService.LoadScene(sceneID)
 	if err != nil {
 		return err
@@ -112,13 +190,26 @@ func (s *ContextService) AddConversation(sceneID, speakerID, content string, met
 	sceneData.Context.Conversations = append(sceneData.Context.Conversations, conversation)
 
 	// 更新场景上下文
-	return s.SceneService.UpdateContext(sceneID, &sceneData.Context)
+	err = s.SceneService.UpdateContext(sceneID, &sceneData.Context)
+	if err != nil {
+		return err
+	}
+
+	// 🔧 更新缓存
+	s.cacheMutex.Lock()
+	s.sceneCache[sceneID] = &CachedSceneData{
+		SceneData: sceneData,
+		Timestamp: time.Now(),
+	}
+	s.cacheMutex.Unlock()
+
+	return nil
 }
 
 // GetCharacterInteractions 获取场景中的角色间互动历史
 func (s *ContextService) GetCharacterInteractions(sceneID string, filter map[string]interface{}, limit int) ([]models.Conversation, error) {
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	// 使用缓存加载场景数据
+	sceneData, err := s.loadSceneDataSafe(sceneID)
 	if err != nil {
 		return nil, err
 	}
@@ -185,8 +276,8 @@ func (s *ContextService) GetSimulationByID(sceneID string, simulationID string) 
 
 // GetCharacterToCharacterInteractions 获取特定两个角色之间的互动
 func (s *ContextService) GetCharacterToCharacterInteractions(sceneID string, character1ID string, character2ID string, limit int) ([]models.Conversation, error) {
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	// 使用缓存加载场景数据
+	sceneData, err := s.loadSceneDataSafe(sceneID)
 	if err != nil {
 		return nil, err
 	}
@@ -228,4 +319,25 @@ func (s *ContextService) GetCharacterToCharacterInteractions(sceneID string, cha
 
 	// 否则返回最近的limit条
 	return interactions[len(interactions)-limit:], nil
+}
+
+// 手动清除指定场景的缓存（当场景数据更新时调用）
+func (s *ContextService) InvalidateSceneCache(sceneID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	delete(s.sceneCache, sceneID)
+}
+
+// 清理过期缓存
+func (s *ContextService) cleanupExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	for sceneID, cached := range s.sceneCache {
+		if now.Sub(cached.Timestamp) > s.cacheExpiry {
+			delete(s.sceneCache, sceneID)
+		}
+	}
 }
