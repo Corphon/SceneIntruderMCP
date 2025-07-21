@@ -1,8 +1,10 @@
-//internal/services/analyzer_service.go
+// internal/services/analyzer_service.go
 package services
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +18,21 @@ import (
 
 // AnalyzerService 分析和提取文本中的各种信息
 type AnalyzerService struct {
-	LLMService *LLMService
+	LLMService    *LLMService
+	semaphore     chan struct{}
+	analysisCache *AnalysisCache
+}
+
+// 分析结果缓存
+type AnalysisCache struct {
+	cache      map[string]*CachedAnalysis
+	mutex      sync.RWMutex
+	expiration time.Duration
+}
+
+type CachedAnalysis struct {
+	Result    *models.AnalysisResult
+	Timestamp time.Time
 }
 
 // NewAnalyzerService 创建分析服务
@@ -28,6 +44,11 @@ func NewAnalyzerService() (*AnalyzerService, error) {
 
 	return &AnalyzerService{
 		LLMService: llmService,
+		semaphore:  make(chan struct{}, 3), // 限制并发数量为3
+		analysisCache: &AnalysisCache{
+			cache:      make(map[string]*CachedAnalysis),
+			expiration: 30 * time.Minute,
+		},
 	}, nil
 }
 
@@ -47,6 +68,12 @@ func NewAnalyzerServiceWithProvider(provider llm.Provider) *AnalyzerService {
 					expiration: 30 * time.Minute,
 				},
 			},
+			// 使用信号量限制并发数量
+			semaphore: make(chan struct{}, 3),
+			analysisCache: &AnalysisCache{
+				cache:      make(map[string]*CachedAnalysis),
+				expiration: 30 * time.Minute,
+			},
 		}
 	}
 
@@ -63,48 +90,138 @@ func NewAnalyzerServiceWithProvider(provider llm.Provider) *AnalyzerService {
 				expiration: 30 * time.Minute,
 			},
 		},
+		// 使用信号量限制并发数量
+		semaphore: make(chan struct{}, 3),
+		analysisCache: &AnalysisCache{
+			cache:      make(map[string]*CachedAnalysis),
+			expiration: 30 * time.Minute,
+		},
 	}
 }
 
 // AnalyzeText 分析文本，提取场景、角色、物品等信息
+// 🔧 优化后的 AnalyzeText 方法
 func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResult, error) {
+	// 获取并发许可
+	s.semaphore <- struct{}{}
+	defer func() { <-s.semaphore }()
+
 	// 检查LLM提供商是否就绪
 	if s.LLMService == nil || !s.LLMService.IsReady() {
 		return nil, errors.New("LLM服务未配置或未就绪，请先在设置页面配置API密钥")
 	}
+
+	// 检查缓存
+	cacheKey := s.generateCacheKey(text, title)
+	if cachedResult := s.checkAnalysisCache(cacheKey); cachedResult != nil {
+		return cachedResult, nil
+	}
+
+	// 一次性预处理
+	isEnglish := isEnglishText(text + " " + title)
+
 	result := &models.AnalysisResult{
 		Title: title,
+		Metadata: map[string]interface{}{
+			"is_english":  isEnglish,
+			"text_length": len(text),
+		},
 	}
+
+	// 并行提取（使用 goroutine）
+	var wg sync.WaitGroup
+	var sceneErr, charErr, itemErr, summaryErr error
+	var scenes []models.Scene
+	var characters []models.Character
+	var items []models.Item
+	var summary string
 
 	// 提取场景
-	scenes, err := s.extractScenes(text, title)
-	if err != nil {
-		return nil, fmt.Errorf("提取场景失败: %w", err)
-	}
-	result.Scenes = scenes
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s, err := s.extractScenes(text, title)
+		if err != nil {
+			sceneErr = err
+			return
+		}
+		scenes = s
+	}()
 
 	// 提取角色
-	characters, err := s.extractCharacters(text, title)
-	if err != nil {
-		return nil, fmt.Errorf("提取角色失败: %w", err)
-	}
-	result.Characters = characters
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		characters, err := s.extractCharacters(text, title)
+		if err != nil {
+			charErr = err
+			return
+		}
+		result.Characters = characters
+	}()
+
+	// 提取角色
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		c, err := s.extractCharacters(text, title)
+		if err != nil {
+			charErr = err
+			return
+		}
+		characters = c
+	}()
 
 	// 提取物品
-	items, err := s.extractItems(text, title)
-	if err != nil {
-		return nil, fmt.Errorf("提取物品失败: %w", err)
-	}
-	result.Items = items
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		i, err := s.extractItems(text, title)
+		if err != nil {
+			itemErr = err
+			return
+		}
+		items = i
+	}()
 
 	// 生成摘要
-	summary, err := s.generateSummary(text, title)
-	if err != nil {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sum, err := s.generateSummary(text, title)
+		if err != nil {
+			summaryErr = err
+			return
+		}
+		summary = sum
+	}()
+
+	// 等待所有任务完成
+	wg.Wait()
+
+	// 检查错误
+	if sceneErr != nil {
+		return nil, fmt.Errorf("提取场景失败: %w", sceneErr)
+	}
+	if charErr != nil {
+		return nil, fmt.Errorf("提取角色失败: %w", charErr)
+	}
+	if itemErr != nil {
+		return nil, fmt.Errorf("提取物品失败: %w", itemErr)
+	}
+	if summaryErr != nil {
 		// 摘要生成失败不是致命错误
 		result.Summary = "无法生成摘要。"
-	} else {
-		result.Summary = summary
 	}
+
+	// 安全地设置结果
+	result.Scenes = scenes
+	result.Characters = characters
+	result.Items = items
+	result.Summary = summary
+
+	// 添加到缓存
+	s.addToAnalysisCache(cacheKey, result)
 
 	return result, nil
 }
@@ -362,6 +479,10 @@ func truncateText(text string, maxLength int) string {
 
 // AnalyzeTextWithProgress 带进度反馈和超时控制的文本分析
 func (s *AnalyzerService) AnalyzeTextWithProgress(ctx context.Context, text string, tracker *ProgressTracker) (*models.AnalysisResult, error) {
+	// 获取并发许可
+	s.semaphore <- struct{}{}
+	defer func() { <-s.semaphore }()
+
 	// 检查context是否已经取消
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
@@ -849,4 +970,38 @@ func (s *AnalyzerService) buildCharacterRelationships(ctx context.Context, chara
 	}
 
 	return nil
+}
+
+// 🔧 生成缓存键
+func (s *AnalyzerService) generateCacheKey(text, title string) string {
+	h := md5.New()
+	h.Write([]byte(text + "|" + title))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// 🔧 检查缓存
+func (s *AnalyzerService) checkAnalysisCache(cacheKey string) *models.AnalysisResult {
+	s.analysisCache.mutex.RLock()
+	defer s.analysisCache.mutex.RUnlock()
+
+	if cached, exists := s.analysisCache.cache[cacheKey]; exists {
+		if time.Since(cached.Timestamp) < s.analysisCache.expiration {
+			return cached.Result
+		}
+		// 过期，删除
+		delete(s.analysisCache.cache, cacheKey)
+	}
+
+	return nil
+}
+
+// 🔧 添加到缓存
+func (s *AnalyzerService) addToAnalysisCache(cacheKey string, result *models.AnalysisResult) {
+	s.analysisCache.mutex.Lock()
+	defer s.analysisCache.mutex.Unlock()
+
+	s.analysisCache.cache[cacheKey] = &CachedAnalysis{
+		Result:    result,
+		Timestamp: time.Now(),
+	}
 }
