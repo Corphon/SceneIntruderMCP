@@ -14,16 +14,6 @@ import (
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/llm"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/anthropic"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/deepseek"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/githubmodels"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/glm"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/google"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/grok"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/mistral"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/openai"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/openrouter"
-	"github.com/Corphon/SceneIntruderMCP/internal/llm/providers/qwen"
 )
 
 const (
@@ -34,11 +24,12 @@ const (
 
 // LLMService 提供统一的大语言模型调用接口
 type LLMService struct {
-	provider     llm.Provider
-	providerName string
-	cache        *LLMCache
-	isReady      bool
-	readyState   string
+	providerMutex sync.RWMutex
+	provider      llm.Provider
+	providerName  string
+	cache         *LLMCache
+	isReady       bool
+	readyState    string
 }
 type LLMCache struct {
 	cache      map[string]*CacheEntry
@@ -86,8 +77,13 @@ type Usage struct {
 	TotalTokens      int
 }
 
-// 以下是为各种服务定义的结构化输出类型
+// 提取语言检测辅助方法
+type LanguageContext struct {
+	IsEnglish bool
+	MainText  string
+}
 
+// 以下是为各种服务定义的结构化输出类型-------------------
 // CharacterInfo 角色信息
 type CharacterInfo struct {
 	Name          string            `json:"name"`
@@ -132,27 +128,24 @@ type ExplorationResult struct {
 // -----------------------------------------
 // NewLLMService 创建一个新的LLM服务
 func NewLLMService() (*LLMService, error) {
-	// 从配置中读取LLM提供商和配置
+	service := createBaseLLMService()
+
+	// 尝试从配置初始化
 	cfg := config.GetCurrentConfig()
-	service := &LLMService{
-		provider:     nil,
-		providerName: "",
-		isReady:      false,
-		readyState:   "未配置API密钥",
-		cache: &LLMCache{
-			cache:      make(map[string]*CacheEntry),
-			mutex:      sync.RWMutex{},
-			expiration: 30 * time.Minute,
-		},
+	if cfg == nil {
+		service.readyState = "无法获取配置"
+		return service, nil
 	}
 
 	if cfg.LLMProvider == "" || (cfg.LLMConfig != nil && cfg.LLMConfig["api_key"] == "") {
+		service.readyState = "未配置API密钥"
 		return service, nil
 	}
 
 	// 尝试初始化提供商
 	provider, err := llm.GetProvider(cfg.LLMProvider, cfg.LLMConfig)
 	if err != nil {
+		service.readyState = fmt.Sprintf("初始化失败: %v", err)
 		return service, nil // 返回未就绪服务而不是错误
 	}
 
@@ -167,11 +160,19 @@ func NewLLMService() (*LLMService, error) {
 
 // NewEmptyLLMService 创建一个空的LLM服务实例作为后备方案
 func NewEmptyLLMService() *LLMService {
+	service := createBaseLLMService()
+	service.providerName = "empty"
+	service.readyState = "后备服务模式 - 请在设置中配置API密钥"
+	return service
+}
+
+// createBaseLLMService 创建基础LLM服务实例
+func createBaseLLMService() *LLMService {
 	return &LLMService{
 		provider:     nil,
-		providerName: "empty",
+		providerName: "",
 		isReady:      false,
-		readyState:   "后备服务模式 - 请在设置中配置API密钥",
+		readyState:   "未初始化",
 		cache: &LLMCache{
 			cache:      make(map[string]*CacheEntry),
 			mutex:      sync.RWMutex{},
@@ -182,11 +183,15 @@ func NewEmptyLLMService() *LLMService {
 
 // IsReady 返回服务是否已就绪
 func (s *LLMService) IsReady() bool {
+	s.providerMutex.RLock()
+	defer s.providerMutex.RUnlock()
 	return s.isReady
 }
 
 // GetReadyState 返回服务就绪状态描述
 func (s *LLMService) GetReadyState() string {
+	s.providerMutex.RLock()
+	defer s.providerMutex.RUnlock()
 	return s.readyState
 }
 
@@ -194,10 +199,15 @@ func (s *LLMService) GetReadyState() string {
 func (s *LLMService) UpdateProvider(providerName string, config map[string]string) error {
 	provider, err := llm.GetProvider(providerName, config)
 	if err != nil {
+		s.providerMutex.Lock()
 		s.isReady = false
 		s.readyState = fmt.Sprintf("配置失败: %v", err)
+		s.providerMutex.Unlock()
 		return err
 	}
+
+	s.providerMutex.Lock()
+	defer s.providerMutex.Unlock()
 
 	s.provider = provider
 	s.providerName = providerName
@@ -216,9 +226,12 @@ func (s *LLMService) UpdateProvider(providerName string, config map[string]strin
 
 // generateCacheKey 生成缓存键
 func (s *LLMService) generateCacheKey(prompt, systemPrompt, model string) string {
-	// 组合请求的关键部分生成唯一标识
+	s.providerMutex.RLock()
+	providerName := s.providerName
+	s.providerMutex.RUnlock()
+
 	hashInput := fmt.Sprintf("%s:::%s:::%s:::%s",
-		prompt, systemPrompt, model, s.providerName)
+		prompt, systemPrompt, model, providerName)
 	h := md5.New()
 	h.Write([]byte(hashInput))
 	return fmt.Sprintf("%x", h.Sum(nil))
@@ -365,30 +378,31 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 }
 
 // 增强版ChatCompletion: 支持结构化输出
+// 🔧 优化后的 CreateStructuredCompletion
 func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt string, systemPrompt string, outputSchema interface{}) error {
-	// 生成缓存键
-	models := s.provider.GetSupportedModels() // 获取默认模型名称
-	model := "gpt-4o"                         // 默认兜底值
-	if len(models) > 0 {
-		model = models[0] // 使用第一个受支持的模型
+	// 获取默认模型（线程安全）
+	s.providerMutex.RLock()
+	if !s.isReady || s.provider == nil {
+		s.providerMutex.RUnlock()
+		return fmt.Errorf("LLM服务未就绪: %s", s.readyState)
 	}
+
+	models := s.provider.GetSupportedModels()
+	model := "gpt-4o" // 默认兜底值
+	if len(models) > 0 {
+		model = models[0]
+	}
+	provider := s.provider
+	s.providerMutex.RUnlock()
+
+	// 生成缓存键
 	cacheKey := s.generateCacheKey(prompt, systemPrompt, model)
 
 	// 检查缓存
-	if s.cache != nil {
-		if cachedResponse, found := s.cache.getFromCache(cacheKey); found {
-			// 尝试将缓存的响应转换为请求的类型
-			responseJSON, err := json.Marshal(cachedResponse)
-			if err == nil {
-				err = json.Unmarshal(responseJSON, outputSchema)
-				if err == nil {
-					// 缓存命中且成功转换
-					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
-					return nil
-				}
-			}
-		}
+	if s.checkAndUseCache(cacheKey, outputSchema) {
+		return nil
 	}
+
 	// 修改系统提示以请求特定格式
 	structuredSystemPrompt := systemPrompt
 	if systemPrompt != "" {
@@ -399,31 +413,27 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 	req := llm.CompletionRequest{
 		Prompt:       prompt,
 		SystemPrompt: structuredSystemPrompt,
-		Temperature:  0.3, // 较低的温度使输出更一致，更适合结构化数据
-		// 默认使用系统配置的模型
+		Temperature:  0.3,
+		Model:        model,
 	}
 
 	// 调用实际Provider
-	resp, err := s.provider.CompleteText(ctx, req)
+	resp, err := provider.CompleteText(ctx, req)
 	if err != nil {
 		return err
 	}
 
 	// 尝试解析结构化输出
-	text := resp.Text
-	// 清理可能的前缀和后缀文本
-	text = cleanJSONString(text)
+	text := cleanJSONString(resp.Text)
 
 	// 解析JSON到提供的结构中
 	err = json.Unmarshal([]byte(text), outputSchema)
 	if err != nil {
 		return fmt.Errorf("解析AI响应为结构化数据失败: %w\nAI返回: %s", err, text)
 	}
+
 	// 保存到缓存
-	if s.cache != nil {
-		s.cache.saveToCache(cacheKey, outputSchema)
-		log.Printf("DEBUG:保存到LLM缓存: %s", cacheKey[:8])
-	}
+	s.saveToCache(cacheKey, outputSchema)
 
 	return nil
 }
@@ -662,11 +672,15 @@ Format the output to show clear speaker attribution and any relevant actions or 
 
 // GetProvider 返回内部的Provider实例
 func (s *LLMService) GetProvider() llm.Provider {
+	s.providerMutex.RLock()
+	defer s.providerMutex.RUnlock()
 	return s.provider
 }
 
 // GetProviderName 返回当前LLM提供商名称
 func (s *LLMService) GetProviderName() string {
+	s.providerMutex.RLock()
+	defer s.providerMutex.RUnlock()
 	return s.providerName
 }
 
@@ -679,26 +693,37 @@ func isEnglishText(text string) bool {
 	// 计数
 	letterCount := 0
 	chineseCount := 0
+	totalValidChars := 0 // 有效字符总数
 
 	for _, r := range text {
 		// 英文字母
 		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
 			letterCount++
+			totalValidChars++
 		}
 		// 检测中文字符
 		if r >= 0x4E00 && r <= 0x9FFF {
 			chineseCount++
+			totalValidChars++
+		}
+		// 数字也算有效字符
+		if r >= '0' && r <= '9' {
+			totalValidChars++
 		}
 	}
 
-	// 判定规则:
-	// 1. 如果包含中文字符，则不是英文文本
-	if chineseCount > 0 {
+	// 判定规则：
+	// 1. 如果没有有效字符，返回 false
+	if totalValidChars == 0 {
 		return false
 	}
 
-	// 2. 如果没有中文，则检查英文字母比例 (60%以上为英文)
-	return float64(letterCount)/float64(len(text)) > 0.6
+	// 2. 计算英文字母占有效字符的比例
+	englishRatio := float64(letterCount) / float64(totalValidChars)
+
+	// 3. 如果英文字母比例超过50%，认为是英文文本
+	// 这样 "Mixed 中英文" 中的 "Mixed" 占主导，会被判定为英文
+	return englishRatio > 0.5
 }
 
 // 用于结构化输出时抽取角色信息
@@ -896,10 +921,7 @@ Identify the main scenes in the text, including:
 
 // GenerateCacheKey 为请求生成缓存键
 func (s *LLMService) GenerateCacheKey(req llm.CompletionRequest) string {
-	// 使用请求的关键字段创建缓存键
-	data := fmt.Sprintf("%s:%s:%s", req.Model, req.Prompt, req.SystemPrompt)
-	hash := fmt.Sprintf("%x", md5.Sum([]byte(data)))
-	return hash
+	return s.generateCacheKey(req.Prompt, req.SystemPrompt, req.Model)
 }
 
 // CheckCache 检查并返回缓存的响应
@@ -1036,64 +1058,89 @@ Generate 1-2 specific, detailed exploration results that feel organic to the wor
 
 // GetDefaultModel 获取当前配置的默认模型
 func (s *LLMService) GetDefaultModel() string {
-	// 如果LLM服务不可用或未就绪，返回空字符串
-	if !s.IsReady() {
-		return ""
+	s.providerMutex.RLock()
+	defer s.providerMutex.RUnlock()
+
+	// 如果LLM服务不可用或未就绪，返回默认值
+	if !s.isReady || s.provider == nil {
+		return "gpt-4.1"
 	}
 
-	// 如果有Provider可用，尝试从Provider获取默认模型
-	if s.provider != nil {
-		// 从Provider结构体中访问defaultModel字段
-		switch p := s.provider.(type) {
-		case *openai.Provider:
-			return p.GetSupportedModels()[0]
-		case *anthropic.Provider:
-			return p.GetSupportedModels()[0]
-		case *glm.Provider:
-			return p.GetSupportedModels()[0]
-		case *mistral.Provider:
-			return p.GetSupportedModels()[0]
-		case *deepseek.Provider:
-			return p.GetSupportedModels()[0]
-		case *google.Provider:
-			return p.GetSupportedModels()[0]
-		case *qwen.Provider:
-			return p.GetSupportedModels()[0]
-		case *githubmodels.Provider:
-			return p.GetSupportedModels()[0]
-		case *grok.Provider:
-			return p.GetSupportedModels()[0]
-		case *openrouter.Provider:
-			return p.GetSupportedModels()[0]
-		default:
-			// 根据提供商名称返回合适的默认模型
-			switch s.providerName {
-			case "OpenAI":
-				return "gpt-4o"
-			case "Anthropic Claude":
-				return "claude-3.5-sonnet"
-			case "Mistral":
-				return "mistral-large-latest"
-			case "DeepSeek":
-				return "deepseek-reasoner"
-			case "GLM":
-				return "glm-4"
-			case "google gemini":
-				return "gemini-2.0-flash"
-			case "Qwen":
-				return "qwen2.5-max"
-			case "GitHub Models":
-				return "gpt-4o"
-			case "Grok":
-				return "grok-3"
-			case "openrouter":
-				return "google/gemma-3-27b-it:free"
-			default:
-				return "gpt-4o"
+	// 获取提供商支持的模型列表
+	models := s.provider.GetSupportedModels()
+	if len(models) > 0 {
+		return models[0]
+	}
+
+	// 根据提供商名称返回默认模型
+	defaultModels := map[string]string{
+		"OpenAI":           "gpt-4.1",
+		"Anthropic Claude": "claude-3.5-sonnet",
+		"Mistral":          "mistral-large-latest",
+		"DeepSeek":         "deepseek-chat",
+		"GLM":              "glm-4",
+		"google gemini":    "gemini-2.0-flash",
+		"Qwen":             "qwen2.5-max",
+		"GitHub Models":    "gpt-4.1",
+		"Grok":             "grok-3",
+		"openrouter":       "google/gemma-3-27b-it:free",
+	}
+
+	if model, exists := defaultModels[s.providerName]; exists {
+		return model
+	}
+
+	return "gpt-4.1" // 兜底默认值
+}
+
+// 统一的缓存操作方法
+func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{}) bool {
+	if s.cache == nil {
+		return false
+	}
+
+	if cachedResponse, found := s.cache.getFromCache(cacheKey); found {
+		// 尝试类型转换
+		if resp, ok := cachedResponse.(ChatCompletionResponse); ok {
+			if outputSchema != nil {
+				// 对于结构化输出，尝试 JSON 转换
+				responseJSON, err := json.Marshal(resp)
+				if err == nil {
+					err = json.Unmarshal(responseJSON, outputSchema)
+					if err == nil {
+						log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+						return true
+					}
+				}
+			} else {
+				// 对于普通响应，直接返回
+				if chatResp, ok := outputSchema.(*ChatCompletionResponse); ok {
+					*chatResp = resp
+					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+					return true
+				}
+			}
+		}
+
+		// 尝试直接转换为 CompletionResponse
+		if resp, ok := cachedResponse.(*llm.CompletionResponse); ok {
+			if outputSchema != nil {
+				err := json.Unmarshal([]byte(resp.Text), outputSchema)
+				if err == nil {
+					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+					return true
+				}
 			}
 		}
 	}
 
-	// 如果无法确定，返回一个通用的后备选项
-	return "gpt-4o"
+	return false
+}
+
+// 统一的缓存保存方法
+func (s *LLMService) saveToCache(cacheKey string, response interface{}) {
+	if s.cache != nil {
+		s.cache.saveToCache(cacheKey, response)
+		log.Printf("DEBUG:保存到LLM缓存: %s", cacheKey[:8])
+	}
 }
