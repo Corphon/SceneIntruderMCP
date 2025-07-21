@@ -47,6 +47,17 @@ type SceneAggregateService struct {
 	ContextService   *ContextService
 	StoryService     *StoryService
 	ProgressService  *ProgressService
+
+	// 缓存和并发控制
+	cacheMutex     sync.RWMutex
+	aggregateCache map[string]*CachedAggregateData
+	cacheExpiry    time.Duration
+}
+
+// CachedAggregateData 缓存的聚合数据
+type CachedAggregateData struct {
+	Data      *SceneAggregateData
+	Timestamp time.Time
 }
 
 // SceneAggregateData 聚合的场景数据
@@ -117,28 +128,77 @@ func NewSceneAggregateService(
 		panic("ProgressService cannot be nil")
 	}
 
-	return &SceneAggregateService{
+	service := &SceneAggregateService{
 		SceneService:     sceneService,
 		CharacterService: characterService,
 		ContextService:   contextService,
 		StoryService:     storyService,
 		ProgressService:  progressService,
+
+		// 初始化缓存
+		aggregateCache: make(map[string]*CachedAggregateData),
+		cacheExpiry:    2 * time.Minute, // 聚合数据缓存时间较短
 	}
+
+	// 启动缓存清理
+	service.startCacheCleanup()
+
+	return service
 }
 
 // GetSceneAggregate 获取完整的场景聚合数据
 func (s *SceneAggregateService) GetSceneAggregate(ctx context.Context, sceneID string, options *AggregateOptions) (*SceneAggregateData, error) {
+	// 生成缓存键
+	cacheKey := s.generateCacheKey(sceneID, options)
+
+	// 检查缓存
+	s.cacheMutex.RLock()
+	if cached, exists := s.aggregateCache[cacheKey]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached.Data, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 缓存过期或不存在，重新生成
+	aggregateData, err := s.generateAggregateData(sceneID, options)
+	if err != nil {
+		return nil, err
+	}
+
+	// 更新缓存
+	s.cacheMutex.Lock()
+	s.aggregateCache[cacheKey] = &CachedAggregateData{
+		Data:      aggregateData,
+		Timestamp: time.Now(),
+	}
+	s.cacheMutex.Unlock()
+
+	return aggregateData, nil
+}
+
+// 生成缓存键
+func (s *SceneAggregateService) generateCacheKey(sceneID string, options *AggregateOptions) string {
+	if options == nil {
+		return sceneID + "_default"
+	}
+
+	return fmt.Sprintf("%s_%t_%d_%t_%t_%t",
+		sceneID,
+		options.IncludeConversations,
+		options.ConversationLimit,
+		options.IncludeStoryData,
+		options.IncludeUIState,
+		options.IncludeProgress,
+	)
+}
+
+// 实际的数据生成逻辑
+func (s *SceneAggregateService) generateAggregateData(sceneID string, options *AggregateOptions) (*SceneAggregateData, error) {
 	// 输入验证
 	if sceneID == "" || strings.TrimSpace(sceneID) == "" {
 		return nil, fmt.Errorf("场景ID不能为空")
-	}
-
-	// 服务可用性检查
-	if s.SceneService == nil {
-		return nil, fmt.Errorf("SceneService 未初始化")
-	}
-	if s.StoryService == nil {
-		return nil, fmt.Errorf("StoryService 未初始化")
 	}
 
 	if options == nil {
@@ -156,13 +216,12 @@ func (s *SceneAggregateService) GetSceneAggregate(ctx context.Context, sceneID s
 		return nil, fmt.Errorf("选项验证失败: %w", err)
 	}
 
-	// 使用goroutine并行获取数据
+	// 并行数据获取
 	var (
 		scene         *models.Scene
 		characters    []*models.Character
 		storyData     *models.StoryData
 		conversations []models.Conversation
-		//progress      *SceneProgress
 
 		wg   sync.WaitGroup
 		mu   sync.Mutex
@@ -170,9 +229,9 @@ func (s *SceneAggregateService) GetSceneAggregate(ctx context.Context, sceneID s
 	)
 
 	// 并行获取基础数据
-	wg.Add(2)
+	wg.Add(1)
 
-	// 获取场景和角色信息
+	// 获取场景和角色信息（错误处理完善）
 	go func() {
 		defer wg.Done()
 		defer func() {
@@ -182,13 +241,6 @@ func (s *SceneAggregateService) GetSceneAggregate(ctx context.Context, sceneID s
 				mu.Unlock()
 			}
 		}()
-
-		if s.SceneService == nil {
-			mu.Lock()
-			errs = append(errs, fmt.Errorf("SceneService 为 nil"))
-			mu.Unlock()
-			return
-		}
 
 		sceneData, err := s.SceneService.LoadScene(sceneID)
 		if err != nil {
@@ -208,38 +260,32 @@ func (s *SceneAggregateService) GetSceneAggregate(ctx context.Context, sceneID s
 		characters = sceneData.Characters
 	}()
 
-	// 获取故事数据
-	go func() {
-		defer wg.Done()
-		defer func() {
-			if r := recover(); r != nil {
-				mu.Lock()
-				errs = append(errs, fmt.Errorf("获取故事数据时发生panic: %v", r))
-				mu.Unlock()
+	// 获取故事数据（条件执行，错误处理完善）
+	if options.IncludeStoryData && s.StoryService != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					mu.Lock()
+					errs = append(errs, fmt.Errorf("获取故事数据时发生panic: %v", r))
+					mu.Unlock()
+				}
+			}()
+
+			story, err := s.StoryService.GetStoryData(sceneID, nil)
+			if err != nil {
+				// 故事数据获取失败记录但不阻断
+				fmt.Printf("警告: 获取故事数据失败: %v\n", err)
+				return
 			}
+			storyData = story
 		}()
-
-		if !options.IncludeStoryData {
-			return
-		}
-
-		if s.StoryService == nil {
-			mu.Lock()
-			errs = append(errs, fmt.Errorf("StoryService 为 nil"))
-			mu.Unlock()
-			return
-		}
-
-		story, err := s.StoryService.GetStoryData(sceneID, nil)
-		if err != nil {
-			return
-		}
-		storyData = story
-	}()
+	}
 
 	wg.Wait()
 
-	// 检查是否有致命错误
+	// 检查致命错误
 	if len(errs) > 0 {
 		var errMsg strings.Builder
 		errMsg.WriteString("获取聚合数据失败: ")
@@ -252,12 +298,11 @@ func (s *SceneAggregateService) GetSceneAggregate(ctx context.Context, sceneID s
 		return nil, fmt.Errorf("%s", errMsg.String())
 	}
 
-	// 获取对话历史（串行执行，依赖上下文服务）
+	// 串行获取对话历史（减少并发复杂性）
 	if options.IncludeConversations && s.ContextService != nil {
 		convs, err := s.ContextService.GetRecentConversations(sceneID, options.ConversationLimit)
 		if err != nil {
-			// 对话获取失败不是致命错误，记录日志但继续执行
-			// 可以选择设置为空数组或者添加到非致命错误列表
+			fmt.Printf("警告: 获取对话历史失败: %v\n", err)
 			conversations = []models.Conversation{}
 		} else {
 			conversations = convs
@@ -345,6 +390,7 @@ func (s *SceneAggregateService) getAvailableChoices(node *models.StoryNode) []*m
 }
 
 // calculateSceneProgress 计算场景进度
+// 🔧 修复 calculateSceneProgress 方法
 func (s *SceneAggregateService) calculateSceneProgress(
 	scene *models.Scene,
 	story *models.StoryData,
@@ -357,129 +403,53 @@ func (s *SceneAggregateService) calculateSceneProgress(
 		Achievements:          []string{},
 	}
 
-	// ✅ 利用 scene 信息增强进度计算
-
-	// 1. 基于场景地点计算探索进度
-	if scene != nil && len(scene.Locations) > 0 {
-		// 检查对话中提到的地点
-		exploredLocations := make(map[string]bool)
-		for _, conv := range conversations {
-			messageContent := strings.ToLower(conv.Content)
-			for _, location := range scene.Locations {
-				locationName := strings.ToLower(location.Name)
-				if strings.Contains(messageContent, locationName) {
-					exploredLocations[location.Name] = true
-				}
-			}
-		}
-
-		// 添加探索地点到解锁内容
-		for locationName := range exploredLocations {
-			progress.UnlockedContent = append(progress.UnlockedContent, fmt.Sprintf("探索了%s", locationName))
-		}
-
-		// 基于地点探索度添加成就
-		explorationRate := float64(len(exploredLocations)) / float64(len(scene.Locations))
-		if explorationRate >= 0.5 {
-			progress.Achievements = append(progress.Achievements, "location_explorer")
-		}
-		if explorationRate >= 1.0 {
-			progress.Achievements = append(progress.Achievements, "master_explorer")
-		}
-	}
-
-	// 2. 基于场景道具计算收集进度
-	if scene != nil && len(scene.Items) > 0 {
-		foundItems := make(map[string]bool)
-		for _, conv := range conversations {
-			messageContent := strings.ToLower(conv.Content)
-			for _, item := range scene.Items {
-				itemName := strings.ToLower(item.Name)
-				// 检查是否提到了获得、找到、发现等关键词 + 道具名
-				if (strings.Contains(messageContent, "获得") ||
-					strings.Contains(messageContent, "找到") ||
-					strings.Contains(messageContent, "发现") ||
-					strings.Contains(messageContent, "得到")) &&
-					strings.Contains(messageContent, itemName) {
-					foundItems[item.Name] = true
-				}
-			}
-		}
-
-		// 添加发现道具到解锁内容
-		for itemName := range foundItems {
-			progress.UnlockedContent = append(progress.UnlockedContent, fmt.Sprintf("获得了%s", itemName))
-		}
-
-		// 基于道具收集度添加成就
-		collectionRate := float64(len(foundItems)) / float64(len(scene.Items))
-		if collectionRate >= 0.5 {
-			progress.Achievements = append(progress.Achievements, "item_collector")
-		}
-		if collectionRate >= 1.0 {
-			progress.Achievements = append(progress.Achievements, "treasure_hunter")
-		}
-	}
-
-	// 3. 基于场景主题计算主题探索进度
-	if scene != nil && len(scene.Themes) > 0 {
-		exploredThemes := make(map[string]bool)
-		for _, conv := range conversations {
-			messageContent := strings.ToLower(conv.Content)
-			for _, theme := range scene.Themes {
-				themeName := strings.ToLower(theme)
-				// 简单的主题匹配
-				if strings.Contains(messageContent, themeName) {
-					exploredThemes[theme] = true
-				}
-			}
-		}
-
-		// 基于主题探索度添加成就
-		themeExplorationRate := float64(len(exploredThemes)) / float64(len(scene.Themes))
-		if themeExplorationRate >= 0.5 {
-			progress.Achievements = append(progress.Achievements, "theme_explorer")
-		}
-		if themeExplorationRate >= 1.0 {
-			progress.Achievements = append(progress.Achievements, "narrative_master")
-		}
-	}
-
-	// 4. 基于场景氛围调整体验描述
-	if scene != nil && scene.Atmosphere != "" {
-		atmosphereBonus := fmt.Sprintf("体验了%s的氛围", scene.Atmosphere)
-		progress.UnlockedContent = append(progress.UnlockedContent, atmosphereBonus)
-	}
-
-	// 5. 基于场景时代背景添加历史感知成就
-	if scene != nil && scene.Era != "" {
-		eraBonus := fmt.Sprintf("深入了解了%s时代", scene.Era)
-		progress.UnlockedContent = append(progress.UnlockedContent, eraBonus)
-
-		// 如果对话中多次提及时代背景，添加成就
-		eraReferences := 0
-		eraKeyword := strings.ToLower(scene.Era)
-		for _, conv := range conversations {
-			if strings.Contains(strings.ToLower(conv.Content), eraKeyword) {
-				eraReferences++
-			}
-		}
-		if eraReferences >= 3 {
-			progress.Achievements = append(progress.Achievements, "history_enthusiast")
-		}
-	}
-
-	// 6. 基于场景创建时间计算新手/资深玩家状态
+	// 只使用确定存在的字段
 	if scene != nil {
-		sceneAge := time.Since(scene.CreatedAt)
-		if sceneAge > 7*24*time.Hour { // 场景存在超过一周
-			progress.Achievements = append(progress.Achievements, "veteran_player")
+		// 1. 基于场景主题计算主题探索进度（确定存在）
+		if len(scene.Themes) > 0 {
+			exploredThemes := make(map[string]bool)
+			for _, conv := range conversations {
+				messageContent := strings.ToLower(conv.Content)
+				for _, theme := range scene.Themes {
+					themeName := strings.ToLower(theme)
+					if strings.Contains(messageContent, themeName) {
+						exploredThemes[theme] = true
+					}
+				}
+			}
+
+			// 基于主题探索度添加成就
+			themeExplorationRate := float64(len(exploredThemes)) / float64(len(scene.Themes))
+			if themeExplorationRate >= 0.5 {
+				progress.Achievements = append(progress.Achievements, "theme_explorer")
+			}
+			if themeExplorationRate >= 1.0 {
+				progress.Achievements = append(progress.Achievements, "narrative_master")
+			}
 		}
 
-		// 基于最后访问时间判断活跃度
-		timeSinceAccess := time.Since(scene.LastAccessed)
-		if timeSinceAccess < 24*time.Hour {
-			progress.Achievements = append(progress.Achievements, "daily_player")
+		// 2. 基于场景时代背景添加历史感知成就（确定存在）
+		if scene.Era != "" {
+			eraBonus := fmt.Sprintf("深入了解了%s时代", scene.Era)
+			progress.UnlockedContent = append(progress.UnlockedContent, eraBonus)
+
+			// 如果对话中多次提及时代背景，添加成就
+			eraReferences := 0
+			eraKeyword := strings.ToLower(scene.Era)
+			for _, conv := range conversations {
+				if strings.Contains(strings.ToLower(conv.Content), eraKeyword) {
+					eraReferences++
+				}
+			}
+			if eraReferences >= 3 {
+				progress.Achievements = append(progress.Achievements, "history_enthusiast")
+			}
+		}
+
+		// 3. 基于场景创建时间计算资深玩家状态（确定存在）
+		sceneAge := time.Since(scene.CreatedAt)
+		if sceneAge > 7*24*time.Hour {
+			progress.Achievements = append(progress.Achievements, "veteran_player")
 		}
 	}
 
@@ -490,7 +460,6 @@ func (s *SceneAggregateService) calculateSceneProgress(
 			if node.IsRevealed {
 				revealedCount++
 			}
-			// 收集解锁内容
 			if node.IsRevealed && node.Type == "unlock" {
 				progress.UnlockedContent = append(progress.UnlockedContent, node.Content)
 			}
@@ -498,7 +467,7 @@ func (s *SceneAggregateService) calculateSceneProgress(
 		progress.StoryCompletion = float64(revealedCount) / float64(len(story.Nodes))
 	}
 
-	// 检查原有成就（保留原有逻辑）
+	// 检查基础成就
 	if progress.StoryCompletion >= 0.5 {
 		progress.Achievements = append(progress.Achievements, "story_explorer")
 	}
@@ -506,50 +475,14 @@ func (s *SceneAggregateService) calculateSceneProgress(
 		progress.Achievements = append(progress.Achievements, "social_butterfly")
 	}
 
-	// ✅ 基于综合信息计算总体完成度
-	if scene != nil {
-		var completionFactors []float64
+	// 简化完成度计算
+	finalCompletion := progress.StoryCompletion
 
-		// 故事完成度权重40%
-		completionFactors = append(completionFactors, progress.StoryCompletion*0.4)
+	// 交互活跃度加成
+	interactionBonus := math.Min(float64(progress.CharacterInteractions)/50.0, 0.2) // 最多20%加成
+	finalCompletion = math.Min(finalCompletion+interactionBonus, 1.0)
 
-		// 地点探索度权重20%
-		if len(scene.Locations) > 0 {
-			exploredCount := 0
-			for _, content := range progress.UnlockedContent {
-				if strings.Contains(content, "探索了") {
-					exploredCount++
-				}
-			}
-			locationCompletion := float64(exploredCount) / float64(len(scene.Locations))
-			completionFactors = append(completionFactors, locationCompletion*0.2)
-		}
-
-		// 道具收集度权重20%
-		if len(scene.Items) > 0 {
-			foundCount := 0
-			for _, content := range progress.UnlockedContent {
-				if strings.Contains(content, "获得了") {
-					foundCount++
-				}
-			}
-			itemCompletion := float64(foundCount) / float64(len(scene.Items))
-			completionFactors = append(completionFactors, itemCompletion*0.2)
-		}
-
-		// 交互活跃度权重20%
-		interactionCompletion := math.Min(float64(progress.CharacterInteractions)/20.0, 1.0)
-		completionFactors = append(completionFactors, interactionCompletion*0.2)
-
-		// 计算综合完成度
-		totalCompletion := 0.0
-		for _, factor := range completionFactors {
-			totalCompletion += factor
-		}
-
-		// 更新故事完成度为综合完成度
-		progress.StoryCompletion = math.Min(totalCompletion, 1.0)
-	}
+	progress.StoryCompletion = finalCompletion
 
 	return progress
 }
@@ -586,4 +519,50 @@ func (s *SceneAggregateService) buildUIState(
 	}
 
 	return uiState
+}
+
+// 缓存清理
+func (s *SceneAggregateService) startCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.cleanupExpiredCache()
+		}
+	}()
+}
+
+// cleanupExpiredCache 清理过期缓存
+func (s *SceneAggregateService) cleanupExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	for cacheKey, cached := range s.aggregateCache {
+		if now.Sub(cached.Timestamp) > s.cacheExpiry {
+			delete(s.aggregateCache, cacheKey)
+		}
+	}
+}
+
+// 当相关数据更新时清除缓存
+func (s *SceneAggregateService) InvalidateSceneCache(sceneID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	scenePrefix := sceneID + "_"
+	var keysToDelete []string
+
+	for key := range s.aggregateCache {
+		// 检查键是否以 "sceneID_" 开头，或者就是 "sceneID_default"
+		if strings.HasPrefix(key, scenePrefix) || key == sceneID+"_default" {
+			keysToDelete = append(keysToDelete, key)
+		}
+	}
+
+	// 删除匹配的缓存项
+	for _, key := range keysToDelete {
+		delete(s.aggregateCache, key)
+	}
 }
