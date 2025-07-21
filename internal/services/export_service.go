@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
@@ -18,20 +19,101 @@ type ExportService struct {
 	ContextService *ContextService
 	StoryService   *StoryService
 	SceneService   *SceneService
+
+	// 并发控制
+	cacheMutex  sync.RWMutex
+	dataCache   map[string]*CachedExportData
+	cacheExpiry time.Duration
+
+	// 文件操作保护
+	fileMutex sync.Mutex
 }
 
+// CachedExportData 缓存的导出数据
+type CachedExportData struct {
+	SceneData     *SceneData
+	Conversations []models.Conversation
+	StoryData     *models.StoryData
+	Timestamp     time.Time
+}
+
+// NewExportService 创建导出服务
 func NewExportService(contextService *ContextService, storyService *StoryService, sceneService *SceneService) *ExportService {
 	return &ExportService{
 		ContextService: contextService,
 		StoryService:   storyService,
 		SceneService:   sceneService,
+		dataCache:      make(map[string]*CachedExportData),
+		cacheExpiry:    5 * time.Minute, // 5分钟缓存过期
 	}
 }
 
 // Export相关方法--------------------------
+// 🔧 安全加载场景相关数据
+func (s *ExportService) loadSceneDataSafe(sceneID string, includeConversations, includeStory bool) (*CachedExportData, error) {
+	s.cacheMutex.RLock()
+
+	// 检查缓存
+	if cached, exists := s.dataCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 缓存过期或不存在，需要重新加载
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	// 双重检查
+	if cached, exists := s.dataCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			return cached, nil
+		}
+	}
+
+	// 批量加载数据
+	cached := &CachedExportData{
+		Timestamp: time.Now(),
+	}
+
+	// 加载场景数据
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载场景数据失败: %w", err)
+	}
+	cached.SceneData = sceneData
+
+	// 可选加载对话数据
+	if includeConversations {
+		conversations, err := s.getInteractionHistory(sceneID)
+		if err != nil {
+			// 对话加载失败不阻止导出
+			conversations = []models.Conversation{}
+		}
+		cached.Conversations = conversations
+	}
+
+	// 可选加载故事数据
+	if includeStory && s.StoryService != nil {
+		storyData, err := s.StoryService.GetStoryData(sceneID, nil)
+		if err != nil {
+			// 故事数据加载失败不阻止导出
+			storyData = nil
+		}
+		cached.StoryData = storyData
+	}
+
+	// 更新缓存
+	s.dataCache[sceneID] = cached
+
+	return cached, nil
+}
+
 // ExportInteractionSummary 导出交互摘要功能
 func (s *ExportService) ExportInteractionSummary(ctx context.Context, sceneID string, format string) (*models.ExportResult, error) {
-	// 1. 验证输入参数
+	// 验证输入参数
 	if sceneID == "" {
 		return nil, fmt.Errorf("场景ID不能为空")
 	}
@@ -41,51 +123,39 @@ func (s *ExportService) ExportInteractionSummary(ctx context.Context, sceneID st
 		return nil, fmt.Errorf("不支持的导出格式: %s，支持的格式: %v", format, supportedFormats)
 	}
 
-	// 2. 获取场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	// 使用缓存加载数据
+	cachedData, err := s.loadSceneDataSafe(sceneID, true, true)
 	if err != nil {
-		return nil, fmt.Errorf("加载场景失败: %w", err)
+		return nil, err
 	}
 
-	// 3. 获取交互历史
-	conversations, err := s.getInteractionHistory(sceneID)
-	if err != nil {
-		return nil, fmt.Errorf("获取交互历史失败: %w", err)
-	}
+	// 分析和统计数据
+	stats := s.analyzeInteractionStatistics(cachedData.Conversations, cachedData.SceneData.Characters)
 
-	// 4. 获取故事数据（如果存在）
-	var storyData *models.StoryData
-	if s.StoryService != nil {
-		storyData, _ = s.StoryService.GetStoryData(sceneID, nil)
-	}
+	// 生成摘要内容
+	summary := s.generateInteractionSummary(cachedData.SceneData, cachedData.Conversations, cachedData.StoryData, stats)
 
-	// 5. 分析和统计数据
-	stats := s.analyzeInteractionStatistics(conversations, sceneData.Characters)
-
-	// 6. 生成摘要内容
-	summary := s.generateInteractionSummary(sceneData, conversations, storyData, stats)
-
-	// 7. 根据格式生成内容
-	content, err := s.formatExportContent(sceneData, conversations, summary, stats, format)
+	// 根据格式生成内容
+	content, err := s.formatExportContent(cachedData.SceneData, cachedData.Conversations, summary, stats, format)
 	if err != nil {
 		return nil, fmt.Errorf("格式化导出内容失败: %w", err)
 	}
 
-	// 8. 创建导出结果
+	// 创建导出结果
 	result := &models.ExportResult{
 		SceneID:          sceneID,
-		Title:            fmt.Sprintf("%s - 交互摘要", sceneData.Scene.Title),
+		Title:            fmt.Sprintf("%s - 交互摘要", cachedData.SceneData.Scene.Title),
 		Format:           format,
 		Content:          content,
 		GeneratedAt:      time.Now(),
-		Characters:       sceneData.Characters,
-		Conversations:    conversations,
+		Characters:       cachedData.SceneData.Characters,
+		Conversations:    cachedData.Conversations,
 		Summary:          summary,
 		InteractionStats: stats,
 	}
 
-	// 9. 保存到 data 目录
-	filePath, fileSize, err := s.saveExportToDataDir(result)
+	// 线程安全的文件保存
+	filePath, fileSize, err := s.saveExportToDataDirSafe(result)
 	if err != nil {
 		return nil, fmt.Errorf("保存导出文件失败: %w", err)
 	}
@@ -94,6 +164,57 @@ func (s *ExportService) ExportInteractionSummary(ctx context.Context, sceneID st
 	result.FileSize = fileSize
 
 	return result, nil
+}
+
+// 线程安全的文件保存
+func (s *ExportService) saveExportToDataDirSafe(result *models.ExportResult) (string, int64, error) {
+	s.fileMutex.Lock()
+	defer s.fileMutex.Unlock()
+
+	// 创建导出目录
+	exportDir := filepath.Join("data", "exports", "interactions")
+	if err := os.MkdirAll(exportDir, 0755); err != nil {
+		return "", 0, fmt.Errorf("创建导出目录失败: %w", err)
+	}
+
+	// 生成唯一文件名（包含纳秒时间戳）
+	timestamp := result.GeneratedAt.Format("20060102_150405")
+	nanoSuffix := result.GeneratedAt.Nanosecond()
+	fileName := fmt.Sprintf("%s_interaction_summary_%s_%d.%s",
+		result.SceneID, timestamp, nanoSuffix, result.Format)
+
+	filePath := filepath.Join(exportDir, fileName)
+
+	// 检查文件是否已存在，如果存在则添加序号
+	originalPath := filePath
+	counter := 1
+	for {
+		if _, err := os.Stat(filePath); os.IsNotExist(err) {
+			break
+		}
+
+		ext := filepath.Ext(originalPath)
+		base := strings.TrimSuffix(originalPath, ext)
+		filePath = fmt.Sprintf("%s_(%d)%s", base, counter, ext)
+		counter++
+
+		if counter > 1000 { // 防止无限循环
+			return "", 0, fmt.Errorf("无法生成唯一文件名")
+		}
+	}
+
+	// 写入文件
+	if err := os.WriteFile(filePath, []byte(result.Content), 0644); err != nil {
+		return "", 0, fmt.Errorf("写入导出文件失败: %w", err)
+	}
+
+	// 获取文件大小
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return "", 0, fmt.Errorf("获取文件信息失败: %w", err)
+	}
+
+	return filePath, fileInfo.Size(), nil
 }
 
 // getInteractionHistory 获取交互历史
@@ -2583,35 +2704,6 @@ document.addEventListener('DOMContentLoaded', function() {
 	return content.String(), nil
 }
 
-// saveExportToDataDir 保存导出文件到data目录
-func (s *ExportService) saveExportToDataDir(result *models.ExportResult) (string, int64, error) {
-	// 创建导出目录
-	exportDir := filepath.Join("data", "exports", "interactions")
-	if err := os.MkdirAll(exportDir, 0755); err != nil {
-		return "", 0, fmt.Errorf("创建导出目录失败: %w", err)
-	}
-
-	// 生成文件名
-	timestamp := result.GeneratedAt.Format("20060102_150405")
-	fileName := fmt.Sprintf("%s_interaction_summary_%s.%s",
-		result.SceneID, timestamp, result.Format)
-
-	filePath := filepath.Join(exportDir, fileName)
-
-	// 写入文件
-	if err := os.WriteFile(filePath, []byte(result.Content), 0644); err != nil {
-		return "", 0, fmt.Errorf("写入导出文件失败: %w", err)
-	}
-
-	// 获取文件大小
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return "", 0, fmt.Errorf("获取文件信息失败: %w", err)
-	}
-
-	return filePath, fileInfo.Size(), nil
-}
-
 // 辅助函数
 func (s *ExportService) groupConversationsByInteraction(conversations []models.Conversation) [][]models.Conversation {
 	groups := make(map[string][]models.Conversation)
@@ -3724,24 +3816,16 @@ func (s *ExportService) formatStoryAsHTML(
 		content.WriteString(`</p>`)
 
 		if len(node.Choices) > 0 {
-			content.WriteString(`<h4>可用选择：</h4>`)
-			for j, choice := range node.Choices {
+			content.WriteString(`<div class="choices">
+                    <p><strong>选择：</strong></p>`)
+			for _, choice := range node.Choices {
 				cssClass := "choice"
 				if choice.Selected {
 					cssClass += " selected"
 				}
-				content.WriteString(fmt.Sprintf(`<div class="%s">`, cssClass))
-				content.WriteString(fmt.Sprintf(`<strong>%d.</strong> %s`, j+1, choice.Text))
-				if choice.Selected {
-					content.WriteString(` ✅`)
-				}
-				if choice.Consequence != "" {
-					content.WriteString(`<br><em>后果：`)
-					content.WriteString(choice.Consequence)
-					content.WriteString(`</em>`)
-				}
-				content.WriteString(`</div>`)
+				content.WriteString(fmt.Sprintf(`<div class="%s">%s</div>`, cssClass, choice.Text))
 			}
+			content.WriteString(`</div>`)
 		}
 
 		content.WriteString(`</div>`)
@@ -5881,4 +5965,43 @@ func (s *ExportService) saveSceneExportToDataDir(result *models.ExportResult) (s
 	}
 
 	return filePath, fileInfo.Size(), nil
+}
+
+// 清理过期缓存
+func (s *ExportService) cleanupExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	expiredCount := 0
+	for sceneID, cached := range s.dataCache {
+		if now.Sub(cached.Timestamp) > s.cacheExpiry {
+			delete(s.dataCache, sceneID)
+			expiredCount++
+		}
+	}
+
+	if expiredCount > 0 {
+		fmt.Printf("🧹 导出服务缓存清理: 清理了 %d 个过期缓存\n", expiredCount)
+	}
+}
+
+// 手动清除指定场景的缓存
+func (s *ExportService) InvalidateSceneCache(sceneID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	delete(s.dataCache, sceneID)
+}
+
+// 启动后台清理
+func (s *ExportService) StartCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.cleanupExpiredCache()
+		}
+	}()
 }
