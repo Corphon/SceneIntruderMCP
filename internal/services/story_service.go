@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
@@ -22,11 +24,24 @@ const (
 
 // StoryService 管理故事进展和剧情分支
 type StoryService struct {
-	SceneService *SceneService
-	LLMService   *LLMService
-	FileStorage  *storage.FileStorage
-	ItemService  *ItemService
-	BasePath     string
+	SceneService     *SceneService
+	LLMService       *LLMService
+	FileStorage      *storage.FileStorage
+	ItemService      *ItemService
+	CharacterService *CharacterService
+	BasePath         string
+	lockManager      *LockManager // 使用统一的锁管理器
+
+	// 缓存机制
+	cacheMutex  sync.RWMutex
+	storyCache  map[string]*CachedStoryData
+	cacheExpiry time.Duration
+}
+
+// CachedStoryData 缓存的故事数据
+type CachedStoryData struct {
+	Data      *models.StoryData
+	Timestamp time.Time
 }
 
 // NewStoryService 创建故事服务
@@ -51,12 +66,54 @@ func NewStoryService(llmService *LLMService) *StoryService {
 	// 创建物品服务(如果需要)
 	itemService := NewItemService()
 
-	return &StoryService{
-		SceneService: sceneService,
-		LLMService:   llmService,
-		FileStorage:  fileStorage,
-		ItemService:  itemService,
-		BasePath:     basePath,
+	// 🔧 获取角色服务并缓存
+	var characterService *CharacterService
+	if container := di.GetContainer(); container != nil {
+		if charServiceObj := container.Get("character"); charServiceObj != nil {
+			characterService = charServiceObj.(*CharacterService)
+		}
+	}
+
+	service := &StoryService{
+		SceneService:     sceneService,
+		LLMService:       llmService,
+		FileStorage:      fileStorage,
+		ItemService:      itemService,
+		CharacterService: characterService,
+		BasePath:         basePath,
+		lockManager:      NewLockManager(),
+		storyCache:       make(map[string]*CachedStoryData),
+		cacheExpiry:      5 * time.Minute, // 5分钟缓存
+	}
+
+	// 启动缓存清理
+	service.startCacheCleanup()
+
+	return service
+}
+
+// startCacheCleanup 启动缓存清理定时器
+func (s *StoryService) startCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.cleanupExpiredCache()
+		}
+	}()
+}
+
+// cleanupExpiredCache 清理过期的缓存数据
+func (s *StoryService) cleanupExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	for sceneID, cached := range s.storyCache {
+		if now.Sub(cached.Timestamp) > s.cacheExpiry {
+			delete(s.storyCache, sceneID)
+		}
 	}
 }
 
@@ -80,6 +137,78 @@ func (s *StoryService) InitializeStoryForScene(sceneID string, preferences *mode
 	}
 
 	return storyData, nil
+}
+
+/*
+// 带锁的加载方法，供不使用缓存的方法使用
+func (s *StoryService) loadStoryDataWithLock(sceneID string) (*models.StoryData, error) {
+	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+
+	if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("故事数据不存在")
+	}
+
+	storyDataBytes, err := os.ReadFile(storyPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取故事数据失败: %w", err)
+	}
+
+	var storyData models.StoryData
+	if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+		return nil, fmt.Errorf("解析故事数据失败: %w", err)
+	}
+
+	return &storyData, nil
+}
+*/
+
+// 统一的故事数据加载方法
+func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, error) {
+	// 检查缓存
+	s.cacheMutex.RLock()
+	if cached, exists := s.storyCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached.Data, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 缓存过期或不存在，需要重新加载
+	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+
+	// 检查文件是否存在
+	if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+		return nil, fmt.Errorf("故事数据不存在")
+	}
+
+	// 读取文件
+	storyDataBytes, err := os.ReadFile(storyPath)
+	if err != nil {
+		return nil, fmt.Errorf("读取故事数据失败: %w", err)
+	}
+
+	var storyData models.StoryData
+	if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+		return nil, fmt.Errorf("解析故事数据失败: %w", err)
+	}
+
+	// 更新缓存
+	s.cacheMutex.Lock()
+	s.storyCache[sceneID] = &CachedStoryData{
+		Data:      &storyData,
+		Timestamp: time.Now(),
+	}
+	s.cacheMutex.Unlock()
+
+	return &storyData, nil
+}
+
+// 缓存失效方法
+func (s *StoryService) invalidateStoryCache(sceneID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+	delete(s.storyCache, sceneID)
 }
 
 // 从文本中提取初始故事节点和任务
@@ -404,84 +533,142 @@ func (s *StoryService) saveStoryData(sceneID string, storyData *models.StoryData
 		return fmt.Errorf("序列化故事数据失败: %w", err)
 	}
 
-	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
-	if err := os.WriteFile(storyPath, storyDataJSON, 0644); err != nil {
+	// 确保目录存在
+	storyDir := filepath.Join(s.BasePath, sceneID)
+	if err := os.MkdirAll(storyDir, 0755); err != nil {
+		return fmt.Errorf("创建故事目录失败: %w", err)
+	}
+
+	storyPath := filepath.Join(storyDir, "story.json")
+
+	// 🔧 原子性文件写入
+	tempPath := storyPath + ".tmp"
+
+	if err := os.WriteFile(tempPath, storyDataJSON, 0644); err != nil {
+		return fmt.Errorf("保存故事数据失败: %w", err)
+	}
+
+	if err := os.Rename(tempPath, storyPath); err != nil {
+		os.Remove(tempPath) // 清理临时文件
 		return fmt.Errorf("保存故事数据失败: %w", err)
 	}
 
 	return nil
 }
 
-// GetStoryData 获取场景的故事数据
+// GetStoryDataSafe 获取场景的故事数据，线程安全
 func (s *StoryService) GetStoryData(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
-	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+	var storyData *models.StoryData
 
-	// 检查故事数据文件是否存在
-	if _, err := os.Stat(storyPath); os.IsNotExist(err) {
-		// 如果不存在，创建初始故事数据
-		return s.InitializeStoryForScene(sceneID, preferences)
-	}
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
 
-	// 读取故事数据
-	storyDataBytes, err := os.ReadFile(storyPath)
-	if err != nil {
-		return nil, fmt.Errorf("读取故事数据失败: %w", err)
-	}
+		// 在锁内检查和读取
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			// 如果不存在，创建初始故事数据
+			data, err := s.InitializeStoryForScene(sceneID, preferences)
+			if err != nil {
+				return err
+			}
+			storyData = data
+			return nil
+		}
 
-	var storyData models.StoryData
-	if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
-		return nil, fmt.Errorf("解析故事数据失败: %w", err)
-	}
+		// 读取故事数据
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
 
-	return &storyData, nil
+		var tempData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &tempData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
+		storyData = &tempData
+		return nil
+	})
+
+	return storyData, err
 }
 
 // MakeChoice 处理玩家做出的故事选择
 func (s *StoryService) MakeChoice(sceneID, nodeID, choiceID string, preferences *models.UserPreferences) (*models.StoryNode, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, preferences)
-	if err != nil {
-		return nil, err
-	}
+	var result *models.StoryNode
 
-	// 查找节点和选择
-	var currentNode *models.StoryNode
-	var selectedChoice *models.StoryChoice
-
-	for i, node := range storyData.Nodes {
-		if node.ID == nodeID {
-			currentNode = &storyData.Nodes[i]
-			for j, choice := range node.Choices {
-				if choice.ID == choiceID {
-					selectedChoice = &currentNode.Choices[j]
-					currentNode.Choices[j].Selected = true
-					break
-				}
-			}
-			break
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 使用缓存加载数据
+		storyData, err := s.loadStoryDataSafe(sceneID)
+		if err != nil {
+			return err
 		}
-	}
 
-	if currentNode == nil || selectedChoice == nil {
-		return nil, fmt.Errorf("无效的节点或选择")
-	}
+		// 创建副本避免直接修改缓存数据
+		storyDataCopy := *storyData
 
-	// 生成下一个故事节点
-	nextNode, err := s.generateNextStoryNode(sceneID, currentNode, selectedChoice, preferences)
-	if err != nil {
-		return nil, err
-	}
+		// 查找节点和选择
+		var currentNode *models.StoryNode
+		var selectedChoice *models.StoryChoice
 
-	// 添加新节点到故事数据
-	storyData.Nodes = append(storyData.Nodes, *nextNode)
+		for i, node := range storyDataCopy.Nodes {
+			if node.ID == nodeID {
+				currentNode = &storyDataCopy.Nodes[i]
+				for j, choice := range node.Choices {
+					if choice.ID == choiceID {
+						if choice.Selected {
+							return fmt.Errorf("选择已被选中")
+						}
+						selectedChoice = &currentNode.Choices[j]
+						currentNode.Choices[j].Selected = true
+						break
+					}
+				}
+				break
+			}
+		}
 
-	// 更新故事进度
-	storyData.Progress += 5
-	if storyData.Progress > 100 {
-		storyData.Progress = 100
-	}
+		if currentNode == nil || selectedChoice == nil {
+			return fmt.Errorf("无效的节点或选择")
+		}
 
-	// 更新当前状态
+		// 生成下一个故事节点
+		nextNode, err := s.generateNextStoryNodeWithData(sceneID, currentNode, selectedChoice, preferences, &storyDataCopy)
+		if err != nil {
+			selectedChoice.Selected = false
+			return err
+		}
+
+		// 添加新节点
+		storyDataCopy.Nodes = append(storyDataCopy.Nodes, *nextNode)
+
+		// 更新进度
+		storyDataCopy.Progress += 5
+		if storyDataCopy.Progress > 100 {
+			storyDataCopy.Progress = 100
+		}
+
+		// 更新状态
+		s.updateStoryState(&storyDataCopy)
+
+		// 保存数据
+		if err := s.saveStoryData(sceneID, &storyDataCopy); err != nil {
+			return err
+		}
+
+		// 清除缓存
+		s.invalidateStoryCache(sceneID)
+
+		result = nextNode
+		return nil
+	})
+
+	return result, err
+}
+
+// 提取状态更新逻辑
+func (s *StoryService) updateStoryState(storyData *models.StoryData) {
+	storyData.LastUpdated = time.Now()
+
 	if storyData.Progress >= 100 {
 		storyData.CurrentState = "结局"
 	} else if storyData.Progress >= 75 {
@@ -491,28 +678,12 @@ func (s *StoryService) MakeChoice(sceneID, nodeID, choiceID string, preferences 
 	} else if storyData.Progress >= 25 {
 		storyData.CurrentState = "冲突"
 	}
-
-	// 保存更新后的故事数据
-	if err := s.saveStoryData(sceneID, storyData); err != nil {
-		return nil, err
-	}
-
-	// 处理可能的角色互动触发
-	_, _ = s.ProcessCharacterInteractionTriggers(sceneID, nextNode.ID, preferences)
-
-	return nextNode, nil
 }
 
-// 根据当前节点和选择生成下一个故事节点
-func (s *StoryService) generateNextStoryNode(sceneID string, currentNode *models.StoryNode, selectedChoice *models.StoryChoice, preferences *models.UserPreferences) (*models.StoryNode, error) {
+// generateNextStoryNodeWithData 根据当前节点和选择生成下一个故事节点（接受已读取的数据）
+func (s *StoryService) generateNextStoryNodeWithData(sceneID string, currentNode *models.StoryNode, selectedChoice *models.StoryChoice, preferences *models.UserPreferences, storyData *models.StoryData) (*models.StoryNode, error) {
 	// 加载场景数据
 	sceneData, err := s.SceneService.LoadScene(sceneID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 获取故事数据 - 添加这一部分
-	storyData, err := s.GetStoryData(sceneID, preferences)
 	if err != nil {
 		return nil, err
 	}
@@ -628,7 +799,7 @@ Respond with a JSON object in the following format:
 			creativityStr,
 			allowPlotTwists)
 	} else {
-		// 中文提示词（原有逻辑）
+		// 中文提示词
 		prompt = fmt.Sprintf(`在《%s》的世界中，玩家遇到了以下情况:
 
 %s
@@ -818,6 +989,7 @@ Respond with a JSON object in the following format:
 		newNode.Metadata["interaction_triggers"] = interactionTriggers
 	}
 
+	// 🔧 直接修改传入的 storyData，而不是重新读取
 	// 添加新任务
 	if nodeData.NewTask != nil {
 		taskID := fmt.Sprintf("task_%s_%d", sceneID, time.Now().UnixNano())
@@ -860,7 +1032,7 @@ Respond with a JSON object in the following format:
 		storyData.Locations = append(storyData.Locations, location)
 	}
 
-	// 添加新物品（如果适用）
+	// 🔧 异步处理新物品，避免在锁内调用外部服务
 	if nodeData.NewItem != nil && s.ItemService != nil {
 		item := &models.Item{
 			ID:          fmt.Sprintf("item_%s_%d", sceneID, time.Now().UnixNano()),
@@ -873,25 +1045,16 @@ Respond with a JSON object in the following format:
 			Source:      models.SourceStory,
 		}
 
-		// 调用ItemService保存物品
-		if err := s.ItemService.AddItem(sceneID, item); err != nil {
-			if isEnglish {
-				fmt.Printf("Warning: Failed to save new item: %v\n", err)
-			} else {
-				fmt.Printf("警告: 保存新物品失败: %v\n", err)
+		// 异步保存物品
+		go func() {
+			if err := s.ItemService.AddItem(sceneID, item); err != nil {
+				if isEnglish {
+					fmt.Printf("Warning: Failed to save new item: %v\n", err)
+				} else {
+					fmt.Printf("警告: 保存新物品失败: %v\n", err)
+				}
 			}
-		}
-	}
-
-	// 保存更新后的故事数据
-	if nodeData.NewTask != nil || nodeData.NewLocation != nil {
-		if err := s.saveStoryData(sceneID, storyData); err != nil {
-			if isEnglish {
-				fmt.Printf("Warning: Failed to save updated story data: %v\n", err)
-			} else {
-				fmt.Printf("警告: 保存更新的故事数据失败: %v\n", err)
-			}
-		}
+		}()
 	}
 
 	return newNode, nil
@@ -899,13 +1062,35 @@ Respond with a JSON object in the following format:
 
 // CompleteObjective 完成任务目标
 func (s *StoryService) CompleteObjective(sceneID, taskID, objectiveID string) error {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return err
-	}
+	return s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 使用缓存加载
+		storyData, err := s.loadStoryDataSafe(sceneID)
+		if err != nil {
+			return err
+		}
 
-	// 查找任务和目标
+		// 创建副本
+		storyDataCopy := *storyData
+
+		// 处理目标完成逻辑
+		taskFound, objectiveFound := s.processObjectiveCompletion(&storyDataCopy, taskID, objectiveID)
+
+		if !taskFound || !objectiveFound {
+			return fmt.Errorf("无效的任务或目标")
+		}
+
+		// 保存和清除缓存
+		if err := s.saveStoryData(sceneID, &storyDataCopy); err != nil {
+			return err
+		}
+
+		s.invalidateStoryCache(sceneID)
+		return nil
+	})
+}
+
+// 提取目标完成逻辑
+func (s *StoryService) processObjectiveCompletion(storyData *models.StoryData, taskID, objectiveID string) (bool, bool) {
 	taskFound := false
 	objectiveFound := false
 	allObjectivesCompleted := true
@@ -923,107 +1108,104 @@ func (s *StoryService) CompleteObjective(sceneID, taskID, objectiveID string) er
 				}
 			}
 
-			// 如果所有目标都完成，标记任务为完成
 			if allObjectivesCompleted {
 				storyData.Tasks[i].Completed = true
-
-				// 任务完成时增加故事进度
 				storyData.Progress += 10
 				if storyData.Progress > 100 {
 					storyData.Progress = 100
 				}
-
-				// 更新当前状态
-				if storyData.Progress >= 100 {
-					storyData.CurrentState = "结局"
-				} else if storyData.Progress >= 75 {
-					storyData.CurrentState = "高潮"
-				} else if storyData.Progress >= 50 {
-					storyData.CurrentState = "发展"
-				} else if storyData.Progress >= 25 {
-					storyData.CurrentState = "冲突"
-				}
+				s.updateStoryState(storyData)
 			}
 			break
 		}
 	}
 
-	if !taskFound || !objectiveFound {
-		return fmt.Errorf("无效的任务或目标")
-	}
-
-	// 保存更新后的故事数据
-	if err := s.saveStoryData(sceneID, storyData); err != nil {
-		return err
-	}
-
-	return nil
+	return taskFound, objectiveFound
 }
 
 // UnlockLocation 解锁场景地点
 func (s *StoryService) UnlockLocation(sceneID, locationID string) error {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return err
-	}
-
-	// 查找地点
-	for i, location := range storyData.Locations {
-		if location.ID == locationID {
-			storyData.Locations[i].Accessible = true
-			break
+	return s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 使用缓存加载
+		storyData, err := s.loadStoryDataSafe(sceneID)
+		if err != nil {
+			return err
 		}
-	}
 
-	// 保存更新后的故事数据
-	if err := s.saveStoryData(sceneID, storyData); err != nil {
-		return err
-	}
+		// 创建副本
+		storyDataCopy := *storyData
 
-	return nil
+		// 查找地点
+		for i, location := range storyDataCopy.Locations {
+			if location.ID == locationID {
+				storyDataCopy.Locations[i].Accessible = true
+				break
+			}
+		}
+
+		// 保存并清除缓存
+		if err := s.saveStoryData(sceneID, &storyDataCopy); err != nil {
+			return err
+		}
+
+		s.invalidateStoryCache(sceneID)
+		return nil
+	})
 }
 
 // ExploreLocation 探索地点，可能触发新的故事节点或发现物品
 func (s *StoryService) ExploreLocation(sceneID, locationID string, preferences *models.UserPreferences) (*models.ExplorationResult, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return nil, err
-	}
+	var result *models.ExplorationResult
 
-	// 查找地点
-	var location *models.StoryLocation
-	for i, loc := range storyData.Locations {
-		if loc.ID == locationID {
-			location = &storyData.Locations[i]
-			break
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 直接读取文件
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
 		}
-	}
 
-	if location == nil {
-		return nil, fmt.Errorf("地点不存在")
-	}
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
 
-	if !location.Accessible {
-		return nil, fmt.Errorf("此地点尚未解锁")
-	}
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
 
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
-	if err != nil {
-		return nil, err
-	}
+		// 查找地点
+		var location *models.StoryLocation
+		for i, loc := range storyData.Locations {
+			if loc.ID == locationID {
+				location = &storyData.Locations[i]
+				break
+			}
+		}
 
-	// 检测语言
-	isEnglish := isEnglishText(sceneData.Scene.Name + " " + location.Name + " " + location.Description)
+		if location == nil {
+			return fmt.Errorf("地点不存在")
+		}
 
-	// 准备提示词和系统提示词
-	var prompt, systemPrompt string
+		if !location.Accessible {
+			return fmt.Errorf("此地点尚未解锁")
+		}
 
-	if isEnglish {
-		// 英文提示词
-		prompt = fmt.Sprintf(`In the world of "%s", the player is exploring the location: %s
+		// 加载场景数据
+		sceneData, err := s.SceneService.LoadScene(sceneID)
+		if err != nil {
+			return err
+		}
+
+		// 检测语言
+		isEnglish := isEnglishText(sceneData.Scene.Name + " " + location.Name + " " + location.Description)
+
+		// 准备提示词和系统提示词
+		var prompt, systemPrompt string
+
+		if isEnglish {
+			// 英文提示词
+			prompt = fmt.Sprintf(`In the world of "%s", the player is exploring the location: %s
 Location description: %s
 
 Scene background: %s
@@ -1057,17 +1239,17 @@ Return in JSON format:
   },
   "new_clue": "Discovered clue"
 }`,
-			sceneData.Scene.Name,
-			location.Name,
-			location.Description,
-			sceneData.Scene.Description,
-			string(preferences.CreativityLevel),
-			preferences.AllowPlotTwists)
+				sceneData.Scene.Name,
+				location.Name,
+				location.Description,
+				sceneData.Scene.Description,
+				string(preferences.CreativityLevel),
+				preferences.AllowPlotTwists)
 
-		systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
-	} else {
-		// 中文提示词
-		prompt = fmt.Sprintf(`在《%s》的世界中，玩家正在探索地点: %s
+			systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
+		} else {
+			// 中文提示词
+			prompt = fmt.Sprintf(`在《%s》的世界中，玩家正在探索地点: %s
 地点描述: %s
 
 场景背景: %s
@@ -1101,155 +1283,161 @@ Return in JSON format:
   },
   "new_clue": "发现的线索"
 }`,
-			sceneData.Scene.Name,
-			location.Name,
-			location.Description,
-			sceneData.Scene.Description,
-			string(preferences.CreativityLevel),
-			preferences.AllowPlotTwists)
+				sceneData.Scene.Name,
+				location.Name,
+				location.Description,
+				sceneData.Scene.Description,
+				string(preferences.CreativityLevel),
+				preferences.AllowPlotTwists)
 
-		systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
-	}
-
-	resp, err := s.LLMService.CreateChatCompletion(
-		context.Background(),
-		ChatCompletionRequest{
-			Model: s.getLLMModel(preferences),
-			Messages: []ChatCompletionMessage{
-				{
-					Role:    "system",
-					Content: systemPrompt,
-				},
-				{
-					Role:    "user",
-					Content: prompt,
-				},
-			},
-			// 请求JSON格式输出
-			ExtraParams: map[string]interface{}{
-				"response_format": map[string]string{
-					"type": "json_object",
-				},
-			},
-		},
-	)
-
-	if err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to generate exploration result: %w", err)
-		} else {
-			return nil, fmt.Errorf("生成探索结果失败: %w", err)
+			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
 		}
-	}
 
-	jsonStr := resp.Choices[0].Message.Content
+		resp, err := s.LLMService.CreateChatCompletion(
+			context.Background(),
+			ChatCompletionRequest{
+				Model: s.getLLMModel(preferences),
+				Messages: []ChatCompletionMessage{
+					{
+						Role:    "system",
+						Content: systemPrompt,
+					},
+					{
+						Role:    "user",
+						Content: prompt,
+					},
+				},
+				// 请求JSON格式输出
+				ExtraParams: map[string]interface{}{
+					"response_format": map[string]string{
+						"type": "json_object",
+					},
+				},
+			},
+		)
 
-	// 解析返回的JSON
-	var explorationData struct {
-		Description string `json:"description"`
-		FoundItem   *struct {
-			Name        string `json:"name"`
+		if err != nil {
+			if isEnglish {
+				return fmt.Errorf("failed to generate exploration result: %w", err)
+			} else {
+				return fmt.Errorf("生成探索结果失败: %w", err)
+			}
+		}
+
+		jsonStr := resp.Choices[0].Message.Content
+
+		// 解析返回的JSON
+		var explorationData struct {
 			Description string `json:"description"`
-			Type        string `json:"type"`
-		} `json:"found_item,omitempty"`
-		StoryEvent *struct {
-			Content string `json:"content"`
-			Type    string `json:"type"`
-			Choices []struct {
-				Text        string `json:"text"`
-				Consequence string `json:"consequence"`
-			} `json:"choices"`
-		} `json:"story_event,omitempty"`
-		NewClue string `json:"new_clue,omitempty"`
-	}
-
-	if err := json.Unmarshal([]byte(jsonStr), &explorationData); err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to parse exploration data: %w", err)
-		} else {
-			return nil, fmt.Errorf("解析探索数据失败: %w", err)
-		}
-	}
-
-	// 构建探索结果
-	result := &models.ExplorationResult{
-		LocationID:   locationID,
-		Description:  explorationData.Description,
-		NewClue:      explorationData.NewClue,
-		ExploredTime: time.Now(),
-	}
-
-	// 处理发现的物品
-	if explorationData.FoundItem != nil {
-		item := models.Item{
-			ID:          fmt.Sprintf("item_%s_%d", sceneID, time.Now().UnixNano()),
-			SceneID:     sceneID,
-			Name:        explorationData.FoundItem.Name,
-			Description: explorationData.FoundItem.Description,
-			Type:        explorationData.FoundItem.Type,
-			IsOwned:     true,
-			FoundAt:     time.Now(),
-			Source:      models.SourceExploration,
+			FoundItem   *struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+				Type        string `json:"type"`
+			} `json:"found_item,omitempty"`
+			StoryEvent *struct {
+				Content string `json:"content"`
+				Type    string `json:"type"`
+				Choices []struct {
+					Text        string `json:"text"`
+					Consequence string `json:"consequence"`
+				} `json:"choices"`
+			} `json:"story_event,omitempty"`
+			NewClue string `json:"new_clue,omitempty"`
 		}
 
-		result.FoundItem = &item
+		if err := json.Unmarshal([]byte(jsonStr), &explorationData); err != nil {
+			if isEnglish {
+				return fmt.Errorf("failed to parse exploration data: %w", err)
+			} else {
+				return fmt.Errorf("解析探索数据失败: %w", err)
+			}
+		}
 
-		// 保存发现的物品
-		if s.ItemService != nil {
-			if err := s.ItemService.AddItem(sceneID, &item); err != nil {
+		// 构建探索结果
+		result = &models.ExplorationResult{
+			LocationID:   locationID,
+			Description:  explorationData.Description,
+			NewClue:      explorationData.NewClue,
+			ExploredTime: time.Now(),
+		}
+
+		// 处理发现的物品
+		if explorationData.FoundItem != nil {
+			item := models.Item{
+				ID:          fmt.Sprintf("item_%s_%d", sceneID, time.Now().UnixNano()),
+				SceneID:     sceneID,
+				Name:        explorationData.FoundItem.Name,
+				Description: explorationData.FoundItem.Description,
+				Type:        explorationData.FoundItem.Type,
+				IsOwned:     true,
+				FoundAt:     time.Now(),
+				Source:      models.SourceExploration,
+			}
+
+			result.FoundItem = &item
+
+			// 🔧 异步保存发现的物品，避免在锁内调用可能阻塞的外部服务
+			if s.ItemService != nil {
+				go func() {
+					if err := s.ItemService.AddItem(sceneID, &item); err != nil {
+						if isEnglish {
+							fmt.Printf("Warning: Failed to save discovered item: %v\n", err)
+						} else {
+							fmt.Printf("警告: 保存发现的物品失败: %v\n", err)
+						}
+					}
+				}()
+			} else {
+				// 记录日志：ItemService未初始化，物品仅返回但未持久化
 				if isEnglish {
-					return nil, fmt.Errorf("failed to save discovered item: %w", err)
+					fmt.Printf("Warning: ItemService not initialized, item '%s' not saved to persistent storage\n", item.Name)
 				} else {
-					return nil, fmt.Errorf("保存发现的物品失败: %w", err)
+					fmt.Printf("警告: ItemService未初始化，物品'%s'未保存到持久化存储\n", item.Name)
 				}
 			}
-		} else {
-			// 记录日志：ItemService未初始化，物品仅返回但未持久化
-			if isEnglish {
-				fmt.Printf("Warning: ItemService not initialized, item '%s' not saved to persistent storage\n", item.Name)
-			} else {
-				fmt.Printf("警告: ItemService未初始化，物品'%s'未保存到持久化存储\n", item.Name)
+		}
+
+		// 处理故事事件
+		if explorationData.StoryEvent != nil {
+			// 创建新的故事节点
+			nodeID := fmt.Sprintf("node_%s_%d", sceneID, time.Now().UnixNano())
+			storyNode := models.StoryNode{
+				ID:         nodeID,
+				SceneID:    sceneID,
+				Content:    explorationData.StoryEvent.Content,
+				Type:       explorationData.StoryEvent.Type,
+				CreatedAt:  time.Now(),
+				IsRevealed: true,
+				Source:     models.SourceExploration,
+				Choices:    []models.StoryChoice{},
+			}
+
+			// 添加选择
+			for i, choice := range explorationData.StoryEvent.Choices {
+				storyNode.Choices = append(storyNode.Choices, models.StoryChoice{
+					ID:          fmt.Sprintf("choice_%s_%d", nodeID, i+1),
+					Text:        choice.Text,
+					Consequence: choice.Consequence,
+					Selected:    false,
+					CreatedAt:   time.Now(),
+				})
+			}
+
+			// 将节点添加到故事数据
+			storyData.Nodes = append(storyData.Nodes, storyNode)
+			result.StoryNode = &storyNode
+
+			// 🔧 在锁内保存更新后的故事数据
+			if err := s.saveStoryData(sceneID, &storyData); err != nil {
+				return err
 			}
 		}
-	}
 
-	// 处理故事事件
-	if explorationData.StoryEvent != nil {
-		// 创建新的故事节点
-		nodeID := fmt.Sprintf("node_%s_%d", sceneID, time.Now().UnixNano())
-		storyNode := models.StoryNode{
-			ID:         nodeID,
-			SceneID:    sceneID,
-			Content:    explorationData.StoryEvent.Content,
-			Type:       explorationData.StoryEvent.Type,
-			CreatedAt:  time.Now(),
-			IsRevealed: true,
-			Source:     models.SourceExploration,
-			Choices:    []models.StoryChoice{},
-		}
+		return nil
+	})
 
-		// 添加选择
-		for i, choice := range explorationData.StoryEvent.Choices {
-			storyNode.Choices = append(storyNode.Choices, models.StoryChoice{
-				ID:          fmt.Sprintf("choice_%s_%d", nodeID, i+1),
-				Text:        choice.Text,
-				Consequence: choice.Consequence,
-				Selected:    false,
-			})
-		}
-
-		// 将节点添加到故事数据
-		storyData.Nodes = append(storyData.Nodes, storyNode)
-		result.StoryNode = &storyNode
-
-		// 保存更新后的故事数据
-		if err := s.saveStoryData(sceneID, storyData); err != nil {
-			if isEnglish {
-				return nil, fmt.Errorf("failed to save exploration-triggered story node: %w", err)
-			} else {
-				return nil, fmt.Errorf("保存探索触发的故事节点失败: %w", err)
-			}
-		}
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
@@ -1257,85 +1445,111 @@ Return in JSON format:
 
 // GetAvailableChoices 获取当前可用的剧情选择
 func (s *StoryService) GetAvailableChoices(sceneID string) ([]models.StoryChoice, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return nil, err
-	}
-
 	var availableChoices []models.StoryChoice
 
-	// 查找最新的、已显示的、未选择的故事节点
-	var latestRevealedNode *models.StoryNode
-	latestTime := time.Time{}
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 🔧 在锁内直接读取文件
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
+		}
 
-	for i := range storyData.Nodes {
-		node := &storyData.Nodes[i]
-		if node.IsRevealed && node.CreatedAt.After(latestTime) {
-			// 检查是否有未选择的选项
-			hasUnselectedChoices := false
-			for _, choice := range node.Choices {
-				if !choice.Selected {
-					hasUnselectedChoices = true
-					break
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
+
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
+		// 查找最新的、已显示的、未选择的故事节点
+		var latestRevealedNode *models.StoryNode
+		latestTime := time.Time{}
+
+		for i := range storyData.Nodes {
+			node := &storyData.Nodes[i]
+			if node.IsRevealed && node.CreatedAt.After(latestTime) {
+				hasUnselectedChoices := false
+				for _, choice := range node.Choices {
+					if !choice.Selected {
+						hasUnselectedChoices = true
+						break
+					}
+				}
+
+				if hasUnselectedChoices {
+					latestRevealedNode = node
+					latestTime = node.CreatedAt
 				}
 			}
+		}
 
-			if hasUnselectedChoices {
-				latestRevealedNode = node
-				latestTime = node.CreatedAt
+		// 收集未选择的选项
+		if latestRevealedNode != nil {
+			for _, choice := range latestRevealedNode.Choices {
+				if !choice.Selected {
+					availableChoices = append(availableChoices, choice)
+				}
 			}
 		}
-	}
 
-	// 如果找到了最新的节点，收集其未选择的选项
-	if latestRevealedNode != nil {
-		for _, choice := range latestRevealedNode.Choices {
-			if !choice.Selected {
-				availableChoices = append(availableChoices, choice)
-			}
-		}
-	}
+		return nil
+	})
 
-	return availableChoices, nil
+	return availableChoices, err
 }
 
 // AdvanceStory 推进故事情节
 func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPreferences) (*models.StoryUpdate, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return nil, err
-	}
+	var storyUpdate *models.StoryUpdate
 
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 检测语言
-	isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro + " " + storyData.MainObjective)
-
-	// 检查故事进度
-	if storyData.Progress >= 100 {
-		if isEnglish {
-			return nil, fmt.Errorf("the story has already ended")
-		} else {
-			return nil, fmt.Errorf("故事已经结束")
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 直接读取文件
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
 		}
-	}
 
-	// 创建故事更新提示
-	creativityStr := string(preferences.CreativityLevel)
-	allowPlotTwists := preferences.AllowPlotTwists
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
 
-	var prompt string
-	var systemPrompt string
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
 
-	if isEnglish {
-		// 英文提示词
-		prompt = fmt.Sprintf(`In the story "%s", the current progress is %d%%, and the state is "%s".
+		// 加载场景数据
+		sceneData, err := s.SceneService.LoadScene(sceneID)
+		if err != nil {
+			return err
+		}
+
+		// 检测语言
+		isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro + " " + storyData.MainObjective)
+
+		// 检查故事进度
+		if storyData.Progress >= 100 {
+			if isEnglish {
+				return fmt.Errorf("the story has already ended")
+			} else {
+				return fmt.Errorf("故事已经结束")
+			}
+		}
+
+		// 创建故事更新提示
+		creativityStr := string(preferences.CreativityLevel)
+		allowPlotTwists := preferences.AllowPlotTwists
+
+		var prompt string
+		var systemPrompt string
+
+		if isEnglish {
+			// 英文提示词
+			prompt = fmt.Sprintf(`In the story "%s", the current progress is %d%%, and the state is "%s".
 Story Introduction: %s
 Main Objective: %s
 
@@ -1359,18 +1573,18 @@ Return in JSON format:
   },
   "new_clue": "Optional, newly discovered clue"
 }`,
-			sceneData.Scene.Name,
-			storyData.Progress,
-			storyData.CurrentState,
-			storyData.Intro,
-			storyData.MainObjective,
-			creativityStr,
-			allowPlotTwists)
+				sceneData.Scene.Name,
+				storyData.Progress,
+				storyData.CurrentState,
+				storyData.Intro,
+				storyData.MainObjective,
+				creativityStr,
+				allowPlotTwists)
 
-		systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
-	} else {
-		// 中文提示词
-		prompt = fmt.Sprintf(`在《%s》的故事中，当前进展为 %d%%，状态为"%s"。
+			systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
+		} else {
+			// 中文提示词
+			prompt = fmt.Sprintf(`在《%s》的故事中，当前进展为 %d%%，状态为"%s"。
 故事简介: %s
 主要目标: %s
 
@@ -1394,238 +1608,265 @@ Return in JSON format:
   },
   "new_clue": "可选，新发现的线索"
 }`,
-			sceneData.Scene.Name,
-			storyData.Progress,
-			storyData.CurrentState,
-			storyData.Intro,
-			storyData.MainObjective,
-			creativityStr,
-			allowPlotTwists)
+				sceneData.Scene.Name,
+				storyData.Progress,
+				storyData.CurrentState,
+				storyData.Intro,
+				storyData.MainObjective,
+				creativityStr,
+				allowPlotTwists)
 
-		systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
-	}
+			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
+		}
 
-	resp, err := s.LLMService.CreateChatCompletion(
-		context.Background(),
-		ChatCompletionRequest{
-			Model: s.getLLMModel(preferences),
-			Messages: []ChatCompletionMessage{
-				{
-					Role:    "system",
-					Content: systemPrompt,
+		resp, err := s.LLMService.CreateChatCompletion(
+			context.Background(),
+			ChatCompletionRequest{
+				Model: s.getLLMModel(preferences),
+				Messages: []ChatCompletionMessage{
+					{
+						Role:    "system",
+						Content: systemPrompt,
+					},
+					{
+						Role:    "user",
+						Content: prompt,
+					},
 				},
-				{
-					Role:    "user",
-					Content: prompt,
+				// 请求JSON格式输出
+				ExtraParams: map[string]interface{}{
+					"response_format": map[string]string{
+						"type": "json_object",
+					},
 				},
 			},
-			// 请求JSON格式输出
-			ExtraParams: map[string]interface{}{
-				"response_format": map[string]string{
-					"type": "json_object",
-				},
-			},
-		},
-	)
+		)
 
-	if err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to generate story advancement event: %w", err)
-		} else {
-			return nil, fmt.Errorf("生成故事推进事件失败: %w", err)
+		if err != nil {
+			if isEnglish {
+				return fmt.Errorf("failed to generate story advancement event: %w", err)
+			} else {
+				return fmt.Errorf("生成故事推进事件失败: %w", err)
+			}
 		}
-	}
 
-	jsonStr := resp.Choices[0].Message.Content
+		jsonStr := resp.Choices[0].Message.Content
 
-	// 解析返回的JSON
-	var eventData struct {
-		Title          string `json:"title"`
-		Content        string `json:"content"`
-		Type           string `json:"type"`
-		ProgressImpact int    `json:"progress_impact"`
-		NewTask        *struct {
-			Title       string   `json:"title"`
-			Description string   `json:"description"`
-			Objectives  []string `json:"objectives"`
-			Reward      string   `json:"reward"`
-		} `json:"new_task,omitempty"`
-		NewClue string `json:"new_clue,omitempty"`
-	}
-
-	if err := json.Unmarshal([]byte(jsonStr), &eventData); err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to parse story event data: %w", err)
-		} else {
-			return nil, fmt.Errorf("解析故事事件数据失败: %w", err)
+		// 解析返回的JSON
+		var eventData struct {
+			Title          string `json:"title"`
+			Content        string `json:"content"`
+			Type           string `json:"type"`
+			ProgressImpact int    `json:"progress_impact"`
+			NewTask        *struct {
+				Title       string   `json:"title"`
+				Description string   `json:"description"`
+				Objectives  []string `json:"objectives"`
+				Reward      string   `json:"reward"`
+			} `json:"new_task,omitempty"`
+			NewClue string `json:"new_clue,omitempty"`
 		}
-	}
 
-	// 创建故事更新
-	storyUpdate := &models.StoryUpdate{
-		ID:        fmt.Sprintf("update_%s_%d", sceneID, time.Now().UnixNano()),
-		SceneID:   sceneID,
-		Title:     eventData.Title,
-		Content:   eventData.Content,
-		Type:      eventData.Type,
-		CreatedAt: time.Now(),
-		Source:    models.SourceSystem,
-	}
+		if err := json.Unmarshal([]byte(jsonStr), &eventData); err != nil {
+			if isEnglish {
+				return fmt.Errorf("failed to parse story event data: %w", err)
+			} else {
+				return fmt.Errorf("解析故事事件数据失败: %w", err)
+			}
+		}
 
-	// 更新故事进度
-	storyData.Progress += eventData.ProgressImpact
-	if storyData.Progress > 100 {
-		storyData.Progress = 100
-	}
+		// 创建故事更新
+		storyUpdate = &models.StoryUpdate{
+			ID:        fmt.Sprintf("update_%s_%d", sceneID, time.Now().UnixNano()),
+			SceneID:   sceneID,
+			Title:     eventData.Title,
+			Content:   eventData.Content,
+			Type:      eventData.Type,
+			CreatedAt: time.Now(),
+			Source:    models.SourceSystem,
+		}
 
-	// 更新当前状态
-	if storyData.Progress >= 100 {
-		if isEnglish {
-			storyData.CurrentState = "Ending"
-		} else {
-			storyData.CurrentState = "结局"
+		// 更新故事进度
+		storyData.Progress += eventData.ProgressImpact
+		if storyData.Progress > 100 {
+			storyData.Progress = 100
 		}
-	} else if storyData.Progress >= 75 {
-		if isEnglish {
-			storyData.CurrentState = "Climax"
-		} else {
-			storyData.CurrentState = "高潮"
-		}
-	} else if storyData.Progress >= 50 {
-		if isEnglish {
-			storyData.CurrentState = "Development"
-		} else {
-			storyData.CurrentState = "发展"
-		}
-	} else if storyData.Progress >= 25 {
-		if isEnglish {
-			storyData.CurrentState = "Conflict"
-		} else {
-			storyData.CurrentState = "冲突"
-		}
-	} else {
-		if isEnglish {
-			storyData.CurrentState = "Initial"
-		} else {
-			storyData.CurrentState = "初始"
-		}
-	}
 
-	// 处理新任务
-	if eventData.NewTask != nil {
-		taskID := fmt.Sprintf("task_%s_%d", sceneID, time.Now().UnixNano())
-		objectives := make([]models.Objective, 0, len(eventData.NewTask.Objectives))
-		for i, obj := range eventData.NewTask.Objectives {
-			objectives = append(objectives, models.Objective{
-				ID:          fmt.Sprintf("obj_%s_%d", taskID, i+1),
-				Description: obj,
+		// 更新当前状态
+		if storyData.Progress >= 100 {
+			if isEnglish {
+				storyData.CurrentState = "Ending"
+			} else {
+				storyData.CurrentState = "结局"
+			}
+		} else if storyData.Progress >= 75 {
+			if isEnglish {
+				storyData.CurrentState = "Climax"
+			} else {
+				storyData.CurrentState = "高潮"
+			}
+		} else if storyData.Progress >= 50 {
+			if isEnglish {
+				storyData.CurrentState = "Development"
+			} else {
+				storyData.CurrentState = "发展"
+			}
+		} else if storyData.Progress >= 25 {
+			if isEnglish {
+				storyData.CurrentState = "Conflict"
+			} else {
+				storyData.CurrentState = "冲突"
+			}
+		} else {
+			if isEnglish {
+				storyData.CurrentState = "Initial"
+			} else {
+				storyData.CurrentState = "初始"
+			}
+		}
+
+		// 处理新任务
+		if eventData.NewTask != nil {
+			taskID := fmt.Sprintf("task_%s_%d", sceneID, time.Now().UnixNano())
+			objectives := make([]models.Objective, 0, len(eventData.NewTask.Objectives))
+			for i, obj := range eventData.NewTask.Objectives {
+				objectives = append(objectives, models.Objective{
+					ID:          fmt.Sprintf("obj_%s_%d", taskID, i+1),
+					Description: obj,
+					Completed:   false,
+				})
+			}
+
+			task := models.Task{
+				ID:          taskID,
+				SceneID:     sceneID,
+				Title:       eventData.NewTask.Title,
+				Description: eventData.NewTask.Description,
+				Objectives:  objectives,
+				Reward:      eventData.NewTask.Reward,
 				Completed:   false,
-			})
+				IsRevealed:  true,
+				Source:      models.SourceSystem,
+			}
+
+			storyData.Tasks = append(storyData.Tasks, task)
+			storyUpdate.NewTask = &task
 		}
 
-		task := models.Task{
-			ID:          taskID,
-			SceneID:     sceneID,
-			Title:       eventData.NewTask.Title,
-			Description: eventData.NewTask.Description,
-			Objectives:  objectives,
-			Reward:      eventData.NewTask.Reward,
-			Completed:   false,
-			IsRevealed:  true,
-			Source:      models.SourceSystem,
+		// 处理新线索
+		if eventData.NewClue != "" {
+			storyUpdate.NewClue = eventData.NewClue
 		}
 
-		storyData.Tasks = append(storyData.Tasks, task)
-		storyUpdate.NewTask = &task
-	}
+		// 更新最后修改时间
+		storyData.LastUpdated = time.Now()
 
-	// 处理新线索
-	if eventData.NewClue != "" {
-		storyUpdate.NewClue = eventData.NewClue
-	}
-
-	// 保存更新后的故事数据
-	if err := s.saveStoryData(sceneID, storyData); err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to save updated story data: %w", err)
-		} else {
-			return nil, fmt.Errorf("保存更新的故事数据失败: %w", err)
+		// 最后保存数据
+		if err := s.saveStoryData(sceneID, &storyData); err != nil {
+			return err
 		}
-	}
 
-	return storyUpdate, nil
+		return nil
+	})
+
+	return storyUpdate, err
 }
 
 // CreateStoryBranch 创建故事分支
 func (s *StoryService) CreateStoryBranch(sceneID string, triggerType string, triggerID string, preferences *models.UserPreferences) (*models.StoryNode, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return nil, err
-	}
+	var storyNode *models.StoryNode
 
-	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
-	if err != nil {
-		return nil, err
-	}
-
-	// 检测语言
-	isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro)
-
-	// 准备分支创建的提示
-	creativityStr := string(preferences.CreativityLevel)
-	allowPlotTwists := preferences.AllowPlotTwists
-
-	var triggerDescription string
-
-	// 根据触发类型获取相应的描述
-	switch triggerType {
-	case "item":
-		// 查找物品描述 - 这里应该调用ItemService
-		if isEnglish {
-			triggerDescription = "(Item triggered)"
-		} else {
-			triggerDescription = "（物品触发）"
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 直接读取文件
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
 		}
-	case "location":
-		// 查找地点描述
-		for _, loc := range storyData.Locations {
-			if loc.ID == triggerID {
-				if isEnglish {
-					triggerDescription = fmt.Sprintf("Location: %s - %s", loc.Name, loc.Description)
-				} else {
-					triggerDescription = fmt.Sprintf("地点：%s - %s", loc.Name, loc.Description)
+
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
+
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
+		// 加载场景数据
+		sceneData, err := s.SceneService.LoadScene(sceneID)
+		if err != nil {
+			return err
+		}
+
+		// 检测语言
+		isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro)
+
+		// 准备分支创建的提示
+		creativityStr := string(preferences.CreativityLevel)
+		allowPlotTwists := preferences.AllowPlotTwists
+
+		var triggerDescription string
+
+		// 根据触发类型获取相应的描述
+		switch triggerType {
+		case "item":
+			// 查找物品描述 - 这里应该调用ItemService
+			if isEnglish {
+				triggerDescription = "(Item triggered)"
+			} else {
+				triggerDescription = "（物品触发）"
+			}
+		case "location":
+			// 查找地点描述
+			for _, loc := range storyData.Locations {
+				if loc.ID == triggerID {
+					if isEnglish {
+						triggerDescription = fmt.Sprintf("Location: %s - %s", loc.Name, loc.Description)
+					} else {
+						triggerDescription = fmt.Sprintf("地点：%s - %s", loc.Name, loc.Description)
+					}
+					break
 				}
-				break
+			}
+		case "task":
+			// 查找任务描述
+			for _, task := range storyData.Tasks {
+				if task.ID == triggerID {
+					if isEnglish {
+						triggerDescription = fmt.Sprintf("Task: %s - %s", task.Title, task.Description)
+					} else {
+						triggerDescription = fmt.Sprintf("任务：%s - %s", task.Title, task.Description)
+					}
+					break
+				}
+			}
+		case "character":
+			// 查找角色描述
+			for _, char := range sceneData.Characters {
+				if char.ID == triggerID {
+					if isEnglish {
+						triggerDescription = fmt.Sprintf("Character: %s - %s", char.Name, char.Personality)
+					} else {
+						triggerDescription = fmt.Sprintf("角色：%s - %s", char.Name, char.Personality)
+					}
+					break
+				}
+			}
+		default:
+			if isEnglish {
+				triggerDescription = "Unknown trigger"
+			} else {
+				triggerDescription = "未知触发器"
 			}
 		}
-	case "task":
-		// 查找任务描述
-		for _, task := range storyData.Tasks {
-			if task.ID == triggerID {
-				if isEnglish {
-					triggerDescription = fmt.Sprintf("Task: %s - %s", task.Title, task.Description)
-				} else {
-					triggerDescription = fmt.Sprintf("任务：%s - %s", task.Title, task.Description)
-				}
-				break
-			}
-		}
-	default:
+
+		var prompt string
+		var systemPrompt string
+
 		if isEnglish {
-			triggerDescription = "Unknown trigger"
-		} else {
-			triggerDescription = "未知触发器"
-		}
-	}
-
-	var prompt string
-	var systemPrompt string
-
-	if isEnglish {
-		// 英文提示词
-		prompt = fmt.Sprintf(`In the world of "%s", the player has encountered the following situation:
+			// 英文提示词
+			prompt = fmt.Sprintf(`In the world of "%s", the player has encountered the following situation:
 
 %s
 
@@ -1650,17 +1891,17 @@ Return in JSON format:
     }
   ]
 }`,
-			sceneData.Scene.Name,
-			triggerDescription,
-			storyData.CurrentState,
-			storyData.Progress,
-			creativityStr,
-			allowPlotTwists)
+				sceneData.Scene.Name,
+				triggerDescription,
+				storyData.CurrentState,
+				storyData.Progress,
+				creativityStr,
+				allowPlotTwists)
 
-		systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
-	} else {
-		// 中文提示词
-		prompt = fmt.Sprintf(`在《%s》的世界中，玩家遇到了以下情况:
+			systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
+		} else {
+			// 中文提示词
+			prompt = fmt.Sprintf(`在《%s》的世界中，玩家遇到了以下情况:
 
 %s
 
@@ -1685,200 +1926,338 @@ Return in JSON format:
     }
   ]
 }`,
-			sceneData.Scene.Name,
-			triggerDescription,
-			storyData.CurrentState,
-			storyData.Progress,
-			creativityStr,
-			allowPlotTwists)
+				sceneData.Scene.Name,
+				triggerDescription,
+				storyData.CurrentState,
+				storyData.Progress,
+				creativityStr,
+				allowPlotTwists)
 
-		systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
-	}
+			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
+		}
 
-	resp, err := s.LLMService.CreateChatCompletion(
-		context.Background(),
-		ChatCompletionRequest{
-			Model: s.getLLMModel(preferences),
-			Messages: []ChatCompletionMessage{
-				{
-					Role:    "system",
-					Content: systemPrompt,
+		resp, err := s.LLMService.CreateChatCompletion(
+			context.Background(),
+			ChatCompletionRequest{
+				Model: s.getLLMModel(preferences),
+				Messages: []ChatCompletionMessage{
+					{
+						Role:    "system",
+						Content: systemPrompt,
+					},
+					{
+						Role:    "user",
+						Content: prompt,
+					},
 				},
-				{
-					Role:    "user",
-					Content: prompt,
+				// 请求JSON格式输出
+				ExtraParams: map[string]interface{}{
+					"response_format": map[string]string{
+						"type": "json_object",
+					},
 				},
 			},
-			// 请求JSON格式输出
-			ExtraParams: map[string]interface{}{
-				"response_format": map[string]string{
-					"type": "json_object",
-				},
+		)
+
+		if err != nil {
+			if isEnglish {
+				return fmt.Errorf("failed to generate story branch: %w", err)
+			} else {
+				return fmt.Errorf("生成故事分支失败: %w", err)
+			}
+		}
+
+		jsonStr := resp.Choices[0].Message.Content
+
+		// 解析返回的JSON
+		var branchData struct {
+			Content string `json:"content"`
+			Type    string `json:"type"`
+			Choices []struct {
+				Text         string `json:"text"`
+				Consequence  string `json:"consequence"`
+				NextNodeHint string `json:"next_node_hint"`
+			} `json:"choices"`
+		}
+
+		if err := json.Unmarshal([]byte(jsonStr), &branchData); err != nil {
+			if isEnglish {
+				return fmt.Errorf("failed to parse story branch data: %w", err)
+			} else {
+				return fmt.Errorf("解析故事分支数据失败: %w", err)
+			}
+		}
+
+		// 创建新的故事节点
+		nodeID := fmt.Sprintf("branch_%s_%d", sceneID, time.Now().UnixNano())
+		newStoryNode := &models.StoryNode{
+			ID:         nodeID,
+			SceneID:    sceneID,
+			Content:    branchData.Content,
+			Type:       branchData.Type,
+			IsRevealed: true,
+			CreatedAt:  time.Now(),
+			Source:     models.SourceBranch,
+			Choices:    []models.StoryChoice{},
+			Metadata: map[string]interface{}{
+				"trigger_type": triggerType,
+				"trigger_id":   triggerID,
 			},
-		},
-	)
-
-	if err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to generate story branch: %w", err)
-		} else {
-			return nil, fmt.Errorf("生成故事分支失败: %w", err)
 		}
-	}
 
-	jsonStr := resp.Choices[0].Message.Content
-
-	// 解析返回的JSON
-	var branchData struct {
-		Content string `json:"content"`
-		Type    string `json:"type"`
-		Choices []struct {
-			Text         string `json:"text"`
-			Consequence  string `json:"consequence"`
-			NextNodeHint string `json:"next_node_hint"`
-		} `json:"choices"`
-	}
-
-	if err := json.Unmarshal([]byte(jsonStr), &branchData); err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to parse story branch data: %w", err)
-		} else {
-			return nil, fmt.Errorf("解析故事分支数据失败: %w", err)
+		// 添加选择
+		for i, choice := range branchData.Choices {
+			newStoryNode.Choices = append(newStoryNode.Choices, models.StoryChoice{
+				ID:           fmt.Sprintf("choice_%s_%d", nodeID, i+1),
+				Text:         choice.Text,
+				Consequence:  choice.Consequence,
+				NextNodeHint: choice.NextNodeHint,
+				Selected:     false,
+				CreatedAt:    time.Now(),
+			})
 		}
-	}
 
-	// 创建新的故事节点
-	nodeID := fmt.Sprintf("branch_%s_%d", sceneID, time.Now().UnixNano())
-	storyNode := models.StoryNode{
-		ID:         nodeID,
-		SceneID:    sceneID,
-		Content:    branchData.Content,
-		Type:       branchData.Type,
-		IsRevealed: true,
-		CreatedAt:  time.Now(),
-		Source:     models.SourceBranch,
-		Choices:    []models.StoryChoice{},
-	}
+		// 将节点添加到故事数据
+		storyData.Nodes = append(storyData.Nodes, *newStoryNode)
 
-	// 添加选择
-	for i, choice := range branchData.Choices {
-		storyNode.Choices = append(storyNode.Choices, models.StoryChoice{
-			ID:           fmt.Sprintf("choice_%s_%d", nodeID, i+1),
-			Text:         choice.Text,
-			Consequence:  choice.Consequence,
-			NextNodeHint: choice.NextNodeHint,
-			Selected:     false,
-		})
-	}
-
-	// 将节点添加到故事数据
-	storyData.Nodes = append(storyData.Nodes, storyNode)
-
-	// 保存更新后的故事数据
-	if err := s.saveStoryData(sceneID, storyData); err != nil {
-		if isEnglish {
-			return nil, fmt.Errorf("failed to save updated story data: %w", err)
-		} else {
-			return nil, fmt.Errorf("保存更新后的故事数据失败: %w", err)
+		// 保存更新后的故事数据
+		if err := s.saveStoryData(sceneID, &storyData); err != nil {
+			return err
 		}
-	}
 
-	return &storyNode, nil
-}
+		// 设置返回结果
+		storyNode = newStoryNode
 
-// EvaluateStoryProgress 评估故事进展状态
-func (s *StoryService) EvaluateStoryProgress(sceneID string) (*models.StoryProgressStatus, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
+		return nil
+	})
+
 	if err != nil {
 		return nil, err
 	}
 
-	// 计算任务完成情况
-	totalTasks := len(storyData.Tasks)
-	completedTasks := 0
-	for _, task := range storyData.Tasks {
-		if task.Completed {
-			completedTasks++
+	return storyNode, nil
+}
+
+// EvaluateStoryProgress 评估故事进展状态
+// 🔧 修复后的版本
+func (s *StoryService) EvaluateStoryProgress(sceneID string) (*models.StoryProgressStatus, error) {
+	var status *models.StoryProgressStatus
+
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 在锁内直接读取文件
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
 		}
-	}
 
-	// 计算地点探索情况
-	totalLocations := len(storyData.Locations)
-	accessibleLocations := 0
-	for _, loc := range storyData.Locations {
-		if loc.Accessible {
-			accessibleLocations++
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
 		}
-	}
 
-	// 计算故事节点情况
-	totalNodes := len(storyData.Nodes)
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
 
-	// 创建进展状态
-	status := &models.StoryProgressStatus{
-		SceneID:             sceneID,
-		Progress:            storyData.Progress,
-		CurrentState:        storyData.CurrentState,
-		CompletedTasks:      completedTasks,
-		TotalTasks:          totalTasks,
-		TaskCompletionRate:  float64(completedTasks) / float64(totalTasks) * 100,
-		AccessibleLocations: accessibleLocations,
-		TotalLocations:      totalLocations,
-		LocationAccessRate:  float64(accessibleLocations) / float64(totalLocations) * 100,
-		TotalStoryNodes:     totalNodes,
-		EstimatedCompletion: time.Duration(0),
-		IsMainObjectiveMet:  storyData.Progress >= 100,
-	}
-
-	// 估算完成时间 - 采用动态估算而非固定值
-	// 基于故事复杂度（任务数量、地点数量、节点数量）和当前进度计算
-	if status.Progress > 0 {
-		// 基础估计时间基于故事复杂度
-		baseTimePerTask := 15 * time.Minute     // 每个任务平均15分钟
-		baseTimePerLocation := 10 * time.Minute // 每个地点平均10分钟
-		baseTimePerNode := 5 * time.Minute      // 每个节点平均5分钟
-
-		// 计算总体复杂度时间
-		storyComplexityTime := time.Duration(totalTasks)*baseTimePerTask +
-			time.Duration(totalLocations)*baseTimePerLocation +
-			time.Duration(totalNodes)*baseTimePerNode
-
-		// 考虑已消耗时间（如果有的话）
-		var elapsedTime time.Duration
-		if len(storyData.Nodes) > 1 {
-			firstNodeTime := storyData.Nodes[0].CreatedAt
-			latestNodeTime := time.Now()
-			for _, node := range storyData.Nodes {
-				if node.CreatedAt.After(latestNodeTime) {
-					latestNodeTime = node.CreatedAt
-				}
+		// 计算任务完成情况
+		totalTasks := len(storyData.Tasks)
+		completedTasks := 0
+		for _, task := range storyData.Tasks {
+			if task.Completed {
+				completedTasks++
 			}
-			elapsedTime = latestNodeTime.Sub(firstNodeTime)
 		}
 
-		// 根据当前进度和已消耗时间估算剩余时间
-		remainingProgress := 100 - status.Progress
-		if elapsedTime > 0 && status.Progress > 0 {
-			// 使用实际速度估算
-			estimatedTotalTime := time.Duration(float64(elapsedTime) * 100 / float64(status.Progress))
-			status.EstimatedCompletion = time.Duration(float64(estimatedTotalTime) * float64(remainingProgress) / 100.0)
-		} else {
-			// 使用复杂度估算
-			status.EstimatedCompletion = time.Duration(float64(storyComplexityTime) * float64(remainingProgress) / 100.0)
+		// 计算地点探索情况
+		totalLocations := len(storyData.Locations)
+		accessibleLocations := 0
+		for _, loc := range storyData.Locations {
+			if loc.Accessible {
+				accessibleLocations++
+			}
 		}
 
-		// 设置合理的上下限
-		minTime := 15 * time.Minute
-		maxTime := 6 * time.Hour
-		if status.EstimatedCompletion < minTime {
-			status.EstimatedCompletion = minTime
-		} else if status.EstimatedCompletion > maxTime {
-			status.EstimatedCompletion = maxTime
+		// 计算故事节点情况
+		totalNodes := len(storyData.Nodes)
+
+		// 创建进展状态
+		status = &models.StoryProgressStatus{
+			SceneID:             sceneID,
+			Progress:            storyData.Progress,
+			CurrentState:        storyData.CurrentState,
+			CompletedTasks:      completedTasks,
+			TotalTasks:          totalTasks,
+			TaskCompletionRate:  calculateSafeRate(completedTasks, totalTasks),
+			AccessibleLocations: accessibleLocations,
+			TotalLocations:      totalLocations,
+			LocationAccessRate:  calculateSafeRate(accessibleLocations, totalLocations),
+			TotalStoryNodes:     totalNodes,
+			EstimatedCompletion: s.calculateEstimatedCompletion(&storyData),
+			IsMainObjectiveMet:  storyData.Progress >= 100,
+		}
+
+		return nil
+	})
+
+	return status, err
+}
+
+// 🔧 辅助函数：安全计算比率
+func calculateSafeRate(completed, total int) float64 {
+	if total == 0 {
+		return 0.0
+	}
+	return float64(completed) / float64(total) * 100
+}
+
+// 🔧 提取估算计算逻辑
+func (s *StoryService) calculateEstimatedCompletion(storyData *models.StoryData) time.Duration {
+	if storyData == nil {
+		return 0
+	}
+
+	// 如果故事已完成，返回0
+	if storyData.Progress >= 100 {
+		return 0
+	}
+
+	// 检测语言（用于不同的估算逻辑）
+	isEnglish := isEnglishText(storyData.Intro + " " + storyData.MainObjective)
+
+	// 基础估算参数
+	var baseTimePerNode time.Duration
+	var taskComplexityFactor float64
+	var progressFactor float64
+
+	if isEnglish {
+		// 英文故事的估算参数
+		baseTimePerNode = 3 * time.Minute // 每个节点平均3分钟
+		taskComplexityFactor = 1.2        // 任务复杂度系数
+		progressFactor = 1.1              // 进度影响系数
+	} else {
+		// 中文故事的估算参数
+		baseTimePerNode = 4 * time.Minute // 每个节点平均4分钟（考虑阅读速度差异）
+		taskComplexityFactor = 1.3        // 任务复杂度系数
+		progressFactor = 1.15             // 进度影响系数
+	}
+
+	// 计算剩余节点数（估算）
+	revealedNodes := 0
+	for _, node := range storyData.Nodes {
+		if node.IsRevealed {
+			revealedNodes++
 		}
 	}
 
-	return status, nil
+	// 估算总节点数（基于当前进度）
+	var estimatedTotalNodes int
+	if storyData.Progress > 0 && revealedNodes > 0 {
+		// 基于当前进度估算总节点数
+		estimatedTotalNodes = int(float64(revealedNodes) * 100.0 / float64(storyData.Progress))
+	} else {
+		// 默认估算（基于故事复杂度）
+		estimatedTotalNodes = 15 // 默认15个节点
+
+		// 根据任务数量调整估算
+		taskCount := len(storyData.Tasks)
+		if taskCount > 5 {
+			estimatedTotalNodes += (taskCount - 5) * 2 // 每增加一个任务增加2个节点
+		}
+
+		// 根据地点数量调整估算
+		locationCount := len(storyData.Locations)
+		if locationCount > 3 {
+			estimatedTotalNodes += (locationCount - 3) // 每增加一个地点增加1个节点
+		}
+	}
+
+	// 计算剩余节点数
+	remainingNodes := max(estimatedTotalNodes-revealedNodes, 0)
+
+	// 计算未完成任务的影响
+	uncompletedTasks := 0
+	totalObjectives := 0
+	completedObjectives := 0
+
+	for _, task := range storyData.Tasks {
+		if !task.Completed {
+			uncompletedTasks++
+		}
+
+		totalObjectives += len(task.Objectives)
+		for _, objective := range task.Objectives {
+			if objective.Completed {
+				completedObjectives++
+			}
+		}
+	}
+
+	// 任务复杂度影响时间估算
+	taskTimeMultiplier := 1.0
+	if uncompletedTasks > 0 {
+		taskTimeMultiplier = taskComplexityFactor
+
+		// 根据目标完成率调整
+		if totalObjectives > 0 {
+			objectiveCompletionRate := float64(completedObjectives) / float64(totalObjectives)
+			if objectiveCompletionRate < 0.5 {
+				taskTimeMultiplier *= 1.2 // 目标完成率低，增加时间
+			}
+		}
+	}
+
+	// 根据当前故事状态调整时间估算
+	var stateMultiplier float64
+	switch storyData.CurrentState {
+	case "初始", "Initial":
+		stateMultiplier = 1.3 // 初始阶段通常节奏较慢
+	case "冲突", "Conflict":
+		stateMultiplier = 1.1 // 冲突阶段节奏适中
+	case "发展", "Development":
+		stateMultiplier = 1.0 // 发展阶段标准节奏
+	case "高潮", "Climax":
+		stateMultiplier = 0.8 // 高潮阶段节奏较快
+	case "结局", "Ending":
+		stateMultiplier = 0.6 // 结局阶段很快
+	default:
+		stateMultiplier = 1.0
+	}
+
+	// 根据剩余进度调整
+	remainingProgress := 100 - storyData.Progress
+	progressMultiplier := progressFactor * float64(remainingProgress) / 100.0
+
+	// 计算基础估算时间
+	baseEstimatedTime := time.Duration(remainingNodes) * baseTimePerNode
+
+	// 应用所有系数
+	finalEstimatedTime := time.Duration(
+		float64(baseEstimatedTime) *
+			taskTimeMultiplier *
+			stateMultiplier *
+			progressMultiplier,
+	)
+
+	// 添加一些随机性和不确定性
+	uncertaintyFactor := 1.2 // 20%的不确定性
+	finalEstimatedTime = time.Duration(float64(finalEstimatedTime) * uncertaintyFactor)
+
+	// 设置最小和最大时间限制
+	minTime := 5 * time.Minute
+	maxTime := 4 * time.Hour
+
+	if finalEstimatedTime < minTime {
+		finalEstimatedTime = minTime
+	}
+	if finalEstimatedTime > maxTime {
+		finalEstimatedTime = maxTime
+	}
+
+	// 考虑用户的平均游戏速度（如果有历史数据）
+	// 这里可以根据实际需求添加个性化调整
+
+	return finalEstimatedTime
 }
 
 // 辅助函数：格式化位置信息
@@ -1906,63 +2285,87 @@ func formatCharacters(characters []*models.Character) string {
 
 // RewindToNode 回溯故事到指定节点
 func (s *StoryService) RewindToNode(sceneID, nodeID string) (*models.StoryData, error) {
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, nil)
-	if err != nil {
-		return nil, err
-	}
+	var storyData *models.StoryData
 
-	// 查找目标节点
-	var targetNode *models.StoryNode
-	for i := range storyData.Nodes {
-		if storyData.Nodes[i].ID == nodeID {
-			targetNode = &storyData.Nodes[i]
-			break
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 直接读取文件
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
 		}
-	}
 
-	if targetNode == nil {
-		return nil, fmt.Errorf("节点不存在或不可回溯")
-	}
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
 
-	// 标记目标节点之后的所有节点为未揭示
-	for i := range storyData.Nodes {
-		node := &storyData.Nodes[i]
-		if node.CreatedAt.After(targetNode.CreatedAt) && node.ID != nodeID {
-			node.IsRevealed = false
-			// 重置该节点的所有选择
-			for j := range node.Choices {
-				node.Choices[j].Selected = false
+		var tempStoryData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &tempStoryData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
+		// 查找目标节点
+		var targetNode *models.StoryNode
+		for i := range tempStoryData.Nodes {
+			if tempStoryData.Nodes[i].ID == nodeID {
+				targetNode = &tempStoryData.Nodes[i]
+				break
 			}
 		}
-	}
 
-	// 重置目标节点的选择状态
-	for i := range targetNode.Choices {
-		targetNode.Choices[i].Selected = false
-	}
+		if targetNode == nil {
+			return fmt.Errorf("节点不存在或不可回溯")
+		}
 
-	// 重新计算故事进度
-	newProgress := calculateProgress(storyData, targetNode)
-	if newProgress >= 0 {
-		storyData.Progress = newProgress
-	}
+		// 标记目标节点之后的所有节点为未揭示
+		for i := range tempStoryData.Nodes {
+			node := &tempStoryData.Nodes[i]
+			if node.CreatedAt.After(targetNode.CreatedAt) && node.ID != nodeID {
+				node.IsRevealed = false
+				// 重置该节点的所有选择
+				for j := range node.Choices {
+					node.Choices[j].Selected = false
+				}
+			}
+		}
 
-	// 更新当前状态
-	if storyData.Progress >= 100 {
-		storyData.CurrentState = "结局"
-	} else if storyData.Progress >= 75 {
-		storyData.CurrentState = "高潮"
-	} else if storyData.Progress >= 50 {
-		storyData.CurrentState = "发展"
-	} else if storyData.Progress >= 25 {
-		storyData.CurrentState = "冲突"
-	} else {
-		storyData.CurrentState = "初始"
-	}
+		// 重置目标节点的选择状态
+		for i := range targetNode.Choices {
+			targetNode.Choices[i].Selected = false
+		}
 
-	// 保存更新后的故事数据
-	if err := s.saveStoryData(sceneID, storyData); err != nil {
+		// 重新计算故事进度
+		newProgress := calculateProgress(&tempStoryData, targetNode)
+		if newProgress >= 0 {
+			tempStoryData.Progress = newProgress
+		}
+
+		// 更新当前状态
+		if tempStoryData.Progress >= 100 {
+			tempStoryData.CurrentState = "结局"
+		} else if tempStoryData.Progress >= 75 {
+			tempStoryData.CurrentState = "高潮"
+		} else if tempStoryData.Progress >= 50 {
+			tempStoryData.CurrentState = "发展"
+		} else if tempStoryData.Progress >= 25 {
+			tempStoryData.CurrentState = "冲突"
+		} else {
+			tempStoryData.CurrentState = "初始"
+		}
+
+		// 更新最后修改时间
+		tempStoryData.LastUpdated = time.Now()
+
+		// 保存更新后的故事数据
+		if err := s.saveStoryData(sceneID, &tempStoryData); err != nil {
+			return err
+		}
+
+		storyData = &tempStoryData
+		return nil
+	})
+
+	if err != nil {
 		return nil, err
 	}
 
@@ -2011,18 +2414,53 @@ func calculateProgress(storyData *models.StoryData, referenceNode *models.StoryN
 
 // ProcessCharacterInteractionTriggers 方法，处理故事节点中的角色互动触发器
 func (s *StoryService) ProcessCharacterInteractionTriggers(sceneID string, nodeID string, preferences *models.UserPreferences) ([]*models.CharacterInteraction, error) {
-	// 获取场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
-	if err != nil {
-		return nil, err
-	}
+	var generatedInteractions []*models.CharacterInteraction
 
-	// 获取故事数据
-	storyData, err := s.GetStoryData(sceneID, preferences)
-	if err != nil {
-		return nil, err
-	}
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 在锁内读取所需的数据
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
+		}
 
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
+
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
+		// 加载场景数据
+		sceneData, err := s.SceneService.LoadScene(sceneID)
+		if err != nil {
+			return err
+		}
+
+		// 🔧 调用修改后的方法，传递数据
+		interactions, err := s.processCharacterInteractionTriggersUnsafe(
+			sceneID, nodeID, preferences, &storyData, sceneData)
+		if err != nil {
+			return err
+		}
+
+		// 如果有互动被触发，保存数据
+		if len(interactions) > 0 {
+			if err := s.saveStoryData(sceneID, &storyData); err != nil {
+				return err
+			}
+		}
+		generatedInteractions = interactions
+		return nil
+	})
+
+	return generatedInteractions, err
+}
+
+// processCharacterInteractionTriggersUnsafe 内部方法，处理故事节点中的角色互动触发器（不加锁）
+func (s *StoryService) processCharacterInteractionTriggersUnsafe(sceneID string, nodeID string, preferences *models.UserPreferences, storyData *models.StoryData, sceneData *SceneData) ([]*models.CharacterInteraction, error) {
 	// 查找节点
 	var node *models.StoryNode
 	for i := range storyData.Nodes {
@@ -2063,15 +2501,8 @@ func (s *StoryService) ProcessCharacterInteractionTriggers(sceneID string, nodeI
 		}
 	}
 
-	// 获取角色服务
-	var characterService *CharacterService
-	// 使用全局依赖注入容器获取角色服务
-	container := di.GetContainer()
-	if charServiceObj := container.Get("character"); charServiceObj != nil {
-		characterService = charServiceObj.(*CharacterService)
-	}
-
-	if characterService == nil {
+	// 🔧 使用缓存的角色服务
+	if s.CharacterService == nil {
 		if isEnglish {
 			return nil, fmt.Errorf("character service not available")
 		} else {
@@ -2087,11 +2518,14 @@ func (s *StoryService) ProcessCharacterInteractionTriggers(sceneID string, nodeI
 			continue
 		}
 
-		// 实际项目中，这里应根据条件判断是否触发
-		// 简化版本：全部触发
+		// 🔧 检查触发条件是否满足
+		shouldTrigger := s.evaluateTriggerCondition(triggers[i].Condition, storyData, preferences)
+		if !shouldTrigger {
+			continue
+		}
 
 		// 生成角色互动
-		interaction, err := characterService.GenerateCharacterInteraction(
+		interaction, err := s.CharacterService.GenerateCharacterInteraction(
 			sceneID,
 			triggers[i].CharacterIDs,
 			triggers[i].Topic,
@@ -2099,7 +2533,11 @@ func (s *StoryService) ProcessCharacterInteractionTriggers(sceneID string, nodeI
 		)
 
 		if err != nil {
-			fmt.Printf("触发角色互动失败: %v\n", err)
+			if isEnglish {
+				fmt.Printf("Warning: Failed to trigger character interaction: %v\n", err)
+			} else {
+				fmt.Printf("警告: 触发角色互动失败: %v\n", err)
+			}
 			continue
 		}
 
@@ -2110,17 +2548,6 @@ func (s *StoryService) ProcessCharacterInteractionTriggers(sceneID string, nodeI
 
 	// 更新触发器状态
 	node.Metadata["interaction_triggers"] = triggers
-
-	// 如果有互动被触发，保存故事数据
-	if len(generatedInteractions) > 0 {
-		if err := s.saveStoryData(sceneID, storyData); err != nil {
-			if isEnglish {
-				return nil, fmt.Errorf("failed to save story data after triggering interactions: %w", err)
-			} else {
-				return nil, fmt.Errorf("触发互动后保存故事数据失败: %w", err)
-			}
-		}
-	}
 
 	return generatedInteractions, nil
 }
@@ -2133,4 +2560,79 @@ func (s *StoryService) SaveStoryData(sceneID string, storyData *models.StoryData
 
 	// 调用内部的保存方法
 	return s.saveStoryData(sceneID, storyData)
+}
+
+// ExecuteBatchOperation 批量执行故事操作
+func (s *StoryService) ExecuteBatchOperation(sceneID string, operation func(*models.StoryData) error) error {
+	return s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 直接读取文件，避免死锁
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
+		}
+
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
+
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
+		// 执行批量操作
+		if err := operation(&storyData); err != nil {
+			return err
+		}
+
+		// 保存更新后的数据
+		return s.saveStoryData(sceneID, &storyData)
+	})
+}
+
+// 基础评估方法
+func (s *StoryService) evaluateTriggerCondition(condition string, storyData *models.StoryData, preferences *models.UserPreferences) bool {
+	if condition == "" {
+		return s.evaluateDefaultTriggerCondition(storyData, preferences)
+	}
+
+	condition = strings.TrimSpace(strings.ToLower(condition))
+
+	// 🔧 只保留最基本的几种条件
+	switch condition {
+	case "always", "总是":
+		return true
+	case "never", "从不":
+		return false
+	case "random", "随机":
+		return rand.Float64() < 0.5 // 50% 概率
+	default:
+		// 简单的进度检查
+		if strings.Contains(condition, "progress") || strings.Contains(condition, "进度") {
+			return storyData.Progress > 30
+		}
+		return s.evaluateDefaultTriggerCondition(storyData, preferences)
+	}
+}
+
+// 默认触发条件评估（原逻辑）
+func (s *StoryService) evaluateDefaultTriggerCondition(storyData *models.StoryData, preferences *models.UserPreferences) bool {
+	// 基于用户偏好的触发概率
+	if preferences != nil {
+		switch preferences.CreativityLevel {
+		case models.CreativityExpansive:
+			// 高创造性模式下，更容易触发互动
+			return true
+		case models.CreativityBalanced:
+			// 平衡模式下，有条件触发
+			return storyData.Progress >= 25 // 进度超过25%时触发
+		case models.CreativityStrict:
+			// 严格模式下，较少触发
+			return storyData.Progress >= 50 // 进度超过50%时触发
+		}
+	}
+
+	// 默认触发条件
+	return storyData.Progress >= 30
 }
