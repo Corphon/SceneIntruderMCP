@@ -100,7 +100,6 @@ func NewAnalyzerServiceWithProvider(provider llm.Provider) *AnalyzerService {
 }
 
 // AnalyzeText 分析文本，提取场景、角色、物品等信息
-// 🔧 优化后的 AnalyzeText 方法
 func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResult, error) {
 	// 获取并发许可
 	s.semaphore <- struct{}{}
@@ -972,14 +971,14 @@ func (s *AnalyzerService) buildCharacterRelationships(ctx context.Context, chara
 	return nil
 }
 
-// 🔧 生成缓存键
+// 生成缓存键
 func (s *AnalyzerService) generateCacheKey(text, title string) string {
 	h := md5.New()
 	h.Write([]byte(text + "|" + title))
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// 🔧 检查缓存
+// 检查缓存
 func (s *AnalyzerService) checkAnalysisCache(cacheKey string) *models.AnalysisResult {
 	s.analysisCache.mutex.RLock()
 	defer s.analysisCache.mutex.RUnlock()
@@ -995,7 +994,7 @@ func (s *AnalyzerService) checkAnalysisCache(cacheKey string) *models.AnalysisRe
 	return nil
 }
 
-// 🔧 添加到缓存
+// 添加到缓存
 func (s *AnalyzerService) addToAnalysisCache(cacheKey string, result *models.AnalysisResult) {
 	s.analysisCache.mutex.Lock()
 	defer s.analysisCache.mutex.Unlock()
