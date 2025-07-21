@@ -14,6 +14,7 @@ import (
 )
 
 // SetupRouter 配置HTTP路由
+// internal/api/router.go
 func SetupRouter() (*gin.Engine, error) {
 	// 获取配置
 	cfg := config.GetCurrentConfig()
@@ -24,7 +25,7 @@ func SetupRouter() (*gin.Engine, error) {
 	// 获取依赖注入容器
 	container := di.GetContainer()
 
-	// 从容器获取服务
+	// ✅ 只从容器获取服务，不再创建新实例
 	sceneService, ok := container.Get("scene").(*services.SceneService)
 	if !ok {
 		return nil, fmt.Errorf("场景服务未正确初始化")
@@ -40,70 +41,32 @@ func SetupRouter() (*gin.Engine, error) {
 		return nil, fmt.Errorf("角色服务未正确初始化")
 	}
 
-	// 获取LLM服务（用于初始化分析服务）
-	llmService, ok := container.Get("llm").(*services.LLMService)
-	if !ok {
-		return nil, fmt.Errorf("LLM服务未正确初始化")
-	}
-
-	// 获取进度服务（确保在使用前已初始化）
 	progressService, ok := container.Get("progress").(*services.ProgressService)
 	if !ok {
-		// 如果不存在，创建新实例
-		progressService = services.NewProgressService()
-		container.Register("progress", progressService)
+		return nil, fmt.Errorf("进度服务未正确初始化")
 	}
 
-	// 获取统计服务（确保在使用前已初始化）
-	statsService, ok := container.Get("stats").(*services.StatsService)
+	analyzerService, ok := container.Get("analyzer").(*services.AnalyzerService)
 	if !ok {
-		statsService = services.NewStatsService()
-		container.Register("stats", statsService)
+		return nil, fmt.Errorf("分析服务未正确初始化")
 	}
 
-	// 注册故事服务
-	storyService := services.NewStoryService(llmService)
-	container.Register("story", storyService)
-
-	// 注册导出服务
-	exportService := services.NewExportService(contextService, storyService, sceneService)
-	container.Register("export", exportService)
-
-	// 注册场景聚合服务
-	sceneAggregateService := services.NewSceneAggregateService(
-		sceneService, characterService, contextService, storyService, progressService)
-	container.Register("scene_aggregate", sceneAggregateService)
-
-	// 注册交互聚合服务 - 修复参数顺序
-	interactionAggregateService := &services.InteractionAggregateService{
-		CharacterService: characterService,
-		ContextService:   contextService,
-		SceneService:     sceneService,
-		StatsService:     statsService,
-		StoryService:     storyService,
-		ExportService:    exportService,
-	}
-	container.Register("interaction_aggregate", interactionAggregateService)
-
-	// 初始化分析服务
-	analyzerService := services.NewAnalyzerServiceWithProvider(llmService.GetProvider())
-	container.Register("analyzer", analyzerService)
-
-	// 获取配置服务
 	configService, ok := container.Get("config").(*services.ConfigService)
 	if !ok {
-		configService = services.NewConfigService()
-		container.Register("config", configService)
+		return nil, fmt.Errorf("配置服务未正确初始化")
 	}
 
-	// 获取用户服务
+	statsService, ok := container.Get("stats").(*services.StatsService)
+	if !ok {
+		return nil, fmt.Errorf("统计服务未正确初始化")
+	}
+
 	userService, ok := container.Get("user").(*services.UserService)
 	if !ok {
-		userService = services.NewUserService()
-		container.Register("user", userService)
+		return nil, fmt.Errorf("用户服务未正确初始化")
 	}
 
-	// 创建API处理器
+	// ✅ 创建API处理器 - 只传递从容器获取的服务
 	handler := NewHandler(
 		sceneService,
 		characterService,
@@ -147,6 +110,7 @@ func SetupRouter() (*gin.Engine, error) {
 	r.GET("/scenes/create", handler.CreateScenePage)
 	r.GET("/scenes/:id", handler.ScenePage)
 	r.GET("/settings", handler.SettingsPage)
+	r.GET("/user/profile", handler.UserProfilePage) // 添加用户档案页面
 	r.GET("/scenes/:id/story", handler.StoryViewPage)
 
 	// WebSocket 支持
@@ -191,19 +155,20 @@ func SetupRouter() (*gin.Engine, error) {
 			scenesGroup.POST("", handler.CreateScene)
 			scenesGroup.GET("/:id", handler.GetScene)
 			scenesGroup.GET("/:id/characters", handler.GetCharacters)
-			scenesGroup.GET("/:id/conversations", handler.GetConversations) // 只保留一次
+			scenesGroup.GET("/:id/conversations", handler.GetConversations)
 
-			// ✅ 故事相关路由
+			// 故事相关路由
 			storyGroup := scenesGroup.Group("/:id/story")
 			{
-				storyGroup.GET("", handler.GetStoryData)              // GET /api/scenes/:id/story
-				storyGroup.POST("/choice", handler.MakeStoryChoice)   // POST /api/scenes/:id/story/choice
-				storyGroup.POST("/advance", handler.AdvanceStory)     // POST /api/scenes/:id/story/advance
-				storyGroup.POST("/rewind", handler.RewindStory)       // POST /api/scenes/:id/story/rewind
-				storyGroup.GET("/branches", handler.GetStoryBranches) // GET /api/scenes/:id/story/branches
+				storyGroup.GET("", handler.GetStoryData)
+				storyGroup.POST("/choice", handler.MakeStoryChoice)
+				storyGroup.POST("/advance", handler.AdvanceStory)
+				storyGroup.POST("/rewind", handler.RewindStory)
+				storyGroup.GET("/branches", handler.GetStoryBranches)
+				storyGroup.POST("/batch", handler.BatchStoryOperations)
 			}
 
-			// ✅ 导出相关路由
+			// 导出相关路由
 			exportGroup := scenesGroup.Group("/:id/export")
 			{
 				exportGroup.GET("/scene", handler.ExportScene)
@@ -217,19 +182,28 @@ func SetupRouter() (*gin.Engine, error) {
 		// ===============================
 		chatGroup := api.Group("/chat")
 		{
-			chatGroup.POST("", handler.Chat)                    // 普通聊天
-			chatGroup.POST("/emotion", handler.ChatWithEmotion) // 带情绪聊天
+			chatGroup.POST("", handler.Chat)
+			chatGroup.POST("/emotion", handler.ChatWithEmotion)
 		}
 
 		// ===============================
 		// 角色互动相关路由
 		// ===============================
-		interactionsGroup := api.Group("/interactions")
+		interactions := api.Group("/interactions")
 		{
-			interactionsGroup.POST("/trigger", handler.TriggerCharacterInteraction)
-			interactionsGroup.POST("/simulate", handler.SimulateCharactersConversation)
-			interactionsGroup.GET("/:scene_id", handler.GetCharacterInteractions)
-			interactionsGroup.GET("/:scene_id/:character1_id/:character2_id", handler.GetCharacterToCharacterInteractions)
+			interactions.POST("/trigger", handler.TriggerCharacterInteraction)
+			interactions.POST("/simulate", handler.SimulateCharactersConversation)
+			interactions.GET("/:scene_id", handler.GetCharacterInteractions)
+			interactions.GET("/:scene_id/:character1_id/:character2_id", handler.GetCharacterToCharacterInteractions)
+		}
+
+		// ===============================
+		// 配置相关路由
+		// ===============================
+		configGroup := api.Group("/config")
+		{
+			configGroup.GET("/health", handler.GetConfigHealth)
+			configGroup.GET("/metrics", handler.GetConfigMetrics)
 		}
 
 		// ===============================
@@ -245,7 +219,7 @@ func SetupRouter() (*gin.Engine, error) {
 		api.POST("/cancel/:taskID", handler.CancelAnalysisTask)
 
 		// ===============================
-		// 用户管理路由 - 去除重复，统一组织
+		// 用户管理路由
 		// ===============================
 		usersGroup := api.Group("/users/:user_id")
 		{
@@ -276,8 +250,15 @@ func SetupRouter() (*gin.Engine, error) {
 			}
 		}
 
-		//调试路由
+		// 调试路由
 		api.GET("/ws/status", handler.GetWebSocketStatus)
+
+		// WebSocket 管理路由
+		wsGroup := api.Group("/ws")
+		{
+			wsGroup.GET("/status", handler.GetWebSocketStatus)
+			wsGroup.POST("/cleanup", handler.CleanupWebSocketConnections)
+		}
 	}
 
 	return r, nil
