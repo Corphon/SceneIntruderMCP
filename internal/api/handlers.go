@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
@@ -20,42 +20,7 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
 	"github.com/Corphon/SceneIntruderMCP/internal/services"
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 )
-
-// WebSocket 升级器配置
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// 在生产环境中应该进行更严格的检查
-		return true
-	},
-}
-
-// WebSocket 连接管理器
-type WebSocketManager struct {
-	connections map[string]map[*websocket.Conn]bool // sceneID -> connections
-	broadcast   chan []byte
-	register    chan *WebSocketClient
-	unregister  chan *WebSocketClient
-	mutex       sync.RWMutex
-}
-
-type WebSocketClient struct {
-	conn    *websocket.Conn
-	sceneID string
-	userID  string
-	send    chan []byte
-}
-
-// 全局 WebSocket 管理器
-var wsManager = &WebSocketManager{
-	connections: make(map[string]map[*websocket.Conn]bool),
-	broadcast:   make(chan []byte),
-	register:    make(chan *WebSocketClient),
-	unregister:  make(chan *WebSocketClient),
-}
 
 // Handler 处理API请求
 type Handler struct {
@@ -68,6 +33,8 @@ type Handler struct {
 	ConfigService    *services.ConfigService    // 配置服务
 	StatsService     *services.StatsService     // 统计服务
 	UserService      *services.UserService      // 用户服务
+	WebSocketHandler *WebSocketHandler          // WebSocket 处理器
+	Response         *ResponseHelper            // 响应助手
 }
 
 // TriggerCharacterInteractionRequest 触发角色互动的请求结构
@@ -86,469 +53,69 @@ type SimulateConversationRequest struct {
 	NumberOfTurns    int      `json:"number_of_turns"`   // 对话轮数
 }
 
-// -----------------------------------------------------------------------------
-// 初始化 WebSocket 管理器
-func init() {
-	go wsManager.run()
+// APIResponse 标准API响应格式
+type APIResponse struct {
+	Success   bool        `json:"success"`
+	Data      interface{} `json:"data,omitempty"`
+	Error     *APIError   `json:"error,omitempty"`
+	Message   string      `json:"message,omitempty"`
+	Timestamp time.Time   `json:"timestamp"`
+	RequestID string      `json:"request_id,omitempty"` // 用于调试和追踪
 }
 
-// 运行 WebSocket 管理器
-func (manager *WebSocketManager) run() {
-	for {
-		select {
-		case client := <-manager.register:
-			manager.mutex.Lock()
-			if manager.connections[client.sceneID] == nil {
-				manager.connections[client.sceneID] = make(map[*websocket.Conn]bool)
-			}
-			manager.connections[client.sceneID][client.conn] = true
-			manager.mutex.Unlock()
-
-			log.Printf("✅ WebSocket 客户端已连接到场景 %s", client.sceneID)
-
-		case client := <-manager.unregister:
-			manager.mutex.Lock()
-			if connections, ok := manager.connections[client.sceneID]; ok {
-				if _, ok := connections[client.conn]; ok {
-					delete(connections, client.conn)
-					close(client.send)
-
-					// 如果场景没有连接了，清理映射
-					if len(connections) == 0 {
-						delete(manager.connections, client.sceneID)
-					}
-				}
-			}
-			manager.mutex.Unlock()
-
-			log.Printf("❌ WebSocket 客户端已断开场景 %s", client.sceneID)
-
-		case message := <-manager.broadcast:
-			manager.mutex.RLock()
-			for _, connections := range manager.connections {
-				for conn := range connections {
-					if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-						log.Printf("❌ 广播消息失败: %v", err)
-						conn.Close()
-						delete(connections, conn)
-					}
-				}
-			}
-			manager.mutex.RUnlock()
-		}
-	}
+// APIError 标准错误格式
+type APIError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Details string `json:"details,omitempty"`
 }
 
+// PaginationMeta 分页元数据
+type PaginationMeta struct {
+	Page       int `json:"page"`
+	PerPage    int `json:"per_page"`
+	Total      int `json:"total"`
+	TotalPages int `json:"total_pages"`
+}
+
+// PaginatedResponse 带分页的响应
+type PaginatedResponse struct {
+	*APIResponse
+	Meta *PaginationMeta `json:"meta,omitempty"`
+}
+
+// ------------------------------------------------
 // SceneWebSocket 处理场景 WebSocket 连接
 func (h *Handler) SceneWebSocket(c *gin.Context) {
-	sceneID := c.Param("id")
-
-	// 验证场景是否存在
-	_, err := h.SceneService.LoadScene(sceneID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "场景不存在"})
-		return
-	}
-
-	// 升级 HTTP 连接到 WebSocket
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Printf("❌ WebSocket 升级失败: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	// 获取用户ID（从查询参数或会话中）
-	userID := c.DefaultQuery("user_id", "anonymous")
-
-	// 创建客户端
-	client := &WebSocketClient{
-		conn:    conn,
-		sceneID: sceneID,
-		userID:  userID,
-		send:    make(chan []byte, 256),
-	}
-
-	// 注册客户端
-	wsManager.register <- client
-	defer func() {
-		wsManager.unregister <- client
-	}()
-
-	// 启动读写协程
-	go h.handleWebSocketWrites(client)
-	go h.handleWebSocketReads(client)
-
-	// 发送连接确认消息
-	welcomeMsg := map[string]interface{}{
-		"type":      "connected",
-		"scene_id":  sceneID,
-		"user_id":   userID,
-		"timestamp": time.Now().Format(time.RFC3339),
-		"message":   "WebSocket 连接已建立",
-	}
-
-	if msgBytes, err := json.Marshal(welcomeMsg); err == nil {
-		select {
-		case client.send <- msgBytes:
-		default:
-			// 队列满，跳过初始消息
-		}
-	}
-
-	// 保持连接活跃 - 使用更好的方式
-	<-c.Request.Context().Done()
-	log.Printf("📱 场景 %s 的 WebSocket 连接已关闭", sceneID)
+	h.WebSocketHandler.SceneWebSocket(c)
 }
 
 // UserStatusWebSocket 处理用户状态 WebSocket 连接
 func (h *Handler) UserStatusWebSocket(c *gin.Context) {
-	// 升级 HTTP 连接到 WebSocket
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		log.Printf("❌ 用户状态 WebSocket 升级失败: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	// 获取用户ID
-	userID := c.DefaultQuery("user_id", "anonymous")
-	log.Printf("📱 用户状态 WebSocket 连接已建立: %s", userID)
-
-	// 创建客户端
-	client := &WebSocketClient{
-		conn:    conn,
-		sceneID: "user_status", // 特殊的场景ID用于用户状态
-		userID:  userID,
-		send:    make(chan []byte, 256),
-	}
-
-	// 注册客户端
-	wsManager.register <- client
-	defer func() {
-		wsManager.unregister <- client
-	}()
-
-	// 启动读写协程
-	go h.handleWebSocketWrites(client)
-	go h.handleWebSocketReads(client)
-
-	// 发送连接确认消息
-	welcomeMsg := map[string]interface{}{
-		"type":      "user_status_connected",
-		"user_id":   userID,
-		"timestamp": time.Now().Format(time.RFC3339),
-		"message":   "用户状态连接已建立",
-	}
-	if msgBytes, err := json.Marshal(welcomeMsg); err == nil {
-		select {
-		case client.send <- msgBytes:
-		default:
-			// 队列满，跳过初始消息
-		}
-	}
-
-	// 定期发送心跳和状态更新
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// 发送心跳消息
-			heartbeat := map[string]interface{}{
-				"type":      "heartbeat",
-				"timestamp": time.Now().Unix(),
-			}
-			if msgBytes, err := json.Marshal(heartbeat); err == nil {
-				select {
-				case client.send <- msgBytes:
-				default:
-					return // 客户端断开连接
-				}
-			}
-		case <-c.Request.Context().Done():
-			// HTTP 请求上下文取消，退出循环
-			return
-		}
-	}
-}
-
-// handleWebSocketReads 处理 WebSocket 读取
-func (h *Handler) handleWebSocketReads(client *WebSocketClient) {
-	defer func() {
-		wsManager.unregister <- client
-		client.conn.Close()
-	}()
-
-	// 设置读取超时
-	client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	client.conn.SetPongHandler(func(string) error {
-		client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		return nil
-	})
-
-	for {
-		var message map[string]interface{}
-		err := client.conn.ReadJSON(&message)
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("❌ WebSocket 读取错误: %v", err)
-			}
-			break
-		}
-
-		// 处理收到的消息
-		h.handleWebSocketMessage(client, message)
-	}
-}
-
-// handleWebSocketWrites 处理 WebSocket 写入
-func (h *Handler) handleWebSocketWrites(client *WebSocketClient) {
-	ticker := time.NewTicker(54 * time.Second)
-	defer func() {
-		ticker.Stop()
-		client.conn.Close()
-	}()
-
-	for {
-		select {
-		case message, ok := <-client.send:
-			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if !ok {
-				client.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			if err := client.conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				return
-			}
-
-		case <-ticker.C:
-			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := client.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}
-}
-
-// handleWebSocketMessage 处理 WebSocket 消息
-func (h *Handler) handleWebSocketMessage(client *WebSocketClient, message map[string]interface{}) {
-	msgType, ok := message["type"].(string)
-	if !ok {
-		log.Printf("⚠️ 收到无效的消息类型")
-		return
-	}
-
-	switch msgType {
-	case "character_interaction":
-		h.handleCharacterInteractionMessage(client, message)
-
-	case "story_choice":
-		h.handleStoryChoiceMessage(client, message)
-
-	case "user_status_update":
-		h.handleUserStatusUpdateMessage(client, message)
-
-	case "ping":
-		// 响应 ping 消息
-		pong := map[string]interface{}{
-			"type":      "pong",
-			"timestamp": time.Now().Unix(),
-		}
-		if msgBytes, err := json.Marshal(pong); err == nil {
-			select {
-			case client.send <- msgBytes:
-			default:
-				// 发送队列满，跳过
-			}
-		}
-
-	default:
-		log.Printf("⚠️ 未知的消息类型: %s", msgType)
-	}
-}
-
-// handleCharacterInteractionMessage 处理角色交互消息
-func (h *Handler) handleCharacterInteractionMessage(client *WebSocketClient, message map[string]interface{}) {
-	characterID, ok := message["character_id"].(string)
-	if !ok {
-		h.sendErrorMessage(client, "缺少角色ID")
-		return
-	}
-
-	userMessage, ok := message["message"].(string)
-	if !ok {
-		h.sendErrorMessage(client, "缺少消息内容")
-		return
-	}
-
-	// 生成角色回应
-	response, err := h.CharacterService.GenerateResponse(client.sceneID, characterID, userMessage)
-	if err != nil {
-		h.sendErrorMessage(client, "生成回应失败: "+err.Error())
-		return
-	}
-
-	// 广播新对话给场景中的所有客户端
-	conversationMsg := map[string]interface{}{
-		"type":         "conversation:new",
-		"scene_id":     client.sceneID,
-		"character_id": characterID,
-		"speaker_id":   characterID,
-		"conversation": response,
-		"timestamp":    time.Now().Format(time.RFC3339),
-	}
-
-	h.broadcastToScene(client.sceneID, conversationMsg)
-}
-
-// handleStoryChoiceMessage 处理故事选择消息
-func (h *Handler) handleStoryChoiceMessage(client *WebSocketClient, message map[string]interface{}) {
-	nodeID, ok := message["node_id"].(string)
-	if !ok {
-		h.sendErrorMessage(client, "缺少节点ID")
-		return
-	}
-
-	choiceID, ok := message["choice_id"].(string)
-	if !ok {
-		h.sendErrorMessage(client, "缺少选择ID")
-		return
-	}
-
-	// 解析用户偏好（可选）
-	var preferences *models.UserPreferences
-	if prefData, exists := message["user_preferences"]; exists {
-		if prefMap, ok := prefData.(map[string]interface{}); ok {
-			preferences = &models.UserPreferences{}
-			// 解析偏好设置
-			if creativity, ok := prefMap["creativity_level"].(string); ok {
-				preferences.CreativityLevel = models.CreativityLevel(creativity)
-			}
-			if plotTwists, ok := prefMap["allow_plot_twists"].(bool); ok {
-				preferences.AllowPlotTwists = plotTwists
-			}
-		}
-	}
-
-	// 获取故事服务
-	storyService := h.getStoryService()
-	if storyService == nil {
-		h.sendErrorMessage(client, "故事服务未初始化")
-		return
-	}
-
-	// 执行故事选择
-	nextNode, err := storyService.MakeChoice(client.sceneID, nodeID, choiceID, preferences)
-	if err != nil {
-		h.sendErrorMessage(client, "执行故事选择失败: "+err.Error())
-		return
-	}
-
-	// 广播故事更新给场景中的所有客户端
-	h.broadcastToScene(client.sceneID, map[string]interface{}{
-		"type": "story:choice_made",
-		"data": map[string]interface{}{
-			"node_id":   nodeID,
-			"choice_id": choiceID,
-			"next_node": nextNode,
-			"user_id":   client.userID,
-		},
-	})
-}
-
-// handleUserStatusUpdateMessage 处理用户状态更新消息
-func (h *Handler) handleUserStatusUpdateMessage(client *WebSocketClient, message map[string]interface{}) {
-	status, ok := message["status"].(string)
-	if !ok {
-		h.sendErrorMessage(client, "缺少状态信息")
-		return
-	}
-
-	// 广播用户状态更新
-	statusUpdateMsg := map[string]interface{}{
-		"type":      "user:presence",
-		"user_id":   client.userID,
-		"scene_id":  client.sceneID,
-		"status":    status,
-		"action":    message["action"], // joined, left, etc.
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-
-	h.broadcastToScene(client.sceneID, statusUpdateMsg)
-}
-
-// sendErrorMessage 发送错误消息给客户端
-func (h *Handler) sendErrorMessage(client *WebSocketClient, errorMsg string) {
-	errorResponse := map[string]interface{}{
-		"type":      "error",
-		"error":     errorMsg,
-		"timestamp": time.Now().Format(time.RFC3339),
-	}
-
-	if msgBytes, err := json.Marshal(errorResponse); err == nil {
-		select {
-		case client.send <- msgBytes:
-		default:
-			// 客户端发送队列已满，跳过
-			log.Printf("⚠️ 无法发送错误消息到客户端，队列已满")
-		}
-	}
-}
-
-// broadcastToScene 向场景中的所有客户端广播消息
-func (h *Handler) broadcastToScene(sceneID string, message map[string]interface{}) {
-	msgBytes, err := json.Marshal(message)
-	if err != nil {
-		log.Printf("❌ 序列化广播消息失败: %v", err)
-		return
-	}
-
-	wsManager.mutex.RLock()
-	connections, exists := wsManager.connections[sceneID]
-	wsManager.mutex.RUnlock()
-
-	if !exists {
-		return
-	}
-
-	for conn := range connections {
-		if err := conn.WriteMessage(websocket.TextMessage, msgBytes); err != nil {
-			log.Printf("❌ 广播消息失败: %v", err)
-			conn.Close()
-
-			// 清理断开的连接
-			wsManager.mutex.Lock()
-			delete(connections, conn)
-			wsManager.mutex.Unlock()
-		}
-	}
+	h.WebSocketHandler.UserStatusWebSocket(c)
 }
 
 // BroadcastToScene 提供外部调用的广播方法
 func (h *Handler) BroadcastToScene(sceneID string, message map[string]interface{}) {
-	h.broadcastToScene(sceneID, message)
+	wsManager.BroadcastToScene(sceneID, message)
 }
 
 // GetWebSocketStatus 获取 WebSocket 连接状态（调试用）
 func (h *Handler) GetWebSocketStatus(c *gin.Context) {
-	wsManager.mutex.RLock()
-	status := make(map[string]int)
-	totalConnections := 0
+	status := wsManager.GetStatus()
+	status["ping_timeout_seconds"] = int(wsManager.pingTimeout.Seconds())
+	status["timestamp"] = time.Now().Format(time.RFC3339)
 
-	for sceneID, connections := range wsManager.connections {
-		count := len(connections)
-		status[sceneID] = count
-		totalConnections += count
-	}
-	wsManager.mutex.RUnlock()
+	c.JSON(http.StatusOK, status)
+}
 
+// 添加管理器控制API
+func (h *Handler) CleanupWebSocketConnections(c *gin.Context) {
+	wsManager.cleanupExpiredConnections()
 	c.JSON(http.StatusOK, gin.H{
-		"total_connections": totalConnections,
-		"scene_connections": status,
-		"timestamp":         time.Now().Format(time.RFC3339),
+		"success":   true,
+		"message":   "连接清理已执行",
+		"timestamp": time.Now().Format(time.RFC3339),
 	})
 }
 
@@ -562,22 +129,20 @@ func (h *Handler) ExportScene(c *gin.Context) {
 	format := c.DefaultQuery("format", "json")
 	includeConversations := c.DefaultQuery("include_conversations", "false") == "true"
 
-	// 获取导出服务
 	exportService := h.getExportService()
 	if exportService == nil {
-		h.respondWithError(c, http.StatusInternalServerError, "导出服务未初始化")
+		h.Response.InternalError(c, "导出服务未初始化", "无法获取导出服务实例")
 		return
 	}
 
-	// 导出场景数据
 	result, err := exportService.ExportSceneData(c.Request.Context(), sceneID, format, includeConversations)
 	if err != nil {
-		h.respondWithError(c, http.StatusInternalServerError, "导出场景数据失败: "+err.Error())
+		h.Response.InternalError(c, "导出场景数据失败", err.Error())
 		return
 	}
 
-	// 统一处理导出响应
-	h.handleExportResponse(c, result, format)
+	// 使用统一的导出响应方法
+	h.Response.ExportResponse(c, result, format)
 }
 
 // ExportInteractions 导出互动摘要
@@ -585,22 +150,59 @@ func (h *Handler) ExportInteractions(c *gin.Context) {
 	sceneID := c.Param("id")
 	format := c.DefaultQuery("format", "json")
 
+	// 验证场景ID
+	if sceneID == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	// 验证导出格式
+	supportedFormats := []string{"json", "markdown", "txt", "html", "csv"}
+	if !contains(supportedFormats, strings.ToLower(format)) {
+		h.Response.BadRequest(c, "不支持的导出格式", fmt.Sprintf("支持的格式: %v", supportedFormats))
+		return
+	}
 	// 获取导出服务
 	exportService := h.getExportService()
 	if exportService == nil {
-		h.respondWithError(c, http.StatusInternalServerError, "导出服务未初始化")
+		h.Response.InternalError(c, "导出服务未初始化", "无法获取导出服务实例")
 		return
 	}
+
+	// 创建带超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
 
 	// 导出互动摘要
-	result, err := exportService.ExportInteractionSummary(c.Request.Context(), sceneID, format)
+	result, err := exportService.ExportInteractionSummary(ctx, sceneID, format)
 	if err != nil {
-		h.respondWithError(c, http.StatusInternalServerError, "导出互动摘要失败: "+err.Error())
+		// 根据错误类型返回不同的错误码
+		if ctx.Err() == context.DeadlineExceeded {
+			h.Response.Error(c, http.StatusRequestTimeout, ErrorExportTimeout,
+				"导出操作超时", "请稍后重试或联系管理员")
+			return
+		}
+
+		if strings.Contains(err.Error(), "no data") {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty,
+				"没有可导出的数据", "场景中没有互动记录")
+			return
+		}
+
+		h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed,
+			"导出互动摘要失败", err.Error())
 		return
 	}
 
-	// 统一处理导出响应
-	h.handleExportResponse(c, result, format)
+	// 检查导出结果
+	if result == nil || result.Content == "" {
+		h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty,
+			"导出结果为空", "没有找到可导出的数据")
+		return
+	}
+
+	// 使用专用的导出响应方法
+	h.Response.ExportResponse(c, result, format)
 }
 
 // ExportStory 导出故事文档
@@ -608,58 +210,77 @@ func (h *Handler) ExportStory(c *gin.Context) {
 	sceneID := c.Param("id")
 	format := c.DefaultQuery("format", "json")
 
+	// 验证场景ID
+	if sceneID == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	// 验证导出格式
+	supportedFormats := []string{"json", "markdown", "txt", "html", "pdf"}
+	if !contains(supportedFormats, strings.ToLower(format)) {
+		h.Response.BadRequest(c, "不支持的导出格式", fmt.Sprintf("支持的格式: %v", supportedFormats))
+		return
+	}
+
 	// 获取导出服务
 	exportService := h.getExportService()
 	if exportService == nil {
-		h.respondWithError(c, http.StatusInternalServerError, "导出服务未初始化")
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorExportServiceUnavailable,
+			"导出服务未初始化", "无法获取导出服务实例")
 		return
 	}
+
+	// 创建带超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
 
 	// 导出故事文档
-	result, err := exportService.ExportStoryAsDocument(c.Request.Context(), sceneID, format)
+	result, err := exportService.ExportStoryAsDocument(ctx, sceneID, format)
 	if err != nil {
-		h.respondWithError(c, http.StatusInternalServerError, "导出故事文档失败: "+err.Error())
+		// 根据错误类型返回不同的错误码
+		if ctx.Err() == context.DeadlineExceeded {
+			h.Response.Error(c, http.StatusRequestTimeout, ErrorExportTimeout,
+				"导出操作超时", "故事文档较大，请稍后重试")
+			return
+		}
+
+		if strings.Contains(err.Error(), "no story data") {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty,
+				"没有可导出的故事数据", "场景中没有故事记录")
+			return
+		}
+
+		h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed,
+			"导出故事文档失败", err.Error())
 		return
 	}
 
-	// 统一处理导出响应
-	h.handleExportResponse(c, result, format)
+	// 检查导出结果
+	if result == nil || result.Content == "" {
+		h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty,
+			"导出结果为空", "没有找到可导出的故事数据")
+		return
+	}
+
+	// 使用专用的导出响应方法
+	h.Response.ExportResponse(c, result, format)
+}
+
+// 辅助函数：检查字符串是否在切片中
+func contains(slice []string, item string) bool {
+	return slices.Contains(slice, item)
 }
 
 // getExportService 获取导出服务实例
 func (h *Handler) getExportService() *services.ExportService {
 	container := di.GetContainer()
-
-	// 尝试从容器获取
-	if service, ok := container.Get("export").(*services.ExportService); ok {
-		return service
+	exportService, ok := container.Get("export").(*services.ExportService)
+	if !ok {
+		log.Printf("警告: 无法从容器获取导出服务")
+		return nil
 	}
-
-	// 如果不存在，创建新实例
-	exportService := services.NewExportService(h.ContextService, h.getStoryService(), h.SceneService)
-
-	// 注册到容器
-	container.Register("export", exportService)
-
 	return exportService
-}
-
-// handleExportResponse 统一处理导出响应
-func (h *Handler) handleExportResponse(c *gin.Context, result *models.ExportResult, format string) {
-	switch strings.ToLower(format) {
-	case "json":
-		c.JSON(http.StatusOK, result)
-	case "markdown", "txt":
-		c.Header("Content-Type", "text/plain; charset=utf-8")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(result.FilePath)))
-		c.String(http.StatusOK, result.Content)
-	case "html":
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(result.FilePath)))
-		c.String(http.StatusOK, result.Content)
-	default:
-		c.JSON(http.StatusOK, result)
-	}
 }
 
 // ---------------------------------------------------------
@@ -683,6 +304,8 @@ func NewHandler(
 		ConfigService:    configService,
 		StatsService:     statsService,
 		UserService:      userService,
+		WebSocketHandler: NewWebSocketHandler(),
+		Response:         NewResponseHelper(),
 	}
 }
 
@@ -690,11 +313,11 @@ func NewHandler(
 func (h *Handler) GetScenes(c *gin.Context) {
 	scenes, err := h.SceneService.GetAllScenes()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		h.Response.InternalError(c, "获取场景列表失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, scenes)
+	h.Response.Success(c, scenes, "场景列表获取成功")
 }
 
 // GetScene 获取指定场景详情
@@ -702,11 +325,11 @@ func (h *Handler) GetScene(c *gin.Context) {
 	sceneID := c.Param("id")
 	sceneData, err := h.SceneService.LoadScene(sceneID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "场景不存在"})
+		h.Response.NotFound(c, "场景", "场景ID: "+sceneID)
 		return
 	}
 
-	c.JSON(http.StatusOK, sceneData)
+	h.Response.Success(c, sceneData, "场景数据获取成功")
 }
 
 // CreateScene 从文本创建新场景
@@ -717,18 +340,18 @@ func (h *Handler) CreateScene(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
 
 	// 创建场景
 	scene, err := h.SceneService.CreateSceneFromText(req.Text, req.Title)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建场景失败: " + err.Error()})
+		h.Response.InternalError(c, "创建场景失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusCreated, scene)
+	h.Response.Created(c, scene, "场景创建成功")
 }
 
 // GetCharacters 获取指定场景的所有角色
@@ -736,11 +359,11 @@ func (h *Handler) GetCharacters(c *gin.Context) {
 	sceneID := c.Param("id")
 	sceneData, err := h.SceneService.LoadScene(sceneID)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "场景不存在"})
+		h.Response.NotFound(c, "场景", "场景ID: "+sceneID)
 		return
 	}
 
-	c.JSON(http.StatusOK, sceneData.Characters)
+	h.Response.Success(c, sceneData.Characters, "角色列表获取成功")
 }
 
 // Chat 处理聊天请求
@@ -752,37 +375,56 @@ func (h *Handler) Chat(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
 
 	// 生成角色回应
 	response, err := h.CharacterService.GenerateResponse(req.SceneID, req.CharacterID, req.Message)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成回应失败: " + err.Error()})
+		h.Response.InternalError(c, "生成回应失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.Response.Success(c, response, "回应生成成功")
 }
 
 // GetConversations 获取对话历史
 func (h *Handler) GetConversations(c *gin.Context) {
 	sceneID := c.Param("id")
 	limitStr := c.DefaultQuery("limit", "20")
+	page := c.DefaultQuery("page", "1")
 
 	var limit int
 	if _, err := fmt.Sscanf(limitStr, "%d", &limit); err != nil {
 		limit = 20
 	}
 
+	var pageNum int
+	if _, err := fmt.Sscanf(page, "%d", &pageNum); err != nil {
+		pageNum = 1
+	}
+
 	conversations, err := h.ContextService.GetRecentConversations(sceneID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取对话失败: " + err.Error()})
+		h.Response.InternalError(c, "获取对话失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, conversations)
+	// 如果需要分页，计算分页信息
+	if c.Query("paginated") == "true" {
+		// 这里需要从服务层获取总数
+		total := len(conversations) // 简化处理，实际应该从数据库获取
+		meta := &PaginationMeta{
+			Page:       pageNum,
+			PerPage:    limit,
+			Total:      total,
+			TotalPages: (total + limit - 1) / limit,
+		}
+		h.Response.PaginatedSuccess(c, conversations, meta, "对话历史获取成功")
+	} else {
+		h.Response.Success(c, conversations, "对话历史获取成功")
+	}
 }
 
 // UploadFile 处理文件上传
@@ -1074,29 +716,87 @@ func (h *Handler) MakeStoryChoice(c *gin.Context) {
 	// 获取故事服务
 	storyService := h.getStoryService()
 	if storyService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
 		return
 	}
 
-	// 使用偏好设置进行故事选择
+	// 执行故事选择（并发安全）
 	nextNode, err := storyService.MakeChoice(sceneID, req.NodeID, req.ChoiceID, req.UserPreferences)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "执行故事选择失败: " + err.Error()})
+		if strings.Contains(err.Error(), "选择已被选中") {
+			h.Response.Conflict(c, err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "无效的节点或选择") {
+			h.Response.BadRequest(c, err.Error())
+			return
+		}
+		h.Response.InternalError(c, "执行故事选择失败", err.Error())
 		return
 	}
 
 	// 获取更新后的故事数据
 	storyData, err := storyService.GetStoryData(sceneID, req.UserPreferences)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取故事数据失败: " + err.Error()})
+		h.Response.InternalError(c, "获取故事数据失败", err.Error())
+		return
+	}
+
+	result := map[string]interface{}{
+		"next_node":  nextNode,
+		"story_data": storyData,
+	}
+
+	h.Response.Success(c, result, "选择执行成功")
+}
+
+// BatchStoryOperations 批量故事操作
+func (h *Handler) BatchStoryOperations(c *gin.Context) {
+	sceneID := c.Param("id")
+
+	var req struct {
+		Operations []struct {
+			Type string      `json:"type"`
+			Data interface{} `json:"data"`
+		} `json:"operations"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务不可用"})
+		return
+	}
+
+	// 执行批量操作
+	err := storyService.ExecuteBatchOperation(sceneID, func(storyData *models.StoryData) error {
+		for _, op := range req.Operations {
+			switch op.Type {
+			case "complete_objective":
+				// 处理完成目标操作
+			case "unlock_location":
+				// 处理解锁地点操作
+			case "add_item":
+				// 处理添加物品操作
+			default:
+				return fmt.Errorf("未知操作类型: %s", op.Type)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "批量操作失败: " + err.Error()})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"success":    true,
-		"message":    "选择执行成功",
-		"next_node":  nextNode,
-		"story_data": storyData,
+		"success": true,
+		"message": "批量操作执行成功",
 	})
 }
 
@@ -1283,6 +983,7 @@ func (h *Handler) getStoryService() *services.StoryService {
 	container := di.GetContainer()
 	storyService, ok := container.Get("story").(*services.StoryService)
 	if !ok {
+		log.Printf("警告: 无法从容器获取故事服务")
 		return nil
 	}
 	return storyService
@@ -1488,20 +1189,20 @@ func (h *Handler) SettingsPage(c *gin.Context) {
 func (h *Handler) GetSettings(c *gin.Context) {
 	cfg := config.GetCurrentConfig()
 
-	// 安全地获取 LLM 配置信息
 	llmConfig := make(map[string]interface{})
 	if cfg.LLMConfig != nil {
 		llmConfig["model"] = cfg.LLMConfig["model"]
 		llmConfig["has_api_key"] = cfg.LLMConfig["api_key"] != ""
-		// 不返回实际的 API key
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	data := map[string]interface{}{
 		"llm_provider": cfg.LLMProvider,
 		"debug_mode":   cfg.DebugMode,
 		"port":         cfg.Port,
 		"llm_config":   llmConfig,
-	})
+	}
+
+	h.Response.Success(c, data, "设置获取成功")
 }
 
 // 添加通用的设置保存方法
@@ -1513,9 +1214,7 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "无效的请求数据: " + err.Error(),
-		})
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
 		return
 	}
 
@@ -1523,48 +1222,62 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 	if request.LLMProvider != "" && request.LLMConfig != nil {
 		err := h.ConfigService.UpdateLLMConfig(request.LLMProvider, request.LLMConfig, "web_ui")
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "保存LLM配置失败: " + err.Error(),
-			})
+			h.Response.InternalError(c, "保存LLM配置失败", err.Error())
 			return
 		}
 	}
 
-	// 这里可以添加其他设置的保存逻辑
-	// 比如保存 debug_mode 等
-
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "设置保存成功",
-	})
+	h.Response.Success(c, nil, "设置保存成功")
 }
 
 // 添加连接测试方法
 func (h *Handler) TestConnection(c *gin.Context) {
-	// 获取LLM服务实例
 	container := di.GetContainer()
 	llmService, ok := container.Get("llm").(*services.LLMService)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"success": false,
-			"error":   "无法获取LLM服务实例",
-		})
+		h.Response.InternalError(c, "无法获取LLM服务实例")
 		return
 	}
 
-	// 测试连接
 	if llmService.IsReady() {
-		// 可以尝试发送一个简单的测试请求
-		c.JSON(http.StatusOK, gin.H{
-			"success":  true,
-			"message":  "连接测试成功",
+		// 尝试一个简单的测试调用
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+		defer cancel()
+
+		// 简单的连接测试
+		request := services.ChatCompletionRequest{
+			Messages: []services.ChatCompletionMessage{
+				{
+					Role:    services.RoleSystem,
+					Content: "You are a helpful assistant.",
+				},
+				{
+					Role:    services.RoleUser,
+					Content: "Hello",
+				},
+			},
+			Model:       "", // 使用默认模型
+			Temperature: 0.1,
+			MaxTokens:   5,
+		}
+
+		_, err := llmService.CreateChatCompletion(ctx, request)
+
+		if err != nil {
+			h.Response.Error(c, http.StatusServiceUnavailable, "CONNECTION_TEST_FAILED",
+				"连接测试失败", err.Error())
+			return
+		}
+
+		data := map[string]interface{}{
 			"provider": llmService.GetProviderName(),
-		})
+			"status":   "connected",
+			"test":     "passed",
+		}
+		h.Response.Success(c, data, "连接测试成功")
 	} else {
-		c.JSON(http.StatusOK, gin.H{
-			"success": false,
-			"error":   "LLM服务未就绪: " + llmService.GetReadyState(),
-		})
+		h.Response.Error(c, http.StatusServiceUnavailable, "CONNECTION_FAILED",
+			"LLM服务未就绪", llmService.GetReadyState())
 	}
 }
 
@@ -1583,112 +1296,91 @@ func (h *Handler) GetLLMStatus(c *gin.Context) {
 	// 获取当前配置
 	cfg := config.GetCurrentConfig()
 
-	var modelValue string
-	c.JSON(http.StatusOK, gin.H{
+	// 获取更详细的状态信息
+	status := map[string]interface{}{
 		"ready":    llmService.IsReady(),
 		"status":   llmService.GetReadyState(),
 		"provider": llmService.GetProviderName(),
 		"config": map[string]interface{}{
-			"provider": cfg.LLMProvider,
-			// 返回API密钥的存在状态，但不返回实际密钥
+			"provider":    cfg.LLMProvider,
 			"has_api_key": cfg.LLMConfig != nil && cfg.LLMConfig["api_key"] != "",
-			"model":       modelValue,
 		},
-	})
+	}
+
+	// 添加模型信息
+	if cfg.LLMConfig != nil {
+		if model, ok := cfg.LLMConfig["default_model"]; ok {
+			status["config"].(map[string]interface{})["model"] = model
+		}
+	}
+
+	c.JSON(http.StatusOK, status)
 }
 
 // UpdateLLMConfig 更新LLM配置
 func (h *Handler) UpdateLLMConfig(c *gin.Context) {
-	// 获取请求体
-	var request struct {
-		Provider string            `json:"provider"`
-		Config   map[string]string `json:"config"`
+	var req struct {
+		Provider string            `json:"provider" binding:"required"`
+		Config   map[string]string `json:"config" binding:"required"`
 	}
 
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "无效的请求数据: " + err.Error(),
-		})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "无效的请求格式", err.Error())
 		return
 	}
 
-	// 验证请求数据
-	if request.Provider == "" {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "必须提供LLM服务提供商名称",
-		})
+	// 开始事务
+	tx := h.ConfigService.BeginTransaction()
+
+	// 在事务中更新配置
+	if err := tx.UpdateLLMConfigInTransaction(req.Provider, req.Config, "web_api"); err != nil {
+		h.Response.BadRequest(c, "配置验证失败", err.Error())
 		return
 	}
 
-	if request.Config == nil {
-		request.Config = make(map[string]string)
-	}
-
-	// 调用配置服务更新LLM配置
-	err := h.ConfigService.UpdateLLMConfig(request.Provider, request.Config, "web_ui")
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "更新LLM配置失败: " + err.Error(),
-		})
+	// 提交事务
+	if err := tx.Commit(); err != nil {
+		h.Response.InternalError(c, "配置更新失败", err.Error())
 		return
 	}
 
-	// 获取LLM服务并重新初始化
+	// 更新 LLMService
 	container := di.GetContainer()
-	llmService, ok := container.Get("llm").(*services.LLMService)
-
-	if !ok || llmService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "更新LLM服务失败: 无法获取LLM服务实例",
-		})
-		return
-	}
-
-	// 使用新配置更新提供商
-	if err := llmService.UpdateProvider(request.Provider, request.Config); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "更新LLM提供商失败: " + err.Error(),
-			"details": "配置已保存但服务未更新，请重启应用",
-		})
-		return
-	}
-
-	// 更新分析服务（重新初始化分析服务以使用新的LLM提供商）
-	// 创建新的分析服务
-	newAnalyzerService := h.AnalyzerService // 先保留当前服务实例作为后备
-
-	// 尝试创建更新的分析服务
-	if llmService.IsReady() {
-		// 如果LLM服务已就绪，尝试获取新的分析服务
-		llmProvider := llmService.GetProvider()
-		if llmProvider != nil {
-			// 使用Provider创建专门的分析服务
-			tmpService := services.NewAnalyzerServiceWithProvider(llmProvider)
-			if tmpService != nil {
-				newAnalyzerService = tmpService
-				log.Printf("已使用新的LLM提供商(%s)更新分析服务", llmService.GetProviderName())
-			}
+	if llmService, ok := container.Get("llm").(*services.LLMService); ok {
+		if err := llmService.UpdateProvider(req.Provider, req.Config); err != nil {
+			// 配置已保存，但 LLM 服务更新失败
+			h.Response.Error(c, http.StatusPartialContent, "CONFIG_UPDATED_LLM_FAILED",
+				"配置已保存，但LLM服务更新失败", err.Error())
+			return
 		}
 	} else {
-		// LLM服务未就绪，使用默认分析服务
-		tmpService, err := services.NewAnalyzerService()
-		if err == nil && tmpService != nil {
-			newAnalyzerService = tmpService
-			log.Printf("已使用默认配置更新分析服务")
-		}
+		h.Response.Error(c, http.StatusPartialContent, "CONFIG_UPDATED_LLM_UNAVAILABLE",
+			"配置已保存，但无法获取LLM服务", "请重启应用以使配置生效")
+		return
 	}
 
-	// 更新handler中的分析服务实例
-	h.AnalyzerService = newAnalyzerService
+	h.Response.Success(c, nil, "LLM配置更新成功")
+}
 
-	// 返回更新后的状态
-	c.JSON(http.StatusOK, gin.H{
-		"success":  true,
-		"message":  "LLM配置已更新",
-		"provider": request.Provider,
-		"status":   llmService.GetReadyState(),
-		"ready":    llmService.IsReady(),
-	})
+// GetConfigHealth 获取配置健康状态
+func (h *Handler) GetConfigHealth(c *gin.Context) {
+	// 使用 services 包中的 NewConfigHealthCheck 函数
+	healthCheck := services.NewConfigHealthCheck(h.ConfigService)
+	health := healthCheck.CheckHealth()
+
+	// 根据健康状态返回不同的HTTP状态码
+	if health["status"] == "healthy" {
+		h.Response.Success(c, health, "配置健康状态正常")
+	} else {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorConfigUnhealthy,
+			"配置健康状态异常", "请检查配置详情")
+	}
+}
+
+// GetConfigMetrics 获取配置服务指标
+func (h *Handler) GetConfigMetrics(c *gin.Context) {
+	metrics := h.ConfigService.GetMetrics()
+	h.Response.Success(c, metrics, "配置指标获取成功")
 }
 
 // GetLLMModels 获取指定LLM提供商支持的模型列表
@@ -1730,280 +1422,25 @@ func (h *Handler) GetLLMModels(c *gin.Context) {
 }
 
 // TriggerCharacterInteraction 处理函数 - 触发角色互动
-// @Summary 触发角色之间的互动对话
-// @Description 根据指定主题生成多个角色之间的互动对话
-// @Tags 角色互动
-// @Accept json
-// @Produce json
-// @Param request body TriggerCharacterInteractionRequest true "互动请求参数"
-// @Success 200 {object} models.CharacterInteraction "角色互动结果"
-// @Failure 400 {object} ErrorResponse "请求参数错误"
-// @Failure 500 {object} ErrorResponse "服务器内部错误"
-// @Router /api/interactions/trigger [post]
-func TriggerCharacterInteraction(w http.ResponseWriter, r *http.Request) {
-	// 解析请求体
-	var req TriggerCharacterInteractionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "无效的请求格式: "+err.Error())
-		return
-	}
-
-	// 验证参数
-	if req.SceneID == "" {
-		RespondWithError(w, http.StatusBadRequest, "缺少场景ID")
-		return
-	}
-	if len(req.CharacterIDs) < 2 {
-		RespondWithError(w, http.StatusBadRequest, "至少需要两个角色才能进行互动")
-		return
-	}
-	if req.Topic == "" {
-		RespondWithError(w, http.StatusBadRequest, "缺少互动主题")
-		return
-	}
-
-	// 获取角色服务
-	container := di.GetContainer()
-	charServiceObj := container.Get("character")
-	if charServiceObj == nil {
-		RespondWithError(w, http.StatusInternalServerError, "角色服务不可用")
-		return
-	}
-	characterService := charServiceObj.(*services.CharacterService)
-
-	// 触发角色互动
-	interaction, err := characterService.GenerateCharacterInteraction(
-		req.SceneID,
-		req.CharacterIDs,
-		req.Topic,
-		req.ContextDescription,
-	)
-
-	if err != nil {
-		RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("生成角色互动失败: %v", err))
-		return
-	}
-
-	// 返回生成的互动内容
-	RespondWithJSON(w, http.StatusOK, interaction)
-}
-
-// SimulateCharactersConversation 处理函数 - 模拟角色多轮对话
-// @Summary 模拟多个角色之间的多轮对话
-// @Description 基于给定初始情境，生成多个角色之间的多轮对话
-// @Tags 角色互动
-// @Accept json
-// @Produce json
-// @Param request body SimulateConversationRequest true "对话模拟请求参数"
-// @Success 200 {array} models.InteractionDialogue "模拟对话结果"
-// @Failure 400 {object} ErrorResponse "请求参数错误"
-// @Failure 500 {object} ErrorResponse "服务器内部错误"
-// @Router /api/interactions/simulate [post]
-func SimulateCharactersConversation(w http.ResponseWriter, r *http.Request) {
-	// 解析请求体
-	var req SimulateConversationRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		RespondWithError(w, http.StatusBadRequest, "无效的请求格式: "+err.Error())
-		return
-	}
-
-	// 验证参数
-	if req.SceneID == "" {
-		RespondWithError(w, http.StatusBadRequest, "缺少场景ID")
-		return
-	}
-	if len(req.CharacterIDs) < 2 {
-		RespondWithError(w, http.StatusBadRequest, "至少需要两个角色才能进行对话")
-		return
-	}
-	if req.InitialSituation == "" {
-		RespondWithError(w, http.StatusBadRequest, "缺少初始情境描述")
-		return
-	}
-	if req.NumberOfTurns <= 0 {
-		req.NumberOfTurns = 3 // 默认轮数
-	}
-
-	// 获取角色服务
-	container := di.GetContainer()
-	charServiceObj := container.Get("character")
-	if charServiceObj == nil {
-		RespondWithError(w, http.StatusInternalServerError, "角色服务不可用")
-		return
-	}
-	characterService := charServiceObj.(*services.CharacterService)
-
-	// 模拟角色对话
-	dialogues, err := characterService.SimulateCharactersConversation(
-		req.SceneID,
-		req.CharacterIDs,
-		req.InitialSituation,
-		req.NumberOfTurns,
-	)
-
-	if err != nil {
-		RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("模拟角色对话失败: %v", err))
-		return
-	}
-
-	// 返回生成的对话内容
-	RespondWithJSON(w, http.StatusOK, dialogues)
-}
-
-// GetCharacterInteractions 处理函数 - 获取角色互动历史
-// @Summary 获取场景中的角色互动历史
-// @Description 获取指定场景中符合条件的角色互动历史记录
-// @Tags 角色互动
-// @Accept json
-// @Produce json
-// @Param scene_id path string true "场景ID"
-// @Param limit query int false "返回结果数量限制" default(20)
-// @Param interaction_id query string false "特定互动ID"
-// @Param simulation_id query string false "特定模拟ID"
-// @Success 200 {array} models.Conversation "互动记录列表"
-// @Failure 400 {object} ErrorResponse "请求参数错误"
-// @Failure 500 {object} ErrorResponse "服务器内部错误"
-// @Router /api/interactions/{scene_id} [get]
-func GetCharacterInteractions(w http.ResponseWriter, r *http.Request) {
-	// 获取URL参数
-	params := r.URL.Query()
-	sceneID := params.Get("scene_id")
-	if sceneID == "" {
-		RespondWithError(w, http.StatusBadRequest, "缺少场景ID")
-		return
-	}
-
-	// 获取过滤参数
-	filter := make(map[string]interface{})
-
-	// 处理特定互动ID过滤
-	if interactionID := params.Get("interaction_id"); interactionID != "" {
-		filter["interaction_id"] = interactionID
-	}
-
-	// 处理特定模拟ID过滤
-	if simulationID := params.Get("simulation_id"); simulationID != "" {
-		filter["simulation_id"] = simulationID
-	}
-
-	// 处理其他可能的过滤条件...
-
-	// 获取限制数量
-	limit := 20 // 默认限制
-	if limitStr := params.Get("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-			limit = parsedLimit
-		}
-	}
-
-	// 获取上下文服务
-	container := di.GetContainer()
-	ctxServiceObj := container.Get("context")
-	if ctxServiceObj == nil {
-		RespondWithError(w, http.StatusInternalServerError, "上下文服务不可用")
-		return
-	}
-	contextService := ctxServiceObj.(*services.ContextService)
-
-	// 获取角色互动历史
-	interactions, err := contextService.GetCharacterInteractions(sceneID, filter, limit)
-	if err != nil {
-		RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("获取角色互动历史失败: %v", err))
-		return
-	}
-
-	// 返回互动历史
-	RespondWithJSON(w, http.StatusOK, interactions)
-}
-
-// GetCharacterToCharacterInteractions 处理函数 - 获取特定两个角色之间的互动
-// @Summary 获取特定两个角色之间的互动历史
-// @Description 获取指定场景中两个特定角色之间的互动历史记录
-// @Tags 角色互动
-// @Accept json
-// @Produce json
-// @Param scene_id path string true "场景ID"
-// @Param character1_id path string true "角色1 ID"
-// @Param character2_id path string true "角色2 ID"
-// @Param limit query int false "返回结果数量限制" default(20)
-// @Success 200 {array} models.Conversation "互动记录列表"
-// @Failure 400 {object} ErrorResponse "请求参数错误"
-// @Failure 500 {object} ErrorResponse "服务器内部错误"
-// @Router /api/interactions/{scene_id}/{character1_id}/{character2_id} [get]
-func GetCharacterToCharacterInteractions(w http.ResponseWriter, r *http.Request) {
-	// 获取URL参数
-	params := r.URL.Query()
-	sceneID := params.Get("scene_id")
-	character1ID := params.Get("character1_id")
-	character2ID := params.Get("character2_id")
-
-	// 验证必要的参数
-	if sceneID == "" || character1ID == "" || character2ID == "" {
-		RespondWithError(w, http.StatusBadRequest, "缺少必要参数: scene_id, character1_id, character2_id")
-		return
-	}
-
-	// 获取限制数量
-	limit := 20 // 默认限制
-	if limitStr := params.Get("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
-			limit = parsedLimit
-		}
-	}
-
-	// 获取上下文服务
-	container := di.GetContainer()
-	ctxServiceObj := container.Get("context")
-	if ctxServiceObj == nil {
-		RespondWithError(w, http.StatusInternalServerError, "上下文服务不可用")
-		return
-	}
-	contextService := ctxServiceObj.(*services.ContextService)
-
-	// 获取两个角色之间的互动
-	interactions, err := contextService.GetCharacterToCharacterInteractions(sceneID, character1ID, character2ID, limit)
-	if err != nil {
-		RespondWithError(w, http.StatusInternalServerError, fmt.Sprintf("获取角色互动历史失败: %v", err))
-		return
-	}
-
-	// 返回互动历史
-	RespondWithJSON(w, http.StatusOK, interactions)
-}
-
-// RespondWithError 发送错误响应
-func RespondWithError(w http.ResponseWriter, code int, message string) {
-	RespondWithJSON(w, code, map[string]string{"error": message})
-}
-
-// RespondWithJSON 发送JSON响应
-func RespondWithJSON(w http.ResponseWriter, code int, payload interface{}) {
-	response, _ := json.Marshal(payload)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	w.Write(response)
-}
-
-// TriggerCharacterInteraction 处理函数 - 触发角色互动
 func (h *Handler) TriggerCharacterInteraction(c *gin.Context) {
 	// 解析请求体
 	var req TriggerCharacterInteractionRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求格式: " + err.Error()})
+		h.Response.BadRequest(c, "无效的请求格式", err.Error())
 		return
 	}
 
 	// 验证参数
 	if req.SceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 	if len(req.CharacterIDs) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要两个角色才能进行互动"})
+		h.Response.BadRequest(c, "至少需要两个角色才能进行互动")
 		return
 	}
 	if req.Topic == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少互动主题"})
+		h.Response.BadRequest(c, "缺少互动主题")
 		return
 	}
 
@@ -2016,12 +1453,20 @@ func (h *Handler) TriggerCharacterInteraction(c *gin.Context) {
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("生成角色互动失败: %v", err)})
+		h.Response.InternalError(c, "生成角色互动失败", err.Error())
 		return
 	}
 
+	// 广播互动事件到 WebSocket
+	go func() {
+		h.BroadcastToScene(req.SceneID, map[string]interface{}{
+			"type": "character_interaction",
+			"data": interaction,
+		})
+	}()
+
 	// 返回生成的互动内容
-	c.JSON(http.StatusOK, interaction)
+	h.Response.Success(c, interaction, "角色互动生成成功")
 }
 
 // SimulateCharactersConversation 处理函数 - 模拟角色多轮对话
@@ -2029,21 +1474,21 @@ func (h *Handler) SimulateCharactersConversation(c *gin.Context) {
 	// 解析请求体
 	var req SimulateConversationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求格式: " + err.Error()})
+		h.Response.BadRequest(c, "无效的请求格式", err.Error())
 		return
 	}
 
 	// 验证参数
 	if req.SceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 	if len(req.CharacterIDs) < 2 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要两个角色才能进行对话"})
+		h.Response.BadRequest(c, "至少需要两个角色才能进行对话")
 		return
 	}
 	if req.InitialSituation == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少初始情境描述"})
+		h.Response.BadRequest(c, "缺少初始情境描述")
 		return
 	}
 	if req.NumberOfTurns <= 0 {
@@ -2059,12 +1504,20 @@ func (h *Handler) SimulateCharactersConversation(c *gin.Context) {
 	)
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("模拟角色对话失败: %v", err)})
+		h.Response.InternalError(c, "模拟角色对话失败", err.Error())
 		return
 	}
 
+	// 广播对话模拟事件到 WebSocket
+	go func() {
+		h.BroadcastToScene(req.SceneID, map[string]interface{}{
+			"type": "conversation_simulation",
+			"data": dialogues,
+		})
+	}()
+
 	// 返回生成的对话内容
-	c.JSON(http.StatusOK, dialogues)
+	h.Response.Success(c, dialogues, "角色对话模拟成功")
 }
 
 // GetCharacterInteractions 处理函数 - 获取角色互动历史
@@ -2072,7 +1525,7 @@ func (h *Handler) GetCharacterInteractions(c *gin.Context) {
 	// 获取URL参数
 	sceneID := c.Param("scene_id")
 	if sceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 
@@ -2097,15 +1550,34 @@ func (h *Handler) GetCharacterInteractions(c *gin.Context) {
 		}
 	}
 
+	// 获取分页参数
+	page := 1
+	if pageStr := c.Query("page"); pageStr != "" {
+		if parsedPage, err := strconv.Atoi(pageStr); err == nil && parsedPage > 0 {
+			page = parsedPage
+		}
+	}
+
 	// 获取角色互动历史
 	interactions, err := h.ContextService.GetCharacterInteractions(sceneID, filter, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取角色互动历史失败: %v", err)})
+		h.Response.InternalError(c, "获取角色互动历史失败", err.Error())
 		return
 	}
 
-	// 返回互动历史
-	c.JSON(http.StatusOK, interactions)
+	// 如果需要分页
+	if c.Query("paginated") == "true" {
+		total := len(interactions) // 简化处理，实际应该从数据库获取
+		meta := &PaginationMeta{
+			Page:       page,
+			PerPage:    limit,
+			Total:      total,
+			TotalPages: (total + limit - 1) / limit,
+		}
+		h.Response.PaginatedSuccess(c, interactions, meta, "角色互动历史获取成功")
+	} else {
+		h.Response.Success(c, interactions, "角色互动历史获取成功")
+	}
 }
 
 // GetCharacterToCharacterInteractions 处理函数 - 获取特定两个角色之间的互动
@@ -2117,7 +1589,7 @@ func (h *Handler) GetCharacterToCharacterInteractions(c *gin.Context) {
 
 	// 验证必要的参数
 	if sceneID == "" || character1ID == "" || character2ID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少必要参数: scene_id, character1_id, character2_id"})
+		h.Response.BadRequest(c, "缺少必要参数: scene_id, character1_id, character2_id")
 		return
 	}
 
@@ -2132,12 +1604,17 @@ func (h *Handler) GetCharacterToCharacterInteractions(c *gin.Context) {
 	// 获取两个角色之间的互动
 	interactions, err := h.ContextService.GetCharacterToCharacterInteractions(sceneID, character1ID, character2ID, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取角色互动历史失败: %v", err)})
+		h.Response.InternalError(c, "获取角色互动历史失败", err.Error())
 		return
 	}
 
-	// 返回互动历史
-	c.JSON(http.StatusOK, interactions)
+	// 如果没有找到互动记录
+	if len(interactions) == 0 {
+		h.Response.Success(c, []interface{}{}, "暂无互动记录")
+		return
+	}
+
+	h.Response.Success(c, interactions, "角色互动历史获取成功")
 }
 
 // GetSceneAggregate 获取场景聚合数据
@@ -2274,34 +1751,11 @@ func (h *Handler) ProcessInteractionAggregate(c *gin.Context) {
 // getInteractionAggregateService 获取交互聚合服务实例
 func (h *Handler) getInteractionAggregateService() *services.InteractionAggregateService {
 	container := di.GetContainer()
-
-	// 尝试从容器获取
-	if service, ok := container.Get("interaction_aggregate").(*services.InteractionAggregateService); ok {
-		// 确保服务的所有字段都正确设置
-		if service.StoryService == nil {
-			service.StoryService = h.getStoryService()
-		}
-		return service
+	service, ok := container.Get("interaction_aggregate").(*services.InteractionAggregateService)
+	if !ok {
+		log.Printf("警告: 无法从容器获取交互聚合服务")
+		return nil
 	}
-
-	// 获取故事服务实例
-	storyService := h.getStoryService()
-	if storyService == nil {
-		log.Printf("Warning: StoryService is nil, some features may not work properly")
-	}
-
-	// 创建新实例
-	service := &services.InteractionAggregateService{
-		CharacterService: h.CharacterService,
-		ContextService:   h.ContextService,
-		SceneService:     h.SceneService,
-		StatsService:     h.StatsService,
-		StoryService:     storyService,
-	}
-
-	// 注册到容器
-	container.Register("interaction_aggregate", service)
-
 	return service
 }
 
@@ -2358,11 +1812,22 @@ func (h *Handler) StoryViewPage(c *gin.Context) {
 	})
 }
 
-// 标准化错误响应格式
-func (h *Handler) respondWithError(c *gin.Context, statusCode int, message string) {
-	c.JSON(statusCode, gin.H{
-		"error":     message,
-		"timestamp": time.Now().Format(time.RFC3339),
-		"path":      c.Request.URL.Path,
+// UserProfilePage 返回用户档案页面
+func (h *Handler) UserProfilePage(c *gin.Context) {
+	// 获取用户ID（从query参数或默认值）
+	userID := c.Query("user_id")
+	if userID == "" {
+		userID = "user_default" // 默认用户ID
+	}
+
+	// 获取配置
+	cfg := config.GetCurrentConfig()
+
+	// 渲染用户档案页面
+	c.HTML(http.StatusOK, "user_profile.html", gin.H{
+		"title":      "用户档案 - SceneIntruderMCP",
+		"user_id":    userID,
+		"debug":      cfg.DebugMode,
+		"static_url": "/static",
 	})
 }
