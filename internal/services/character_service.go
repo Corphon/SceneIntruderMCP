@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
@@ -14,8 +15,25 @@ import (
 
 // CharacterService 处理角色相关的业务逻辑
 type CharacterService struct {
+	// 依赖服务
 	LLMService     *LLMService
 	ContextService *ContextService
+
+	// 并发控制
+	sceneLocks  sync.Map // sceneID -> *sync.RWMutex
+	cacheMutex  sync.RWMutex
+	sceneCache  map[string]*CachedSceneData
+	cacheExpiry time.Duration
+
+	// 关闭控制
+	stopCleanup chan struct{}
+	cleanupDone chan struct{}
+}
+
+type CachedSceneData struct {
+	SceneData  *SceneData
+	Characters map[string]*models.Character // characterID -> Character
+	Timestamp  time.Time
 }
 
 // EmotionData 提取的情绪数据
@@ -41,43 +59,54 @@ type ChatResponseWithEmotion struct {
 
 // NewCharacterService 创建角色服务
 func NewCharacterService() *CharacterService {
-	// 从DI容器获取服务
 	container := di.GetContainer()
 
-	// 获取LLM服务
+	// ✅ 安全获取 LLM 服务
 	var llmService *LLMService
 	if llmObj := container.Get("llm"); llmObj != nil {
-		llmService = llmObj.(*LLMService)
+		if ls, ok := llmObj.(*LLMService); ok {
+			llmService = ls
+		}
 	}
 
-	// 获取或创建上下文服务
+	// ✅ 如果获取不到，创建空服务
+	if llmService == nil {
+		llmService = NewEmptyLLMService()
+	}
+
+	// ✅ 安全获取上下文服务
 	var contextService *ContextService
 	if ctxObj := container.Get("context"); ctxObj != nil {
-		contextService = ctxObj.(*ContextService)
-	} else {
-		// 获取场景服务
-		var sceneService *SceneService
-		if sceneObj := container.Get("scene"); sceneObj != nil {
-			sceneService = sceneObj.(*SceneService)
-		} else {
-			scenesPath := "data/scenes"
-			sceneService = NewSceneService(scenesPath)
-			container.Register("scene", sceneService)
+		if cs, ok := ctxObj.(*ContextService); ok {
+			contextService = cs
 		}
-
-		// 创建上下文服务
-		contextService = NewContextService(sceneService)
-		container.Register("context", contextService)
 	}
 
-	return &CharacterService{
+	service := &CharacterService{
 		LLMService:     llmService,
 		ContextService: contextService,
+		sceneCache:     make(map[string]*CachedSceneData),
+		cacheExpiry:    5 * time.Minute, // 5分钟缓存过期
+		stopCleanup:    make(chan struct{}),
+		cleanupDone:    make(chan struct{}),
 	}
+
+	// 启动后台清理协程
+	go service.startCleanupRoutine()
+
+	return service
 }
 
 // GenerateResponse 生成角色回应
 func (s *CharacterService) GenerateResponse(sceneID, characterID, userMessage string) (*models.ChatResponse, error) {
+	if s.ContextService == nil {
+		return nil, fmt.Errorf("上下文服务未初始化")
+	}
+
+	if s.ContextService.SceneService == nil {
+		return nil, fmt.Errorf("场景服务未初始化")
+	}
+
 	// 加载场景数据
 	sceneData, err := s.ContextService.SceneService.LoadScene(sceneID)
 	if err != nil {
@@ -362,27 +391,40 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 
 // GetCharacter 根据ID获取指定场景中的角色
 func (s *CharacterService) GetCharacter(sceneID, characterID string) (*models.Character, error) {
-	// 加载场景数据
-	sceneData, err := s.ContextService.SceneService.LoadScene(sceneID)
+	// 使用缓存加载场景数据
+	cachedData, err := s.loadSceneDataSafe(sceneID)
 	if err != nil {
-		return nil, fmt.Errorf("加载场景数据失败: %w", err)
+		return nil, err
 	}
 
-	// 查找角色
-	var character *models.Character
-	for _, c := range sceneData.Characters {
-		if c.ID == characterID {
-			character = c
-			break
-		}
-	}
-
-	// 如果未找到角色，返回错误
-	if character == nil {
+	// 从缓存的角色映射中获取角色
+	character, exists := cachedData.Characters[characterID]
+	if !exists {
 		return nil, fmt.Errorf("角色不存在: %s", characterID)
 	}
 
 	return character, nil
+}
+
+// 批量获取角色（避免重复读取）
+func (s *CharacterService) GetCharacters(sceneID string, characterIDs []string) ([]*models.Character, error) {
+	// 一次性加载场景数据
+	cachedData, err := s.loadSceneDataSafe(sceneID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 批量获取角色
+	characters := make([]*models.Character, 0, len(characterIDs))
+	for _, id := range characterIDs {
+		if character, exists := cachedData.Characters[id]; exists {
+			characters = append(characters, character)
+		} else {
+			return nil, fmt.Errorf("角色不存在: %s", id)
+		}
+	}
+
+	return characters, nil
 }
 
 // buildCharacterPromptWithEmotion 构建包含情绪指导的角色提示词
@@ -711,13 +753,9 @@ func (s *CharacterService) GenerateCharacterInteraction(
 	contextDescription string,
 ) (*models.CharacterInteraction, error) {
 	// 获取所有相关角色
-	characters := make([]*models.Character, 0, len(characterIDs))
-	for _, id := range characterIDs {
-		character, err := s.GetCharacter(sceneID, id)
-		if err != nil {
-			return nil, err
-		}
-		characters = append(characters, character)
+	characters, err := s.GetCharacters(sceneID, characterIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// 构建角色互动提示词
@@ -730,7 +768,7 @@ func (s *CharacterService) GenerateCharacterInteraction(
 
 	// 使用结构化输出
 	var dialogues []models.InteractionDialogue
-	err := s.LLMService.CreateStructuredCompletion(
+	err = s.LLMService.CreateStructuredCompletion(
 		context.Background(),
 		topic,      // 用户消息
 		prompt,     // 系统提示词
@@ -808,13 +846,9 @@ func (s *CharacterService) SimulateCharactersConversation(
 	numberOfTurns int,
 ) ([]models.InteractionDialogue, error) {
 	// 获取所有相关角色
-	characters := make([]*models.Character, 0, len(characterIDs))
-	for _, id := range characterIDs {
-		character, err := s.GetCharacter(sceneID, id)
-		if err != nil {
-			return nil, err
-		}
-		characters = append(characters, character)
+	characters, err := s.GetCharacters(sceneID, characterIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// 限制轮数
@@ -906,7 +940,7 @@ func (s *CharacterService) SimulateCharactersConversation(
 
 	// 使用结构化输出
 	var dialogues []models.InteractionDialogue
-	err := s.LLMService.CreateStructuredCompletion(
+	err = s.LLMService.CreateStructuredCompletion(
 		context.Background(),
 		initialSituation, // 用户消息
 		prompt.String(),  // 系统提示词
@@ -966,4 +1000,140 @@ func (s *CharacterService) SimulateCharactersConversation(
 	}
 
 	return dialogues, nil
+}
+
+// 更新场景角色
+func (s *CharacterService) UpdateCharacterInScene(sceneID, characterID string, character *models.Character) error {
+	// 获取 SceneService
+	container := di.GetContainer()
+	sceneService, ok := container.Get("scene").(*SceneService)
+	if !ok || sceneService == nil {
+		return fmt.Errorf("场景服务未初始化")
+	}
+
+	// 委托给 SceneService
+	err := sceneService.UpdateCharacter(sceneID, characterID, character)
+	if err != nil {
+		return err
+	}
+
+	// 清除 CharacterService 的缓存
+	s.InvalidateSceneCache(sceneID)
+
+	return nil
+}
+
+// 获取场景锁
+func (s *CharacterService) getSceneLock(sceneID string) *sync.RWMutex {
+	value, _ := s.sceneLocks.LoadOrStore(sceneID, &sync.RWMutex{})
+	return value.(*sync.RWMutex)
+}
+
+// 安全加载场景数据（带缓存）
+func (s *CharacterService) loadSceneDataSafe(sceneID string) (*CachedSceneData, error) {
+	lock := s.getSceneLock(sceneID)
+	lock.RLock()
+
+	// 检查缓存
+	s.cacheMutex.RLock()
+	if cached, exists := s.sceneCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			lock.RUnlock()
+			return cached, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 缓存过期或不存在，需要重新加载
+	lock.RUnlock()
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 双重检查
+	s.cacheMutex.RLock()
+	if cached, exists := s.sceneCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 读取场景数据
+	sceneData, err := s.ContextService.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载场景数据失败: %w", err)
+	}
+
+	// 构建角色映射
+	characters := make(map[string]*models.Character)
+	for _, char := range sceneData.Characters {
+		characters[char.ID] = char
+	}
+
+	// 创建缓存数据
+	cached := &CachedSceneData{
+		SceneData:  sceneData,
+		Characters: characters,
+		Timestamp:  time.Now(),
+	}
+
+	// 更新缓存
+	s.cacheMutex.Lock()
+	s.sceneCache[sceneID] = cached
+	s.cacheMutex.Unlock()
+
+	return cached, nil
+}
+
+// 缓存清理方法
+func (s *CharacterService) clearExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	expiredCount := 0
+
+	for sceneID, cached := range s.sceneCache {
+		if now.Sub(cached.Timestamp) > s.cacheExpiry {
+			delete(s.sceneCache, sceneID)
+			expiredCount++
+		}
+	}
+
+	// 🔧 添加清理日志（可选）
+	if expiredCount > 0 {
+		fmt.Printf("🧹 角色服务缓存清理: 清理了 %d 个过期场景缓存\n", expiredCount)
+	}
+}
+
+// 后台清理协程
+func (s *CharacterService) startCleanupRoutine() {
+	ticker := time.NewTicker(2 * time.Minute) // 每2分钟清理一次
+	defer ticker.Stop()
+	defer close(s.cleanupDone)
+
+	for {
+		select {
+		case <-ticker.C:
+			s.clearExpiredCache()
+		case <-s.stopCleanup:
+			return
+		}
+	}
+}
+
+// 手动清除指定场景的缓存（当场景数据更新时调用）
+func (s *CharacterService) InvalidateSceneCache(sceneID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	delete(s.sceneCache, sceneID)
+}
+
+// 优雅关闭方法
+func (s *CharacterService) Shutdown() {
+	close(s.stopCleanup)
+	<-s.cleanupDone
 }
