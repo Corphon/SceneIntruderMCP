@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
@@ -18,6 +19,22 @@ type InteractionAggregateService struct {
 	StatsService     *StatsService
 	StoryService     *StoryService
 	ExportService    *ExportService
+
+	// 并发控制
+	sceneLocks sync.Map // sceneID -> *sync.RWMutex
+
+	// 数据缓存
+	dataCache   map[string]*CachedInteractionData
+	cacheMutex  sync.RWMutex
+	cacheExpiry time.Duration
+}
+
+// CachedInteractionData 缓存的交互数据
+type CachedInteractionData struct {
+	SceneData  *SceneData
+	StoryData  *models.StoryData
+	Characters map[string]*models.Character
+	Timestamp  time.Time
 }
 
 // InteractionRequest 交互请求
@@ -204,7 +221,95 @@ type TaskCompletionInfo struct {
 	CompletionHints int
 }
 
-// ------------------------------------
+// -----------------------------------------------------
+// NewInteractionAggregateService 创建新的交互聚合服务实例
+func NewInteractionAggregateService(
+	characterService *CharacterService,
+	contextService *ContextService,
+	sceneService *SceneService,
+	statsService *StatsService,
+	storyService *StoryService,
+	exportService *ExportService) *InteractionAggregateService {
+
+	return &InteractionAggregateService{
+		CharacterService: characterService,
+		ContextService:   contextService,
+		SceneService:     sceneService,
+		StatsService:     statsService,
+		StoryService:     storyService,
+		ExportService:    exportService,
+		dataCache:        make(map[string]*CachedInteractionData),
+		cacheExpiry:      3 * time.Minute, // 3分钟缓存
+	}
+}
+
+// 🔧 获取场景锁
+func (s *InteractionAggregateService) getSceneLock(sceneID string) *sync.RWMutex {
+	value, _ := s.sceneLocks.LoadOrStore(sceneID, &sync.RWMutex{})
+	return value.(*sync.RWMutex)
+}
+
+// 🔧 安全加载交互数据（带缓存）
+func (s *InteractionAggregateService) loadInteractionDataSafe(sceneID string) (*CachedInteractionData, error) {
+	// 检查缓存
+	s.cacheMutex.RLock()
+	if cached, exists := s.dataCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 获取场景锁
+	lock := s.getSceneLock(sceneID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 双重检查
+	s.cacheMutex.RLock()
+	if cached, exists := s.dataCache[sceneID]; exists {
+		if time.Since(cached.Timestamp) < s.cacheExpiry {
+			s.cacheMutex.RUnlock()
+			return cached, nil
+		}
+	}
+	s.cacheMutex.RUnlock()
+
+	// 批量加载所有需要的数据
+	cached := &CachedInteractionData{
+		Characters: make(map[string]*models.Character),
+		Timestamp:  time.Now(),
+	}
+
+	// 加载场景数据
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载场景数据失败: %w", err)
+	}
+	cached.SceneData = sceneData
+
+	// 构建角色映射
+	for _, char := range sceneData.Characters {
+		cached.Characters[char.ID] = char
+	}
+
+	// 加载故事数据
+	if s.StoryService != nil {
+		storyData, err := s.StoryService.GetStoryData(sceneID, nil)
+		if err == nil {
+			cached.StoryData = storyData
+		}
+	}
+
+	// 更新缓存
+	s.cacheMutex.Lock()
+	s.dataCache[sceneID] = cached
+	s.cacheMutex.Unlock()
+
+	return cached, nil
+}
+
 // ProcessInteraction 处理完整的交互流程
 func (s *InteractionAggregateService) ProcessInteraction(
 	ctx context.Context,
@@ -222,6 +327,12 @@ func (s *InteractionAggregateService) ProcessInteraction(
 		}
 	}
 
+	// 一次性加载所有需要的数据
+	cachedData, err := s.loadInteractionDataSafe(request.SceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载交互数据失败: %w", err)
+	}
+
 	result := &InteractionResult{
 		Messages:        []CharacterMessage{},
 		CharacterStates: make(map[string]CharacterState),
@@ -230,38 +341,29 @@ func (s *InteractionAggregateService) ProcessInteraction(
 		Events:          []GameEvent{},
 	}
 
-	// 1. 验证场景和角色
-	sceneData, err := s.SceneService.LoadScene(request.SceneID)
-	if err != nil {
-		return nil, fmt.Errorf("加载场景失败: %w", err)
-	}
-
-	// 验证角色ID
-	validCharacters := make(map[string]*models.Character)
-	for _, char := range sceneData.Characters {
-		validCharacters[char.ID] = char
-	}
-
+	// 1. 验证角色ID（使用缓存的角色数据）
 	for _, charID := range request.CharacterIDs {
-		if _, exists := validCharacters[charID]; !exists {
+		if _, exists := cachedData.Characters[charID]; !exists {
 			return nil, fmt.Errorf("角色ID %s 无效", charID)
 		}
 	}
+
+	// 获取场景锁进行并发保护
+	sceneLock := s.getSceneLock(request.SceneID)
+	sceneLock.RLock()
+	defer sceneLock.RUnlock()
 
 	// 2. 生成角色响应
 	totalTokens := 0
 	successfulResponses := 0
 	for _, characterID := range request.CharacterIDs {
-		character := validCharacters[characterID]
+		character := cachedData.Characters[characterID]
 
 		// 生成带情绪的响应
 		response, err := s.CharacterService.GenerateResponseWithEmotion(
-			request.SceneID,
-			characterID,
-			request.Message)
+			request.SceneID, characterID, request.Message)
 
 		if err != nil {
-			// 记录错误但继续处理其他角色
 			result.Notifications = append(result.Notifications, Notification{
 				ID:       fmt.Sprintf("error_%s_%d", characterID, time.Now().UnixNano()),
 				Type:     "warning",
@@ -272,176 +374,27 @@ func (s *InteractionAggregateService) ProcessInteraction(
 			continue
 		}
 
-		// 转换为标准格式
-		message := CharacterMessage{
-			CharacterID:   characterID,
-			CharacterName: character.Name,
-			Content:       response.Response,
-			EmotionData: &EmotionData{
-				Emotion:           response.Emotion,
-				Intensity:         response.Intensity,
-				BodyLanguage:      response.BodyLanguage,
-				FacialExpression:  response.FacialExpression,
-				VoiceTone:         response.VoiceTone,
-				SecondaryEmotions: response.SecondaryEmotions,
-			},
-			Timestamp:   time.Now(),
-			MessageType: "response",
-			Metadata: map[string]interface{}{
-				"body_language":      response.BodyLanguage,
-				"facial_expression":  response.FacialExpression,
-				"voice_tone":         response.VoiceTone,
-				"secondary_emotions": response.SecondaryEmotions,
-				"tokens_used":        response.TokensUsed,
-			},
-		}
-
+		// 转换为标准格式并更新角色状态
+		message := s.buildCharacterMessage(characterID, character, response)
 		result.Messages = append(result.Messages, message)
+
+		characterState := s.buildCharacterState(characterID, response, request.CharacterIDs, request.Message)
+		result.CharacterStates[characterID] = characterState
+
 		totalTokens += response.TokensUsed
 		successfulResponses++
-
-		// 更新角色状态
-		characterState := CharacterState{
-			CharacterID:     characterID,
-			Mood:            inferMoodFromEmotion(response.Emotion, response.Intensity),
-			Energy:          calculateEnergyLevel(response),
-			Relationship:    make(map[string]float64),
-			CurrentActivity: extractActivityFromBodyLanguage(response.BodyLanguage),
-			StatusEffects:   extractStatusEffects(response.SecondaryEmotions),
-		}
-
-		// 计算与其他角色的关系变化
-		for _, otherID := range request.CharacterIDs {
-			if otherID != characterID {
-				relationshipChange := calculateRelationshipChangeFromResponse(response, request.Message)
-				characterState.Relationship[otherID] = relationshipChange
-			}
-		}
-
-		result.CharacterStates[characterID] = characterState
 	}
-	// 检查是否有成功的响应
+
 	if successfulResponses == 0 {
 		return nil, fmt.Errorf("所有角色响应生成都失败了")
 	}
 
-	// 3. 更新故事进度（如果启用）
+	// 3. 更新故事进度（使用缓存的故事数据）
 	if request.Options.UpdateStoryProgress {
-		storyUpdate, err := s.updateStoryProgress(request, result.Messages)
+		storyUpdate, err := s.updateStoryProgressSafe(request, result.Messages, cachedData.StoryData)
 		if err == nil && storyUpdate != nil {
 			result.StoryUpdates = storyUpdate
-
-			// 检查是否有任务完成 - 增强通知信息
-			if len(storyUpdate.CompletedTasks) > 0 {
-				// 为每个完成的任务添加通知
-				for i, completedTask := range storyUpdate.CompletedTasks {
-					// 获取对应的任务变化信息
-					var matchedKeywords []string
-					if i < len(storyUpdate.TaskChanges) {
-						// 从Reason字段中提取关键词信息
-						reason := storyUpdate.TaskChanges[i].Reason
-						if strings.Contains(reason, "关键词:") {
-							parts := strings.Split(reason, "关键词:")
-							if len(parts) > 1 {
-								matchedKeywords = strings.Split(strings.TrimSpace(parts[1]), ", ")
-							}
-						}
-					}
-					// 构建更详细的通知消息
-					var message string
-					if len(matchedKeywords) > 0 {
-						message = fmt.Sprintf("恭喜！您已完成任务：%s\n匹配到的关键要素：%s",
-							completedTask.Title, strings.Join(matchedKeywords, ", "))
-					} else {
-						message = fmt.Sprintf("恭喜！您已完成任务：%s", completedTask.Title)
-					}
-
-					// 任务完成事件
-					if request.Options.TriggerEvents && len(storyUpdate.CompletedTasks) > 0 {
-						s.addTaskCompletionEvents(result, storyUpdate.CompletedTasks)
-					}
-
-					result.Notifications = append(result.Notifications, Notification{
-						ID:       fmt.Sprintf("task_completed_%s_%d", completedTask.ID, time.Now().UnixNano()),
-						Type:     "success",
-						Title:    "任务完成",
-						Message:  message,
-						Duration: 5000,
-						Actions: []NotificationAction{
-							{
-								Label:  "查看详情",
-								Action: "view_task_details",
-								Style:  "primary",
-								Params: map[string]interface{}{
-									"task_id":          completedTask.ID,
-									"matched_keywords": matchedKeywords,
-								},
-							},
-							{
-								Label:  "查看奖励",
-								Action: "view_task_reward",
-								Style:  "secondary",
-								Params: map[string]interface{}{
-									"task_id": completedTask.ID,
-									"reward":  completedTask.Reward,
-								},
-							},
-						},
-						Metadata: map[string]interface{}{
-							"task_id":          completedTask.ID,
-							"task_title":       completedTask.Title,
-							"task_description": completedTask.Description,
-							"completion_time":  time.Now(),
-							"trigger_type":     "interaction_analysis",
-							"matched_keywords": matchedKeywords,
-							"completion_hints": len(matchedKeywords),
-						},
-					})
-				}
-
-				// 检查是否解锁了成就
-				s.checkTaskCompletionAchievements(result, storyUpdate.CompletedTasks)
-			}
-			// 如果有任务状态变化，添加UI更新指令
-			if len(storyUpdate.TaskChanges) > 0 {
-				// 更新任务UI
-				result.UIUpdates.UpdateTabs = append(result.UIUpdates.UpdateTabs, TabUpdate{
-					TabID:      "tasks",
-					BadgeCount: len(storyUpdate.CompletedTasks),
-					Title:      "任务",
-				})
-
-				// 添加任务完成动画
-				for _, completedTask := range storyUpdate.CompletedTasks {
-					result.UIUpdates.TriggerAnimations = append(result.UIUpdates.TriggerAnimations, UIAnimation{
-						Target:   fmt.Sprintf("#task-%s", completedTask.ID),
-						Type:     "task_complete",
-						Duration: 2000,
-						Params: map[string]interface{}{
-							"effect": "checkmark_bounce",
-							"color":  "#4CAF50",
-						},
-					})
-				}
-			}
-
-			// 如果有新内容解锁，添加通知
-			if len(storyUpdate.UnlockedContent) > 0 {
-				result.Notifications = append(result.Notifications, Notification{
-					ID:       fmt.Sprintf("unlock_%d", time.Now().UnixNano()),
-					Type:     "success",
-					Title:    "新内容解锁",
-					Message:  fmt.Sprintf("解锁了 %d 项新内容", len(storyUpdate.UnlockedContent)),
-					Duration: 3000,
-					Actions: []NotificationAction{{
-						Label:  "查看",
-						Action: "show_unlocked_content",
-						Style:  "primary",
-					}},
-				})
-			}
-			// 检查故事进度里程碑
-			s.checkStoryProgressMilestones(result, storyUpdate.ProgressChange)
+			s.processStoryUpdates(result, storyUpdate)
 		}
 	}
 
@@ -492,7 +445,318 @@ func (s *InteractionAggregateService) ProcessInteraction(
 	return result, nil
 }
 
-// 辅助函数实现
+// buildCharacterMessage 构建角色消息
+func (s *InteractionAggregateService) buildCharacterMessage(
+	characterID string,
+	character *models.Character,
+	response *models.EmotionalResponse) CharacterMessage {
+
+	// 转换情绪数据格式
+	var emotionData *EmotionData
+	if response != nil {
+		emotionData = &EmotionData{
+			Emotion:           response.Emotion,
+			Intensity:         response.Intensity,
+			BodyLanguage:      response.BodyLanguage,
+			FacialExpression:  response.FacialExpression,
+			VoiceTone:         response.VoiceTone,
+			SecondaryEmotions: response.SecondaryEmotions,
+		}
+	}
+
+	return CharacterMessage{
+		CharacterID:   characterID,
+		CharacterName: character.Name,
+		Content:       response.Response,
+		EmotionData:   emotionData,
+		Timestamp:     time.Now(),
+		MessageType:   "response", // 默认为响应类型
+		Metadata: map[string]interface{}{
+			"tokens_used":           response.TokensUsed,
+			"character_role":        character.Role,
+			"character_personality": character.Personality,
+		},
+	}
+}
+
+// buildCharacterState 构建角色状态
+func (s *InteractionAggregateService) buildCharacterState(
+	characterID string,
+	response *models.EmotionalResponse,
+	allCharacterIDs []string,
+	originalMessage string) CharacterState {
+
+	// 计算能量级别
+	energy := calculateEnergyLevel(response)
+
+	// 推断心情
+	mood := inferMoodFromEmotion(response.Emotion, response.Intensity)
+
+	// 提取当前活动
+	activity := extractActivityFromBodyLanguage(response.BodyLanguage)
+
+	// 提取状态效果
+	statusEffects := extractStatusEffects(response.SecondaryEmotions)
+
+	// 计算与其他角色的关系变化
+	relationships := make(map[string]float64)
+	for _, otherCharID := range allCharacterIDs {
+		if otherCharID != characterID {
+			relationshipChange := calculateRelationshipChangeFromResponse(response, originalMessage)
+			relationships[otherCharID] = relationshipChange
+		}
+	}
+
+	return CharacterState{
+		CharacterID:     characterID,
+		Mood:            mood,
+		Energy:          energy,
+		Relationship:    relationships,
+		CurrentActivity: activity,
+		StatusEffects:   statusEffects,
+		LastUpdated:     time.Now(),
+		Metadata: map[string]interface{}{
+			"emotion_intensity":   response.Intensity,
+			"primary_emotion":     response.Emotion,
+			"facial_expression":   response.FacialExpression,
+			"voice_tone":          response.VoiceTone,
+			"body_language":       response.BodyLanguage,
+			"secondary_emotions":  response.SecondaryEmotions,
+			"interaction_context": originalMessage,
+		},
+	}
+}
+
+// processStoryUpdates 处理故事更新（如果缺失）
+func (s *InteractionAggregateService) processStoryUpdates(
+	result *InteractionResult,
+	storyUpdate *StoryUpdate) {
+
+	// 检查任务完成成就
+	if len(storyUpdate.CompletedTasks) > 0 {
+		s.checkTaskCompletionAchievements(result, storyUpdate.CompletedTasks)
+		s.addTaskCompletionEvents(result, storyUpdate.CompletedTasks)
+	}
+
+	// 检查故事进度里程碑
+	if storyUpdate.ProgressChange > 0 {
+		s.checkStoryProgressMilestones(result, storyUpdate.ProgressChange)
+	}
+
+	// 添加故事更新通知
+	if len(storyUpdate.NewNodes) > 0 {
+		result.Notifications = append(result.Notifications, Notification{
+			ID:       fmt.Sprintf("story_update_%d", time.Now().UnixNano()),
+			Type:     "info",
+			Title:    "故事更新",
+			Message:  fmt.Sprintf("新增了 %d 个故事节点", len(storyUpdate.NewNodes)),
+			Duration: 4000,
+			Actions: []NotificationAction{{
+				Label:  "查看故事",
+				Action: "view_story",
+				Style:  "primary",
+			}},
+		})
+	}
+
+	// 添加解锁内容通知
+	if len(storyUpdate.UnlockedContent) > 0 {
+		for _, content := range storyUpdate.UnlockedContent {
+			result.Notifications = append(result.Notifications, Notification{
+				ID:       fmt.Sprintf("unlock_%d", time.Now().UnixNano()),
+				Type:     "success",
+				Title:    "新内容解锁",
+				Message:  content,
+				Duration: 5000,
+			})
+		}
+	}
+}
+
+// processStoryNodes 处理故事节点更新（如果缺失）
+func (s *InteractionAggregateService) processStoryNodes(
+	storyUpdate *StoryUpdate,
+	storyImpact *StoryImpact,
+	request *InteractionRequest,
+	messages []CharacterMessage,
+	latestStory *models.StoryData) {
+
+	// 基于交互内容创建新的故事节点（如果有重要事件）
+	if storyImpact.ShouldCreateNode {
+		newNode, err := s.createStoryNodeFromInteraction(request, messages, latestStory)
+		if err == nil && newNode != nil {
+			storyUpdate.NewNodes = append(storyUpdate.NewNodes, newNode)
+			// 将新节点添加到当前故事数据中
+			latestStory.Nodes = append(latestStory.Nodes, *newNode)
+		}
+	}
+
+	// 更新现有故事节点（如果交互影响了当前节点）
+	if storyImpact.ShouldUpdateCurrentNode {
+		updatedNode := s.updateCurrentStoryNode(latestStory, storyImpact)
+		if updatedNode != nil {
+			storyUpdate.UpdatedNodes = append(storyUpdate.UpdatedNodes, updatedNode)
+		}
+	}
+}
+
+// processTaskUpdates 处理任务更新（如果缺失）
+func (s *InteractionAggregateService) processTaskUpdates(
+	storyUpdate *StoryUpdate,
+	request *InteractionRequest,
+	messages []CharacterMessage,
+	latestStory *models.StoryData) {
+
+	// 检查任务完成情况
+	taskUpdates := s.checkTaskCompletionFromInteractionEnhanced(request, messages, latestStory)
+	if len(taskUpdates) > 0 {
+		// 更新任务状态到故事数据并记录变化
+		for _, taskInfo := range taskUpdates {
+			taskUpdate := taskInfo.Task
+			matchedKeywords := taskInfo.MatchedKeywords
+
+			for i := range latestStory.Tasks {
+				if latestStory.Tasks[i].ID == taskUpdate.ID {
+					oldStatus := latestStory.Tasks[i].Completed
+					latestStory.Tasks[i] = *taskUpdate
+
+					// 记录任务变化，包含匹配的关键词
+					taskChange := TaskChange{
+						TaskID:    taskUpdate.ID,
+						Type:      "completed",
+						OldStatus: oldStatus,
+						NewStatus: taskUpdate.Completed,
+						ChangedAt: time.Now(),
+						Reason:    fmt.Sprintf("自动检测到任务完成关键词: %s", strings.Join(matchedKeywords, ", ")),
+					}
+					storyUpdate.TaskChanges = append(storyUpdate.TaskChanges, taskChange)
+
+					// 如果任务刚刚完成，添加到已完成任务列表
+					if !oldStatus && taskUpdate.Completed {
+						storyUpdate.CompletedTasks = append(storyUpdate.CompletedTasks, taskUpdate)
+					}
+
+					// 添加到更新任务列表
+					storyUpdate.UpdatedTasks = append(storyUpdate.UpdatedTasks, taskUpdate)
+					break
+				}
+			}
+		}
+	}
+}
+
+// processUnlockedContent 处理解锁内容（如果缺失）
+func (s *InteractionAggregateService) processUnlockedContent(
+	storyUpdate *StoryUpdate,
+	storyImpact *StoryImpact,
+	latestStory *models.StoryData) {
+
+	// 检查解锁内容
+	unlockedContent := s.checkUnlockedContent(storyImpact, latestStory)
+	storyUpdate.UnlockedContent = unlockedContent
+}
+
+// 线程安全的故事更新
+func (s *InteractionAggregateService) updateStoryProgressSafe(
+	request *InteractionRequest,
+	messages []CharacterMessage,
+	currentStory *models.StoryData) (*StoryUpdate, error) {
+
+	if currentStory == nil {
+		return nil, fmt.Errorf("故事数据未初始化")
+	}
+
+	// 获取场景锁的写锁
+	sceneLock := s.getSceneLock(request.SceneID)
+	sceneLock.Lock()
+	defer sceneLock.Unlock()
+
+	// 重新获取最新的故事数据（防止并发修改）
+	storyService := s.getStoryService()
+	if storyService == nil {
+		return nil, fmt.Errorf("故事服务未初始化")
+	}
+
+	latestStory, err := storyService.GetStoryData(request.SceneID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("获取最新故事数据失败: %w", err)
+	}
+
+	// 分析交互影响
+	storyImpact := s.analyzeInteractionStoryImpact(request, messages, latestStory)
+
+	// 构建更新结果
+	storyUpdate := &StoryUpdate{
+		NewNodes:        []*models.StoryNode{},
+		UpdatedNodes:    []*models.StoryNode{},
+		ProgressChange:  storyImpact.ProgressChange,
+		UnlockedContent: []string{},
+		UpdatedTasks:    []*models.Task{},
+		CompletedTasks:  []*models.Task{},
+		TaskChanges:     []TaskChange{},
+	}
+
+	// 批量处理所有更新操作
+	s.processStoryNodes(storyUpdate, storyImpact, request, messages, latestStory)
+	s.processTaskUpdates(storyUpdate, request, messages, latestStory)
+	s.processUnlockedContent(storyUpdate, storyImpact, latestStory)
+
+	// 更新进度
+	newProgress := latestStory.Progress + int(storyImpact.ProgressChange)
+	if newProgress > 100 {
+		newProgress = 100
+	}
+	latestStory.Progress = newProgress
+
+	// 原子性保存所有更改
+	if err := s.saveUpdatedStoryData(request.SceneID, latestStory); err != nil {
+		return nil, fmt.Errorf("保存故事数据失败: %w", err)
+	}
+
+	// 清除缓存
+	s.InvalidateCache(request.SceneID)
+
+	return storyUpdate, nil
+}
+
+// 清除指定场景的缓存
+func (s *InteractionAggregateService) InvalidateCache(sceneID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	delete(s.dataCache, sceneID)
+}
+
+// 清理过期缓存
+func (s *InteractionAggregateService) cleanupExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	for sceneID, cached := range s.dataCache {
+		if now.Sub(cached.Timestamp) > s.cacheExpiry {
+			delete(s.dataCache, sceneID)
+		}
+	}
+}
+
+// 🔧 启动缓存清理
+func (s *InteractionAggregateService) Start() {
+	s.StartCacheCleanup()
+}
+
+// 启动后台清理
+func (s *InteractionAggregateService) StartCacheCleanup() {
+	go func() {
+		ticker := time.NewTicker(2 * time.Minute)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			s.cleanupExpiredCache()
+		}
+	}()
+}
+
 // checkTaskCompletionAchievements 检查任务完成成就
 func (s *InteractionAggregateService) checkTaskCompletionAchievements(
 	result *InteractionResult,
@@ -805,112 +1069,6 @@ func calculateRelationshipChangeFromResponse(response *models.EmotionalResponse,
 	}
 
 	return baseChange
-}
-
-// updateStoryProgress 更新故事进度
-func (s *InteractionAggregateService) updateStoryProgress(
-	request *InteractionRequest,
-	messages []CharacterMessage) (*StoryUpdate, error) {
-
-	// 1. 获取故事服务实例
-	storyService := s.getStoryService()
-	if storyService == nil {
-		return nil, fmt.Errorf("故事服务未初始化")
-	}
-
-	// 2. 获取当前故事数据
-	currentStory, err := storyService.GetStoryData(request.SceneID, nil)
-	if err != nil {
-		return nil, fmt.Errorf("获取故事数据失败: %w", err)
-	}
-
-	// 3. 分析角色交互内容，确定故事影响
-	storyImpact := s.analyzeInteractionStoryImpact(request, messages, currentStory)
-
-	// 4. 构建故事更新结果
-	storyUpdate := &StoryUpdate{
-		NewNodes:        []*models.StoryNode{},
-		UpdatedNodes:    []*models.StoryNode{},
-		ProgressChange:  storyImpact.ProgressChange,
-		UnlockedContent: []string{},
-		UpdatedTasks:    []*models.Task{}, // 初始化任务更新
-		CompletedTasks:  []*models.Task{}, // 初始化已完成任务
-		TaskChanges:     []TaskChange{},   // 初始化任务变化
-	}
-
-	// 5. 基于交互内容创建新的故事节点（如果有重要事件）
-	if storyImpact.ShouldCreateNode {
-		newNode, err := s.createStoryNodeFromInteraction(request, messages, currentStory)
-		if err == nil && newNode != nil {
-			storyUpdate.NewNodes = append(storyUpdate.NewNodes, newNode)
-
-			// 将新节点添加到当前故事数据中
-			currentStory.Nodes = append(currentStory.Nodes, *newNode)
-		}
-	}
-
-	// 6. 更新现有故事节点（如果交互影响了当前节点）
-	if storyImpact.ShouldUpdateCurrentNode {
-		updatedNode := s.updateCurrentStoryNode(currentStory, storyImpact)
-		if updatedNode != nil {
-			storyUpdate.UpdatedNodes = append(storyUpdate.UpdatedNodes, updatedNode)
-		}
-	}
-
-	// 7. 检查任务完成情况
-	taskUpdates := s.checkTaskCompletionFromInteractionEnhanced(request, messages, currentStory)
-	if len(taskUpdates) > 0 {
-		// 更新任务状态到故事数据并记录变化
-		for _, taskInfo := range taskUpdates {
-			taskUpdate := taskInfo.Task
-			matchedKeywords := taskInfo.MatchedKeywords
-
-			for i := range currentStory.Tasks {
-				if currentStory.Tasks[i].ID == taskUpdate.ID {
-					oldStatus := currentStory.Tasks[i].Completed
-					currentStory.Tasks[i] = *taskUpdate
-
-					// 记录任务变化，包含匹配的关键词
-					taskChange := TaskChange{
-						TaskID:    taskUpdate.ID,
-						Type:      "completed",
-						OldStatus: oldStatus,
-						NewStatus: taskUpdate.Completed,
-						ChangedAt: time.Now(),
-						Reason:    fmt.Sprintf("自动检测到任务完成关键词: %s", strings.Join(matchedKeywords, ", ")),
-					}
-					storyUpdate.TaskChanges = append(storyUpdate.TaskChanges, taskChange)
-
-					// 如果任务刚刚完成，添加到已完成任务列表
-					if !oldStatus && taskUpdate.Completed {
-						storyUpdate.CompletedTasks = append(storyUpdate.CompletedTasks, taskUpdate)
-					}
-
-					// 添加到更新任务列表
-					storyUpdate.UpdatedTasks = append(storyUpdate.UpdatedTasks, taskUpdate)
-					break
-				}
-			}
-		}
-	}
-
-	// 8. 检查解锁内容
-	unlockedContent := s.checkUnlockedContent(storyImpact, currentStory)
-	storyUpdate.UnlockedContent = unlockedContent
-
-	// 9. 更新故事进度百分比
-	newProgress := currentStory.Progress + int(storyImpact.ProgressChange)
-	if newProgress > 100 {
-		newProgress = 100
-	}
-	currentStory.Progress = newProgress
-
-	// 10. 保存更新后的故事数据
-	if err := s.saveUpdatedStoryData(request.SceneID, currentStory); err != nil {
-		return nil, fmt.Errorf("保存故事数据失败: %w", err)
-	}
-
-	return storyUpdate, nil
 }
 
 // checkTaskCompletionFromInteractionEnhanced 检查交互是否完成了任务（增强版本）
@@ -1338,240 +1496,30 @@ func (s *InteractionAggregateService) enhanceContentWithStoryContext(
 	currentStory *models.StoryData,
 	messages []CharacterMessage) string {
 
-	var enhancedContent strings.Builder
-	enhancedContent.WriteString(baseContent)
+	var enhanced strings.Builder
+	enhanced.WriteString(baseContent)
 
-	// 添加故事背景信息
-	enhancedContent.WriteString("\n\n---\n\n")
-	enhancedContent.WriteString("## 故事背景\n\n")
-	enhancedContent.WriteString(fmt.Sprintf("**当前状态**: %s\n", currentStory.CurrentState))
-	enhancedContent.WriteString(fmt.Sprintf("**故事进度**: %d%%\n", currentStory.Progress))
+	// 添加故事背景
+	enhanced.WriteString(fmt.Sprintf("\n\n**故事进度**: %d%%\n", currentStory.Progress))
+	enhanced.WriteString(fmt.Sprintf("**当前状态**: %s\n", currentStory.CurrentState))
 
-	// ✅ 利用 messages 参数分析角色情绪和状态
+	// 添加角色情绪摘要
 	if len(messages) > 0 {
-		enhancedContent.WriteString("\n## 角色状态分析\n\n")
-
-		// 分析每个角色的情绪状态
-		for _, message := range messages {
-			if message.EmotionData != nil {
-				enhancedContent.WriteString(fmt.Sprintf("**%s**: %s (强度: %d",
-					message.CharacterName,
-					message.EmotionData.Emotion,
-					message.EmotionData.Intensity))
-
-				if message.EmotionData.BodyLanguage != "" {
-					enhancedContent.WriteString(fmt.Sprintf(", 行为: %s", message.EmotionData.BodyLanguage))
-				}
-				if message.EmotionData.VoiceTone != "" {
-					enhancedContent.WriteString(fmt.Sprintf(", 语调: %s", message.EmotionData.VoiceTone))
-				}
-				enhancedContent.WriteString(")\n")
+		enhanced.WriteString("\n**角色状态**: ")
+		for i, msg := range messages {
+			if i > 0 {
+				enhanced.WriteString(", ")
 			}
-		}
-	}
-
-	// ✅ 利用 messages 内容分析与任务的关联
-	allText := strings.ToLower(baseContent)
-	for _, message := range messages {
-		allText += " " + strings.ToLower(message.Content)
-	}
-
-	relatedTaskCount := 0
-	for _, task := range currentStory.Tasks {
-		if !task.Completed {
-			taskKeywords := s.extractTaskKeywords(task)
-			for _, keyword := range taskKeywords {
-				if strings.Contains(allText, strings.ToLower(keyword)) {
-					if relatedTaskCount == 0 {
-						enhancedContent.WriteString("\n## 相关任务\n\n")
-					}
-					enhancedContent.WriteString(fmt.Sprintf("- **%s**: %s\n", task.Title, task.Description))
-					relatedTaskCount++
-					break
-				}
-			}
-		}
-	}
-
-	// ✅ 基于 messages 的情绪数据添加场景氛围描述
-	if len(messages) > 0 {
-		atmosphereDescription := s.generateAtmosphereFromMessages(messages)
-		if atmosphereDescription != "" {
-			enhancedContent.WriteString(fmt.Sprintf("\n## 场景氛围\n\n%s\n", atmosphereDescription))
-		}
-	}
-
-	// ✅ 基于 messages 的时间信息添加时序说明
-	if len(messages) > 1 {
-		enhancedContent.WriteString("\n## 对话时序\n\n")
-		enhancedContent.WriteString(fmt.Sprintf("本次互动包含 %d 条角色响应，", len(messages)))
-
-		// 计算对话的时间跨度
-		if len(messages) >= 2 {
-			firstTime := messages[0].Timestamp
-			lastTime := messages[len(messages)-1].Timestamp
-			duration := lastTime.Sub(firstTime)
-
-			if duration > 0 {
-				enhancedContent.WriteString(fmt.Sprintf("对话历时 %.1f 秒。", duration.Seconds()))
+			if msg.EmotionData != nil {
+				enhanced.WriteString(fmt.Sprintf("%s(%s)", msg.CharacterName, msg.EmotionData.Emotion))
 			} else {
-				enhancedContent.WriteString("响应几乎同时产生。")
+				enhanced.WriteString(msg.CharacterName)
 			}
 		}
-		enhancedContent.WriteString("\n")
+		enhanced.WriteString("\n")
 	}
 
-	// ✅ 分析角色互动模式
-	if len(messages) > 1 {
-		interactionPattern := s.analyzeInteractionPattern(messages)
-		if interactionPattern != "" {
-			enhancedContent.WriteString(fmt.Sprintf("\n## 互动模式\n\n%s\n", interactionPattern))
-		}
-	}
-
-	return enhancedContent.String()
-}
-
-// 新增辅助方法：根据消息生成场景氛围描述
-func (s *InteractionAggregateService) generateAtmosphereFromMessages(messages []CharacterMessage) string {
-	if len(messages) == 0 {
-		return ""
-	}
-
-	// 收集所有情绪数据
-	emotionCounts := make(map[string]int)
-	totalIntensity := 0
-	bodyLanguageElements := []string{}
-	voiceToneElements := []string{}
-
-	for _, message := range messages {
-		if message.EmotionData != nil {
-			emotion := strings.ToLower(message.EmotionData.Emotion)
-			emotionCounts[emotion]++
-			totalIntensity += message.EmotionData.Intensity
-
-			if message.EmotionData.BodyLanguage != "" {
-				bodyLanguageElements = append(bodyLanguageElements, message.EmotionData.BodyLanguage)
-			}
-			if message.EmotionData.VoiceTone != "" {
-				voiceToneElements = append(voiceToneElements, message.EmotionData.VoiceTone)
-			}
-		}
-	}
-
-	if len(emotionCounts) == 0 {
-		return ""
-	}
-
-	var atmosphere strings.Builder
-
-	// 分析主导情绪
-	dominantEmotion := ""
-	maxCount := 0
-	for emotion, count := range emotionCounts {
-		if count > maxCount {
-			maxCount = count
-			dominantEmotion = emotion
-		}
-	}
-
-	// 计算平均强度
-	avgIntensity := float64(totalIntensity) / float64(len(messages))
-
-	// 生成氛围描述
-	switch dominantEmotion {
-	case "joy", "喜悦", "高兴":
-		if avgIntensity > 7 {
-			atmosphere.WriteString("场景充满了欢声笑语，")
-		} else {
-			atmosphere.WriteString("现场氛围轻松愉快，")
-		}
-	case "anger", "愤怒", "生气":
-		if avgIntensity > 7 {
-			atmosphere.WriteString("空气中弥漫着紧张的火药味，")
-		} else {
-			atmosphere.WriteString("气氛略显紧张，")
-		}
-	case "sadness", "悲伤", "难过":
-		atmosphere.WriteString("现场笼罩着一层淡淡的忧郁，")
-	case "fear", "恐惧", "害怕":
-		atmosphere.WriteString("不安的情绪在空气中蔓延，")
-	case "surprise", "惊讶":
-		atmosphere.WriteString("意外的发现让现场充满了惊喜，")
-	default:
-		atmosphere.WriteString("场景保持着平静的基调，")
-	}
-
-	// 添加身体语言描述
-	if len(bodyLanguageElements) > 0 {
-		uniqueBodyLanguage := removeDuplicates(bodyLanguageElements)
-		atmosphere.WriteString(fmt.Sprintf("角色们的行为表现为：%s。", strings.Join(uniqueBodyLanguage, "、")))
-	}
-
-	// 添加语调描述
-	if len(voiceToneElements) > 0 {
-		uniqueVoiceTones := removeDuplicates(voiceToneElements)
-		atmosphere.WriteString(fmt.Sprintf("对话中的语调变化包括：%s。", strings.Join(uniqueVoiceTones, "、")))
-	}
-	return atmosphere.String()
-}
-
-// 新增辅助方法：分析角色互动模式
-func (s *InteractionAggregateService) analyzeInteractionPattern(messages []CharacterMessage) string {
-	if len(messages) < 2 {
-		return ""
-	}
-
-	// 分析情绪变化趋势
-	emotionChanges := []string{}
-	for i := 1; i < len(messages); i++ {
-		prev := messages[i-1]
-		curr := messages[i]
-
-		if prev.EmotionData != nil && curr.EmotionData != nil {
-			prevIntensity := prev.EmotionData.Intensity
-			currIntensity := curr.EmotionData.Intensity
-
-			if currIntensity > prevIntensity+2 {
-				emotionChanges = append(emotionChanges, "情绪升级")
-			} else if currIntensity < prevIntensity-2 {
-				emotionChanges = append(emotionChanges, "情绪缓和")
-			}
-		}
-	}
-
-	// 检查角色数量和互动类型
-	characterCount := len(messages)
-	var pattern strings.Builder
-
-	if characterCount == 2 {
-		pattern.WriteString("这是一次双向对话，")
-	} else {
-		pattern.WriteString(fmt.Sprintf("这是一次涉及 %d 位角色的群体互动，", characterCount))
-	}
-
-	if len(emotionChanges) > 0 {
-		pattern.WriteString(fmt.Sprintf("对话过程中出现了%s。", strings.Join(emotionChanges, "和")))
-	} else {
-		pattern.WriteString("各角色情绪保持相对稳定。")
-	}
-
-	return pattern.String()
-}
-
-// 辅助函数：去除重复元素
-func removeDuplicates(slice []string) []string {
-	keys := make(map[string]bool)
-	result := []string{}
-
-	for _, item := range slice {
-		if !keys[item] {
-			keys[item] = true
-			result = append(result, item)
-		}
-	}
-
-	return result
+	return enhanced.String()
 }
 
 // 根据故事状态确定节点类型
@@ -1579,172 +1527,27 @@ func (s *InteractionAggregateService) determineNodeType(
 	currentStory *models.StoryData,
 	messages []CharacterMessage) string {
 
-	// 基础类型基于故事进度
-	baseType := ""
+	// 基础类型
+	baseType := "interaction"
 	switch {
 	case currentStory.Progress < 25:
 		baseType = "early_interaction"
-	case currentStory.Progress < 50:
-		baseType = "development_interaction"
 	case currentStory.Progress < 75:
-		baseType = "climax_interaction"
-	case currentStory.Progress >= 75:
-		baseType = "resolution_interaction"
+		baseType = "development_interaction"
 	default:
-		baseType = "interaction"
+		baseType = "climax_interaction"
 	}
 
-	// ✅ 基于 messages 的内容和情绪进一步细化类型
-	if len(messages) == 0 {
-		return baseType
-	}
-
-	// 分析消息特征
-	highIntensityCount := 0
-	conflictKeywords := 0
-	romanceKeywords := 0
-	mysteryKeywords := 0
-	actionKeywords := 0
-	multiCharacterInteraction := len(messages) > 1
-
-	allText := ""
-	for _, message := range messages {
-		allText += strings.ToLower(message.Content) + " "
-
-		// 分析情绪强度
-		if message.EmotionData != nil && message.EmotionData.Intensity > 7 {
-			highIntensityCount++
-		}
-	}
-
-	// 检查特殊关键词类型
-	conflictWords := []string{"战斗", "冲突", "愤怒", "争吵", "敌人", "攻击", "fight", "conflict", "angry", "enemy", "attack"}
-	romanceWords := []string{"爱", "喜欢", "心动", "浪漫", "亲吻", "love", "like", "romantic", "kiss", "heart"}
-	mysteryWords := []string{"秘密", "谜团", "线索", "调查", "真相", "隐藏", "secret", "mystery", "clue", "investigate", "truth", "hidden"}
-	actionWords := []string{"跑", "追", "逃", "行动", "快速", "紧急", "run", "chase", "escape", "action", "quick", "urgent"}
-
-	for _, word := range conflictWords {
-		if strings.Contains(allText, word) {
-			conflictKeywords++
-		}
-	}
-	for _, word := range romanceWords {
-		if strings.Contains(allText, word) {
-			romanceKeywords++
-		}
-	}
-	for _, word := range mysteryWords {
-		if strings.Contains(allText, word) {
-			mysteryKeywords++
-		}
-	}
-	for _, word := range actionWords {
-		if strings.Contains(allText, word) {
-			actionKeywords++
-		}
-	}
-
-	// ✅ 基于消息内容和情绪数据细化节点类型
-
-	// 高强度情绪交互
-	if highIntensityCount >= len(messages)/2 {
-		return baseType + "_intense"
-	}
-
-	// 冲突类型交互
-	if conflictKeywords >= 2 {
-		return baseType + "_conflict"
-	}
-
-	// 浪漫类型交互
-	if romanceKeywords >= 2 {
-		return baseType + "_romance"
-	}
-
-	// 悬疑类型交互
-	if mysteryKeywords >= 2 {
-		return baseType + "_mystery"
-	}
-
-	// 动作类型交互
-	if actionKeywords >= 2 {
-		return baseType + "_action"
-	}
-
-	// 多角色群体交互
-	if multiCharacterInteraction {
+	// 检查多角色互动
+	if len(messages) > 1 {
 		return baseType + "_group"
 	}
 
-	// ✅ 基于消息类型进一步细化
-	thoughtCount := 0
-	actionCount := 0
-	responseCount := 0
-
-	for _, message := range messages {
-		switch message.MessageType {
-		case "thought":
-			thoughtCount++
-		case "action":
-			actionCount++
-		case "response":
-			responseCount++
+	// 检查高强度情绪
+	if len(messages) > 0 && messages[0].EmotionData != nil {
+		if messages[0].EmotionData.Intensity >= 8 {
+			return baseType + "_intense"
 		}
-	}
-
-	// 如果主要是内心独白
-	if thoughtCount > responseCount && thoughtCount > actionCount {
-		return baseType + "_introspective"
-	}
-
-	// 如果主要是行动描述
-	if actionCount > responseCount && actionCount > thoughtCount {
-		return baseType + "_active"
-	}
-
-	// ✅ 基于情绪类型组合判断
-	emotionTypes := make(map[string]int)
-	for _, message := range messages {
-		if message.EmotionData != nil {
-			emotion := strings.ToLower(message.EmotionData.Emotion)
-			emotionTypes[emotion]++
-		}
-	}
-
-	// 找到主导情绪
-	dominantEmotion := ""
-	maxCount := 0
-	for emotion, count := range emotionTypes {
-		if count > maxCount {
-			maxCount = count
-			dominantEmotion = emotion
-		}
-	}
-
-	// 基于主导情绪调整类型
-	switch dominantEmotion {
-	case "anger", "愤怒":
-		return baseType + "_confrontational"
-	case "joy", "喜悦", "happiness":
-		return baseType + "_joyful"
-	case "sadness", "悲伤":
-		return baseType + "_melancholic"
-	case "fear", "恐惧":
-		return baseType + "_tense"
-	case "surprise", "惊讶":
-		return baseType + "_revealing"
-	}
-
-	// ✅ 基于对话长度和复杂性
-	totalLength := 0
-	for _, message := range messages {
-		totalLength += len(message.Content)
-	}
-
-	if totalLength > 1000 {
-		return baseType + "_detailed"
-	} else if totalLength < 100 {
-		return baseType + "_brief"
 	}
 
 	return baseType
@@ -1755,150 +1558,29 @@ func (s *InteractionAggregateService) generateNodeTitle(
 	currentStory *models.StoryData,
 	messages []CharacterMessage) string {
 
-	// 基础标题根据角色数量
-	baseTitle := ""
+	// 基础标题
+	baseTitle := "角色互动记录"
 	if len(messages) == 1 {
 		baseTitle = fmt.Sprintf("与%s的对话", messages[0].CharacterName)
 	} else if len(messages) > 1 {
 		baseTitle = fmt.Sprintf("%d位角色的群体对话", len(messages))
-	} else {
-		baseTitle = "角色互动记录"
 	}
 
-	// ✅ 利用 currentStory 信息增强标题
-
-	// 1. 基于故事进度添加阶段信息
-	var stagePrefix string
+	// 添加阶段信息
+	stagePrefix := ""
 	switch {
 	case currentStory.Progress < 25:
-		stagePrefix = "[序章]"
-	case currentStory.Progress < 50:
-		stagePrefix = "[发展]"
+		stagePrefix = "[序章] "
 	case currentStory.Progress < 75:
-		stagePrefix = "[高潮]"
-	case currentStory.Progress >= 75:
-		stagePrefix = "[结局]"
+		stagePrefix = "[发展] "
 	default:
-		stagePrefix = "[进行中]"
+		stagePrefix = "[高潮] "
 	}
 
-	// 2. 基于当前状态添加情境信息
-	var contextSuffix string
-	if currentStory.CurrentState != "" {
-		// 根据当前状态添加上下文
-		state := strings.ToLower(currentStory.CurrentState)
-		switch {
-		case strings.Contains(state, "紧张") || strings.Contains(state, "危险"):
-			contextSuffix = " - 紧张时刻"
-		case strings.Contains(state, "平静") || strings.Contains(state, "安全"):
-			contextSuffix = " - 平静交流"
-		case strings.Contains(state, "调查") || strings.Contains(state, "探索"):
-			contextSuffix = " - 信息收集"
-		case strings.Contains(state, "冲突") || strings.Contains(state, "争议"):
-			contextSuffix = " - 冲突解决"
-		case strings.Contains(state, "结盟") || strings.Contains(state, "合作"):
-			contextSuffix = " - 合作商议"
-		default:
-			if currentStory.CurrentState != "初始" && currentStory.CurrentState != "Initial" {
-				contextSuffix = fmt.Sprintf(" - %s", currentStory.CurrentState)
-			}
-		}
-	}
-
-	// 3. 基于相关任务添加任务相关信息
-	var taskHint string
-	if len(messages) > 0 {
-		allText := ""
-		for _, message := range messages {
-			allText += strings.ToLower(message.Content) + " "
-		}
-
-		// 检查是否与重要任务相关
-		for _, task := range currentStory.Tasks {
-			if !task.Completed {
-				taskKeywords := s.extractTaskKeywords(task)
-				keywordMatches := 0
-				for _, keyword := range taskKeywords {
-					if strings.Contains(allText, strings.ToLower(keyword)) {
-						keywordMatches++
-					}
-				}
-
-				// 如果匹配度较高，在标题中提示任务相关性
-				if keywordMatches >= 2 {
-					taskHint = fmt.Sprintf(" - 关于「%s」", task.Title)
-					break // 只使用第一个匹配的任务
-				}
-			}
-		}
-	}
-
-	// 4. 基于地点信息添加位置上下文
-	var locationHint string
-	if len(currentStory.Locations) > 0 && len(messages) > 0 {
-		allText := ""
-		for _, message := range messages {
-			allText += strings.ToLower(message.Content) + " "
-		}
-
-		// 检查是否提到了特定地点
-		for _, location := range currentStory.Locations {
-			locationName := strings.ToLower(location.Name)
-			if strings.Contains(allText, locationName) {
-				locationHint = fmt.Sprintf(" @ %s", location.Name)
-				break // 只使用第一个匹配的地点
-			}
-		}
-	}
-
-	// 5. 基于情绪强度调整标题风格
-	var emotionModifier string
-	if len(messages) > 0 {
-		maxIntensity := 0
-		dominantEmotion := ""
-
-		for _, message := range messages {
-			if message.EmotionData != nil {
-				if message.EmotionData.Intensity > maxIntensity {
-					maxIntensity = message.EmotionData.Intensity
-					dominantEmotion = strings.ToLower(message.EmotionData.Emotion)
-				}
-			}
-		}
-
-		// 高强度情绪的标题修饰
-		if maxIntensity >= 8 {
-			switch dominantEmotion {
-			case "anger", "愤怒":
-				emotionModifier = "【激烈】"
-			case "joy", "喜悦", "happiness":
-				emotionModifier = "【欢快】"
-			case "sadness", "悲伤":
-				emotionModifier = "【沉重】"
-			case "fear", "恐惧":
-				emotionModifier = "【紧张】"
-			case "surprise", "惊讶":
-				emotionModifier = "【震惊】"
-			default:
-				emotionModifier = "【激动】"
-			}
-		}
-	}
-
-	// 6. 基于节点数量添加序号
+	// 添加序号
 	nodeIndex := len(currentStory.Nodes) + 1
-	indexSuffix := fmt.Sprintf(" (#%d)", nodeIndex)
 
-	// 7. 组合最终标题
-	finalTitle := stagePrefix + emotionModifier + baseTitle + taskHint + locationHint + contextSuffix + indexSuffix
-
-	// 8. 确保标题长度合理
-	if len(finalTitle) > 80 {
-		// 简化标题，优先保留核心信息
-		finalTitle = stagePrefix + baseTitle + taskHint + indexSuffix
-	}
-
-	return finalTitle
+	return fmt.Sprintf("%s%s (#%d)", stagePrefix, baseTitle, nodeIndex)
 }
 
 // 查找相关任务
