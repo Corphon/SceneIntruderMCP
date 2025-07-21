@@ -45,91 +45,70 @@ func GetApp() *App {
 }
 
 // 初始化服务
-func initServices() error {
-	// 获取当前配置
-	cfg := config.GetCurrentConfig()
+func InitServices() error {
+	container := di.GetContainer()
 
-	// 使用现有的全局容器，而不是创建新的
-	container := di.GetContainer() // ✅ 使用全局容器
-
-	// 1. 首先初始化基础服务（无依赖）
-	// 初始化LLM服务 (使用配置)
-	var llmService *services.LLMService
-	var err error
-
-	if cfg.LLMProvider != "" && cfg.LLMConfig != nil {
-		llmService, err = services.NewLLMService()
-		if err != nil {
-			log.Printf("警告: LLM服务初始化失败: %v", err)
-			llmService = services.NewEmptyLLMService()
-		}
-	} else {
-		log.Printf("未配置LLM提供商，使用空服务实例")
+	// 1. 基础服务（无依赖）
+	llmService, err := services.NewLLMService()
+	if err != nil {
+		// 如果LLM服务初始化失败，创建空服务作为fallback
 		llmService = services.NewEmptyLLMService()
 	}
 	container.Register("llm", llmService)
 
-	// 初始化进度服务（基础服务）
 	progressService := services.NewProgressService()
 	container.Register("progress", progressService)
+	progressService.StartAutoCleanup()
 
-	// 初始化统计服务（基础服务）
 	statsService := services.NewStatsService()
 	container.Register("stats", statsService)
 
-	// 初始化物品服务（基础服务）
-	itemService := services.NewItemService()
-	container.Register("item", itemService)
+	configService := services.NewConfigService()
+	container.Register("config", configService)
 
-	// 初始化角色服务（基础服务）
-	characterService := services.NewCharacterService()
-	container.Register("character", characterService)
-
-	// 初始化用户服务（基础服务）
 	userService := services.NewUserService()
 	container.Register("user", userService)
 
-	// 2. 初始化有依赖的服务
-	// 使用配置初始化场景服务
-	scenesPath := cfg.DataDir + "/scenes"
-	sceneService := services.NewSceneService(scenesPath)
+	itemService := services.NewItemService()
+	container.Register("item", itemService)
+
+	// 2. 依赖基础服务的服务
+	cfg := config.GetCurrentConfig()
+	sceneService := services.NewSceneService(cfg.DataDir + "/scenes")
 	container.Register("scene", sceneService)
 
-	// 初始化上下文服务（依赖场景服务）
 	contextService := services.NewContextService(sceneService)
 	container.Register("context", contextService)
 
-	// 初始化剧情服务（依赖LLM服务）
+	// 3. 依赖多个服务的服务
+	characterService := services.NewCharacterService()
+	container.Register("character", characterService)
+
+	// 4. 高级服务（依赖前面的服务）
 	storyService := services.NewStoryService(llmService)
 	container.Register("story", storyService)
 
-	// ✅ 初始化导出服务（依赖多个基础服务）
+	analyzerService := services.NewAnalyzerServiceWithProvider(llmService.GetProvider())
+	container.Register("analyzer", analyzerService)
+
+	// 5. 聚合服务（依赖多个其他服务）
 	exportService := services.NewExportService(contextService, storyService, sceneService)
 	container.Register("export", exportService)
 
-	// 3. 最后初始化聚合服务（依赖多个服务）
-	// 初始化场景聚合服务
 	sceneAggregateService := services.NewSceneAggregateService(
-		sceneService,
-		characterService,
-		contextService,
-		storyService,
-		progressService,
-	)
+		sceneService, characterService, contextService, storyService, progressService)
 	container.Register("scene_aggregate", sceneAggregateService)
 
-	// 初始化交互聚合服务
-	interactionAggregateService := &services.InteractionAggregateService{
-		CharacterService: characterService,
-		ContextService:   contextService,
-		SceneService:     sceneService,
-		StatsService:     statsService,
-		StoryService:     storyService,
-		ExportService:    exportService,
-	}
+	interactionAggregateService := services.NewInteractionAggregateService(
+		characterService,
+		contextService,
+		sceneService,
+		statsService,
+		storyService,
+		exportService,
+	)
 	container.Register("interaction_aggregate", interactionAggregateService)
 
-	log.Println("所有服务初始化完成")
 	return nil
 }
 
@@ -150,7 +129,7 @@ func Initialize(configPath string) error {
 	}
 
 	// 初始化服务
-	if err := initServices(); err != nil {
+	if err := InitServices(); err != nil {
 		return fmt.Errorf("初始化服务失败: %w", err)
 	}
 
@@ -250,6 +229,12 @@ func (a *App) cleanup() {
 	// 获取依赖注入容器
 	container := di.GetContainer()
 
+	// 进度服务的优雅关闭
+	if progressService, ok := container.Get("progress").(*services.ProgressService); ok && progressService != nil {
+		progressService.Stop()
+		log.Println("进度服务已停止")
+	}
+
 	// 清理LLM服务缓存
 	if llmService, ok := container.Get("llm").(*services.LLMService); ok && llmService != nil {
 		// 如果需要，可以调用LLM服务的清理方法
@@ -257,8 +242,8 @@ func (a *App) cleanup() {
 	}
 
 	// 清理文件缓存
-	if fileCacheService, ok := container.Get("fileCache").(*storage.FileCacheService); ok && fileCacheService != nil {
-		fileCacheService.ClearCache()
+	if fileCacheService, ok := container.Get("fileCache").(*storage.FileStorage); ok && fileCacheService != nil {
+		fileCacheService.StartCacheCleanup()
 		log.Println("文件缓存已清理")
 	}
 
