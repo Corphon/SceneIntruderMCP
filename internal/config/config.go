@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	"github.com/joho/godotenv"
@@ -199,10 +200,59 @@ func UpdateLLMConfig(provider string, config map[string]string) error {
 		return fmt.Errorf("配置系统未初始化")
 	}
 
+	// provider 验证
+	if err := validateLLMProvider(provider); err != nil {
+		return err
+	}
+
+	// 配置验证
+	if err := validateLLMConfig(provider, config); err != nil {
+		return err
+	}
+
 	currentConfig.LLMProvider = provider
 	currentConfig.LLMConfig = config
 
 	return SaveConfig()
+}
+
+// validateLLMProvider 验证 LLM 提供商是否受支持
+func validateLLMProvider(provider string) error {
+	supportedProviders := []string{
+		"openai", "anthropic", "google", "githubmodels", "grok",
+		"mistral", "qwen", "glm", "deepseek", "openrouter",
+	}
+
+	if slices.Contains(supportedProviders, provider) {
+		return nil
+	}
+
+	return fmt.Errorf("不支持的提供商: %s", provider)
+}
+
+// validateLLMConfig 验证 LLM 配置
+func validateLLMConfig(provider string, config map[string]string) error {
+	// 验证必需的配置项
+	if _, ok := config["api_key"]; !ok {
+		return fmt.Errorf("缺少 api_key 配置")
+	}
+
+	if config["api_key"] == "" {
+		return fmt.Errorf("api_key 不能为空")
+	}
+
+	// 特定提供商的验证
+	switch provider {
+	case "glm":
+		if _, ok := config["api_secret"]; !ok {
+			return fmt.Errorf("GLM 提供商需要 api_secret")
+		}
+	case "google":
+		// Google 可能需要 project_id
+		// 可以添加特定验证
+	}
+
+	return nil
 }
 
 // SaveConfig 保存当前配置到文件
