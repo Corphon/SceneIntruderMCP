@@ -248,8 +248,6 @@ func (manager *WebSocketManager) cleanupExpiredConnections() {
 // broadcastMessage 广播消息
 func (manager *WebSocketManager) broadcastMessage(message []byte) {
 	manager.mutex.RLock()
-
-	// 创建所有活跃连接的副本
 	allClients := make([]*WebSocketClient, 0)
 	for _, connections := range manager.connections {
 		for _, client := range connections {
@@ -260,15 +258,8 @@ func (manager *WebSocketManager) broadcastMessage(message []byte) {
 	}
 	manager.mutex.RUnlock()
 
-	// 向客户端的send通道发送消息
-	for _, client := range allClients {
-		select {
-		case client.send <- message:
-			// 消息发送成功
-		default:
-			// 队列满，记录警告
-			log.Printf("⚠️ 全局广播：客户端 %s 消息队列已满", client.userID)
-		}
+	if len(allClients) > 0 {
+		manager.processBatch(allClients, message)
 	}
 }
 
@@ -378,7 +369,6 @@ func (manager *WebSocketManager) BroadcastToScene(sceneID string, message map[st
 		return
 	}
 
-	// 创建连接副本以避免在锁外访问时的并发问题
 	clientConnections := make([]*WebSocketClient, 0, len(connections))
 	for _, client := range connections {
 		if !client.IsClosed() {
@@ -387,15 +377,8 @@ func (manager *WebSocketManager) BroadcastToScene(sceneID string, message map[st
 	}
 	manager.mutex.RUnlock()
 
-	// 向客户端的send通道发送消息
-	for _, client := range clientConnections {
-		select {
-		case client.send <- msgBytes:
-			// 消息发送成功
-		default:
-			// 队列满，记录警告
-			log.Printf("⚠️ 场景广播：客户端 %s 消息队列已满", client.userID)
-		}
+	if len(clientConnections) > 0 {
+		manager.processBatch(clientConnections, msgBytes)
 	}
 }
 
