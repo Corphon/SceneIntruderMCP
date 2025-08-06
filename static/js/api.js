@@ -400,23 +400,27 @@ class API {
      */
     static updateUserPreferences(userId, preferences) {
         if (!userId) {
-            throw new Error('用户ID不能为空');
+            this._handleError('用户ID不能为空');
+            return Promise.reject(new Error('用户ID不能为空'));
         }
         
         if (!preferences || typeof preferences !== 'object') {
-            throw new Error('偏好设置格式错误');
+            this._handleError('偏好设置数据无效');
+            return Promise.reject(new Error('偏好设置数据无效'));
         }
         
         // 验证创意等级枚举值
         const validCreativityLevels = ['STRICT', 'BALANCED', 'EXPANSIVE'];
         if (preferences.creativity_level && !validCreativityLevels.includes(preferences.creativity_level)) {
-            throw new Error('无效的创意等级值');
+            this._handleError('无效的创意等级设置');
+            return Promise.reject(new Error('无效的创意等级设置'));
         }
         
         // 验证响应长度
         const validResponseLengths = ['short', 'medium', 'long'];
         if (preferences.response_length && !validResponseLengths.includes(preferences.response_length)) {
-            throw new Error('无效的响应长度值');
+            this._handleError('无效的响应长度设置');
+            return Promise.reject(new Error('无效的响应长度设置'));
         }
         
         return this.request(`/users/${userId}/preferences`, {
@@ -793,6 +797,196 @@ class API {
             };
         }
     }
+
+    // ========================================
+    // WebSocket 调试和管理 API
+    // ========================================
+
+    /**
+     * 获取 WebSocket 连接状态（调试用）
+     */
+    static getWebSocketStatus() {
+        return this.request('/ws/status');
+    }
+
+    /**
+     * 清理 WebSocket 连接
+     */
+    static cleanupWebSocketConnections() {
+        return this.request('/ws/cleanup', {
+            method: 'POST'
+        });
+    }
+
+    // ========================================
+    // 配置健康检查 API
+    // ========================================
+
+    /**
+     * 获取配置健康状态
+     */
+    static getConfigHealth() {
+        return this.request('/config/health');
+    }
+
+    /**
+     * 获取配置服务指标
+     */
+    static getConfigMetrics() {
+        return this.request('/config/metrics');
+    }
+
+    // ========================================
+    // 增强的 LLM 管理 API
+    // ========================================
+
+    /**
+     * 更新LLM配置（增强版）
+     */
+    static async updateLLMConfig(provider, config) {
+        try {
+            // 更新配置
+            const result = await this.request('/llm/config', {
+                method: 'PUT',
+                body: {
+                    provider: provider,
+                    config: config
+                }
+            });
+
+            // 🔧 更新后自动检查状态
+            try {
+                const status = await this.getLLMStatus();
+                console.log('LLM配置更新后状态:', status);
+            } catch (statusError) {
+                console.warn('获取LLM状态失败:', statusError.message);
+            }
+
+            return result;
+        } catch (error) {
+            console.error('LLM配置更新失败:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * 测试LLM连接（与后端的TestConnection对应）
+     */
+    static testLLMConnection() {
+        return this.request('/settings/test-connection', {
+            method: 'POST'
+        });
+    }
+
+    // ========================================
+    // 故事系统增强 API
+    // ========================================
+
+    /**
+     * 批处理故事操作
+     */
+    static batchStoryOperations(sceneId, operations) {
+        if (!sceneId || !Array.isArray(operations)) {
+            throw new Error('批处理故事操作需要 sceneId 和操作数组');
+        }
+
+        return this.request(`/scenes/${sceneId}/story/batch`, {
+            method: 'POST',
+            body: {
+                operations: operations
+            }
+        });
+    }
+
+    // ========================================
+    // 系统集成增强
+    // ========================================
+
+    /**
+     * 综合健康检查（包含所有子系统）
+     */
+    static async comprehensiveHealthCheck() {
+        try {
+            const results = await this.batchRequest([
+                () => this.healthCheck(),           // 基础API健康检查
+                () => this.getLLMStatus(),          // LLM服务状态
+                () => this.getConfigHealth(),       // 配置健康状态
+                () => this.getWebSocketStatus()     // WebSocket状态
+            ]);
+
+            return {
+                status: 'healthy',
+                timestamp: new Date().toISOString(),
+                details: {
+                    api: results[0],
+                    llm: results[1],
+                    config: results[2],
+                    websocket: results[3]
+                }
+            };
+        } catch (error) {
+            return {
+                status: 'unhealthy',
+                error: error.message,
+                timestamp: new Date().toISOString()
+            };
+        }
+    }
+
+    /**
+     * 重新初始化LLM服务
+     */
+    static async reinitializeLLM(provider, config) {
+        try {
+            // 1. 更新配置
+            await this.updateLLMConfig(provider, config);
+            
+            // 2. 测试连接
+            await this.testLLMConnection();
+            
+            // 3. 获取最新状态
+            const status = await this.getLLMStatus();
+            
+            if (status.ready) {
+                this._handleSuccess('LLM服务重新初始化成功');
+                return status;
+            } else {
+                throw new Error('LLM服务初始化后仍未就绪');
+            }
+        } catch (error) {
+            this._handleError('LLM服务重新初始化失败: ' + error.message);
+            throw error;
+        }
+    }
+
+    // ========================================
+    // 调试和开发增强
+    // ========================================
+
+    /**
+     * 获取系统完整状态
+     */
+    static async getSystemStatus() {
+        try {
+            const [health, llmStatus, configHealth, wsStatus] = await Promise.allSettled([
+                this.healthCheck(),
+                this.getLLMStatus(),
+                this.getConfigHealth(),
+                this.getWebSocketStatus()
+            ]);
+
+            return {
+                api: health.status === 'fulfilled' ? health.value : { error: health.reason?.message },
+                llm: llmStatus.status === 'fulfilled' ? llmStatus.value : { error: llmStatus.reason?.message },
+                config: configHealth.status === 'fulfilled' ? configHealth.value : { error: configHealth.reason?.message },
+                websocket: wsStatus.status === 'fulfilled' ? wsStatus.value : { error: wsStatus.reason?.message },
+                timestamp: new Date().toISOString()
+            };
+        } catch (error) {
+            console.error('获取系统状态失败:', error);
+            throw error;
+        }
+    }
 }
 
 // 确保全局可用
@@ -814,13 +1008,65 @@ if (typeof window !== 'undefined' && window.location?.hostname === 'localhost') 
         
         // 测试基础连接
         testConnection: () => API.healthCheck(),
+
+        // 测试LLM连接
+        testAllConnections: async () => {
+            console.log('🔍 测试所有连接...');
+            try {
+                const result = await API.comprehensiveHealthCheck();
+                console.log('✅ 综合健康检查结果:', result);
+                return result;
+            } catch (error) {
+                console.error('❌ 综合健康检查失败:', error);
+                return { error: error.message };
+            }
+        },
+
+        // 测试LLM设置
+        testLLMSetup: async (provider, config) => {
+            console.log(`🤖 测试LLM设置 (${provider})...`);
+            try {
+                const result = await API.reinitializeLLM(provider, config);
+                console.log('✅ LLM设置测试成功:', result);
+                return result;
+            } catch (error) {
+                console.error('❌ LLM设置测试失败:', error);
+                return { error: error.message };
+            }
+        },
         
         // 获取API基础信息
         getInfo: () => ({
             baseUrl: API.BASE_URL,
             methods: window.API_DEBUG.listMethods().length,
             userAgent: navigator.userAgent
-        })
+        }),
+        
+        // 获取系统健康状态
+        getSystemDashboard: async () => {
+            console.log('📊 获取系统仪表板...');
+            try {
+                const status = await API.getSystemStatus();
+                console.table(status);
+                return status;
+            } catch (error) {
+                console.error('❌ 获取系统状态失败:', error);
+                return { error: error.message };
+            }
+        },
+
+        // 列出新增的方法
+        listNewMethods: () => [
+            'getWebSocketStatus',
+            'cleanupWebSocketConnections', 
+            'getConfigHealth',
+            'getConfigMetrics',
+            'testLLMConnection',
+            'batchStoryOperations',
+            'comprehensiveHealthCheck',
+            'reinitializeLLM',
+            'getSystemStatus'
+        ]
     };
     
     console.log('🚀 API调试模式已启用');
