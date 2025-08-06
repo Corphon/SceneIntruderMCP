@@ -239,6 +239,12 @@ func (wh *WebSocketHandler) handleCharacterInteraction(client *WebSocketClient, 
 		return
 	}
 
+	// nil检查
+	if wh.characterService == nil {
+		wh.sendError(client, "角色服务不可用")
+		return
+	}
+
 	// 生成角色回应
 	response, err := wh.characterService.GenerateResponse(client.sceneID, characterID, userMessage)
 	if err != nil {
@@ -270,6 +276,12 @@ func (wh *WebSocketHandler) handleStoryChoice(client *WebSocketClient, message m
 	choiceID, ok := message["choice_id"].(string)
 	if !ok {
 		wh.sendError(client, "缺少选择ID")
+		return
+	}
+
+	// nil检查
+	if wh.storyService == nil {
+		wh.sendError(client, "故事服务不可用")
 		return
 	}
 
