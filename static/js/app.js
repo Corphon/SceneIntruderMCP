@@ -89,28 +89,72 @@ class SceneApp {
         try {
             this.setState({ isLoading: true });
 
-            // 使用聚合API获取完整场景数据
             const aggregateData = await API.getSceneAggregate(sceneId, {
-                includeConversations: true,
-                includeStory: true,
-                includeUIState: true,
-                includeProgress: true,
-                conversationLimit: 50
+                includeConversations: true,      // 对应后端 include_conversations
+                includeStory: true,              // 对应后端 include_story  
+                includeUIState: true,            // 对应后端 include_ui_state
+                includeProgress: true,           // 对应后端 include_progress
+                includeCharacterStats: true,     // 新增参数
+                conversationLimit: 50,           // 对应后端 conversation_limit
+                timeRange: '7d',                 // 新增时间范围参数
+                preferences: this.currentUser?.preferences // 对应后端 preferences
             });
 
+            // 保存聚合数据供仪表板使用
+            this.aggregateData = aggregateData;
+
             // 设置应用数据
-            this.currentScene = aggregateData.scene;
-            this.conversations = aggregateData.conversations || [];
-            this.storyData = aggregateData.story_data;
+            if (aggregateData.data) {
+                // 如果有 data 包装
+                this.currentScene = aggregateData.data.scene;
+                this.conversations = aggregateData.data.conversations || [];
+                this.storyData = aggregateData.data.story_data;
+            } else {
+                // 直接返回数据
+                this.currentScene = aggregateData.scene;
+                this.conversations = aggregateData.conversations || [];
+                this.storyData = aggregateData.story_data;
+            }
 
             // 渲染界面
             this.renderSceneInterface();
             this.renderConversations();
-            this.renderStoryInterface();
-            this.renderSceneDashboard();
+
+            // 条件渲染故事界面和仪表板
+            if (this.storyData) {
+                this.renderStoryInterface();
+            }
+
+            if (aggregateData.stats || aggregateData.data?.stats) {
+                // 初始化仪表板状态
+                this.initDashboardState();
+
+                // 如果仪表板应该显示，则渲染
+                if (this.state.dashboardVisible) {
+                    this.renderSceneDashboard();
+                }
+            }
+
+            // 初始化角色状态
+            this.initCharacterStatus();
 
             // 绑定事件
             this.bindSceneEvents();
+
+            // 初始化实时通信
+            await this.initRealtimeConnection(sceneId);
+
+            // 初始化故事通知系统
+            this.initStoryNotificationSystem();
+
+            // 初始化用户在线状态
+            this.initOnlineUsersSystem();
+
+            // 初始化滚动监听
+            this.initScrollMonitoring();
+
+            // 初始化统计更新
+            this.updateConversationStats();
 
             this.setState({
                 isLoading: false,
@@ -123,8 +167,38 @@ class SceneApp {
                 isLoading: false,
                 lastError: error.message
             });
+
             Utils.showError('场景加载失败: ' + error.message);
         }
+    }
+
+    /**
+    * 初始化角色状态
+    */
+    initCharacterStatus() {
+        // 初始化角色状态缓存
+        this.characterStatusCache = new Map();
+
+        // 获取所有角色元素
+        const characterElements = document.querySelectorAll('[data-character-id]');
+
+        // 为每个角色设置初始状态
+        characterElements.forEach(element => {
+            const characterId = element.dataset.characterId;
+
+            // 设置默认状态
+            this.updateCharacterStatusIndicator(element, 'offline', 'calm');
+            this.updateCharacterCardStyle(element, 'offline');
+
+            // 缓存初始状态
+            this.characterStatusCache.set(characterId, {
+                status: 'offline',
+                mood: 'calm',
+                timestamp: Date.now()
+            });
+        });
+
+        console.log('✅ 角色状态已初始化');
     }
 
     /**
@@ -133,6 +207,9 @@ class SceneApp {
     initSceneCreate() {
         const form = document.getElementById('create-scene-form');
         if (!form) return;
+
+        // 确保预览容器存在
+        this.ensurePreviewContainer();
 
         // 绑定表单提交
         form.addEventListener('submit', async (e) => {
@@ -154,7 +231,347 @@ class SceneApp {
             textArea.addEventListener('input', () => {
                 this.updateTextPreview(textArea.value);
             });
+
+            // 初始化预览
+            this.updateTextPreview(textArea.value);
         }
+
+        // 绑定预览切换按钮
+        const previewToggleBtn = document.getElementById('preview-toggle-btn');
+        if (previewToggleBtn) {
+            previewToggleBtn.addEventListener('click', () => {
+                this.togglePreviewMode();
+            });
+        }
+    }
+
+    /**
+    * 初始化故事通知系统
+    */
+    initStoryNotificationSystem() {
+        // 初始化故事统计
+        this.storyStats = {
+            totalEvents: 0,
+            eventTypes: {},
+            lastEventTime: null
+        };
+
+        // 检查音效设置
+        this.state.soundEnabled = localStorage.getItem('story_sounds_enabled') !== 'false';
+
+        // 加载历史事件统计
+        const events = this.getStoryEventHistory();
+        if (events.length > 0) {
+            this.storyStats.totalEvents = events.length;
+            this.storyStats.lastEventTime = events[events.length - 1].timestamp;
+
+            // 统计事件类型
+            events.forEach(event => {
+                this.storyStats.eventTypes[event.eventType] =
+                    (this.storyStats.eventTypes[event.eventType] || 0) + 1;
+            });
+        }
+
+        console.log('📖 故事通知系统已初始化');
+    }
+
+    /**
+    * 初始化在线用户系统
+    */
+    initOnlineUsersSystem() {
+        // 初始化在线用户列表
+        this.onlineUsers = new Map();
+
+        // 如果有实时管理器，监听用户状态
+        if (this.realtimeManager) {
+            this.realtimeManager.on('user:online', (data) => {
+                this.onlineUsers.set(data.userId, {
+                    username: data.username,
+                    joinTime: Date.now(),
+                    status: 'online'
+                });
+            });
+
+            this.realtimeManager.on('user:offline', (data) => {
+                this.onlineUsers.delete(data.userId);
+            });
+        }
+
+        console.log('👥 在线用户系统已初始化');
+    }
+
+    /**
+    * 确保预览容器存在
+    */
+    ensurePreviewContainer() {
+        let previewContainer = document.getElementById('text-preview');
+
+        if (!previewContainer) {
+            // 如果预览容器不存在，创建一个
+            const textArea = document.getElementById('scene-text');
+            if (textArea && textArea.parentNode) {
+                previewContainer = document.createElement('div');
+                previewContainer.id = 'text-preview';
+                previewContainer.className = 'text-preview-container mt-3 p-3 border rounded bg-light';
+
+                // 插入到文本区域后面
+                textArea.parentNode.insertBefore(previewContainer, textArea.nextSibling);
+
+                // 初始化预览内容
+                this.clearTextPreview();
+            }
+        }
+    }
+
+    /**
+     * 更新文本预览
+     */
+    updateTextPreview(text) {
+        const previewContainer = document.getElementById('text-preview');
+        if (!previewContainer) return;
+
+        // 如果文本为空，显示提示
+        if (!text || text.trim().length === 0) {
+            previewContainer.innerHTML = `
+            <div class="text-muted text-center py-4">
+                <i class="bi bi-file-text fs-1"></i>
+                <p class="mt-2">开始输入文本以查看预览...</p>
+            </div>
+        `;
+            return;
+        }
+
+        // 基本的文本分析和预览
+        const analysis = this.analyzeText(text);
+
+        previewContainer.innerHTML = `
+        <div class="preview-header mb-3">
+            <h6 class="mb-2">
+                <i class="bi bi-eye"></i> 文本预览
+                <span class="badge bg-secondary ms-2">${analysis.wordCount} 字</span>
+            </h6>
+        </div>
+        
+        <div class="preview-content">
+            <!-- 文本摘要 -->
+            <div class="preview-section mb-3">
+                <h6 class="text-muted mb-2">内容摘要</h6>
+                <div class="preview-summary">
+                    ${this.generateTextSummary(text)}
+                </div>
+            </div>
+            
+            <!-- 检测到的实体 -->
+            ${analysis.entities.length > 0 ? `
+                <div class="preview-section mb-3">
+                    <h6 class="text-muted mb-2">检测到的实体</h6>
+                    <div class="entities-list">
+                        ${analysis.entities.map(entity => `
+                            <span class="badge bg-light text-dark me-1 mb-1" title="${entity.type}">
+                                ${Utils.escapeHtml(entity.name)}
+                            </span>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            
+            <!-- 文本统计 -->
+            <div class="preview-section mb-3">
+                <h6 class="text-muted mb-2">文本统计</h6>
+                <div class="row g-2">
+                    <div class="col-6 col-md-3">
+                        <div class="stat-item">
+                            <div class="stat-value">${analysis.wordCount}</div>
+                            <div class="stat-label">字数</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="stat-item">
+                            <div class="stat-value">${analysis.sentenceCount}</div>
+                            <div class="stat-label">句子数</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="stat-item">
+                            <div class="stat-value">${analysis.paragraphCount}</div>
+                            <div class="stat-label">段落数</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="stat-item">
+                            <div class="stat-value">${analysis.readingTime}分钟</div>
+                            <div class="stat-label">阅读时间</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- 格式化的文本内容 -->
+            <div class="preview-section">
+                <h6 class="text-muted mb-2">格式化预览</h6>
+                <div class="formatted-text">
+                    ${this.formatTextForPreview(text)}
+                </div>
+            </div>
+        </div>
+    `;
+
+        // 更新创建按钮状态
+        this.updateCreateButtonState(analysis);
+    }
+
+    /**
+     * 分析文本内容
+     */
+    analyzeText(text) {
+        if (!text) return { wordCount: 0, sentenceCount: 0, paragraphCount: 0, entities: [], readingTime: 0 };
+
+        // 基本统计
+        const wordCount = text.length; // 中文字符数
+        const sentenceCount = (text.match(/[。！？.!?]/g) || []).length;
+        const paragraphCount = text.split(/\n\s*\n/).filter(p => p.trim().length > 0).length;
+        const readingTime = Math.ceil(wordCount / 300); // 假设每分钟阅读300字
+
+        // 简单的实体检测（人名、地名等）
+        const entities = this.extractEntities(text);
+
+        return {
+            wordCount,
+            sentenceCount,
+            paragraphCount,
+            entities,
+            readingTime
+        };
+    }
+
+    /**
+     * 提取实体（简单版本）
+     */
+    extractEntities(text) {
+        const entities = [];
+
+        // 简单的人名检测（以常见姓氏开头的2-4字词组）
+        const namePattern = /[王李张刘陈杨黄赵吴周徐孙马朱胡郭何高林罗郑梁谢宋唐许韩冯邓曹彭曾萧田董袁潘于蒋蔡余杜叶程苏魏吕丁任沈姚卢姜崔钟谭陆汪范金石廖贾夏韦付方白邹孟熊秦邱江尹薛闫段雷侯龙史陶黎贺顾毛郝龚邵万钱严覃武戴莫孔向汤][a-zA-Z\u4e00-\u9fa5]{1,3}/g;
+        const names = text.match(namePattern) || [];
+        names.forEach(name => {
+            if (!entities.find(e => e.name === name)) {
+                entities.push({ name, type: '人名' });
+            }
+        });
+
+        // 简单的地名检测（以常见地名词尾结尾）
+        const placePattern = /[a-zA-Z\u4e00-\u9fa5]{2,}(?:市|县|区|镇|村|路|街|巷|山|河|湖|海|岛|省|州|国)/g;
+        const places = text.match(placePattern) || [];
+        places.forEach(place => {
+            if (!entities.find(e => e.name === place)) {
+                entities.push({ name: place, type: '地名' });
+            }
+        });
+
+        // 组织机构检测
+        const orgPattern = /[a-zA-Z\u4e00-\u9fa5]{2,}(?:公司|集团|企业|学校|大学|医院|银行|政府|部门|组织|协会|基金会)/g;
+        const orgs = text.match(orgPattern) || [];
+        orgs.forEach(org => {
+            if (!entities.find(e => e.name === org)) {
+                entities.push({ name: org, type: '机构' });
+            }
+        });
+
+        return entities.slice(0, 20); // 限制显示数量
+    }
+
+    /**
+     * 生成文本摘要
+     */
+    generateTextSummary(text) {
+        if (!text || text.length < 50) {
+            return '<span class="text-muted">文本过短，无法生成摘要</span>';
+        }
+
+        // 简单的摘要生成：取前100字并添加省略号
+        const summary = text.substring(0, 100).trim();
+        return `
+        <div class="summary-text">
+            ${Utils.escapeHtml(summary)}${text.length > 100 ? '...' : ''}
+        </div>
+    `;
+    }
+
+    /**
+     * 格式化文本用于预览
+     */
+    formatTextForPreview(text) {
+        if (!text) return '';
+
+        // 将文本按段落分割并格式化
+        const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0);
+
+        return paragraphs.map(paragraph => {
+            // 转义HTML并保留换行
+            const escaped = Utils.escapeHtml(paragraph.trim());
+            const withBreaks = escaped.replace(/\n/g, '<br>');
+
+            return `<p class="mb-3">${withBreaks}</p>`;
+        }).join('');
+    }
+
+    /**
+     * 更新创建按钮状态
+     */
+    updateCreateButtonState(analysis) {
+        const createBtn = document.getElementById('create-scene-btn');
+        if (!createBtn) return;
+
+        const isValid = analysis.wordCount >= 10; // 至少10个字符
+
+        createBtn.disabled = !isValid;
+
+        if (isValid) {
+            createBtn.innerHTML = '<i class="bi bi-plus-circle"></i> 创建场景';
+            createBtn.className = 'btn btn-primary';
+        } else {
+            createBtn.innerHTML = '<i class="bi bi-exclamation-triangle"></i> 文本过短';
+            createBtn.className = 'btn btn-secondary';
+        }
+    }
+
+    /**
+     * 清空预览
+     */
+    clearTextPreview() {
+        const previewContainer = document.getElementById('text-preview');
+        if (previewContainer) {
+            previewContainer.innerHTML = `
+            <div class="text-muted text-center py-4">
+                <i class="bi bi-file-text fs-1"></i>
+                <p class="mt-2">开始输入文本以查看预览...</p>
+            </div>
+        `;
+        }
+    }
+
+    /**
+     * 高亮预览中的关键词
+     */
+    highlightKeywords(text, keywords) {
+        return Utils.highlightKeywords(text, keywords, 'keyword-highlight');
+    }
+
+    /**
+     * 预览模式切换
+     */
+    togglePreviewMode() {
+        const previewContainer = document.getElementById('text-preview');
+        const toggleBtn = document.getElementById('preview-toggle-btn');
+
+        if (!previewContainer || !toggleBtn) return;
+
+        const isHidden = previewContainer.style.display === 'none';
+
+        previewContainer.style.display = isHidden ? 'block' : 'none';
+        toggleBtn.innerHTML = isHidden ?
+            '<i class="bi bi-eye-slash"></i> 隐藏预览' :
+            '<i class="bi bi-eye"></i> 显示预览';
     }
 
     /**
@@ -189,6 +606,32 @@ class SceneApp {
     }
 
     /**
+    * 更新用户档案
+    */
+    async updateUserProfile(userId) {
+        try {
+            const form = document.getElementById('profile-form');
+            const formData = new FormData(form);
+
+            const profileData = {
+                name: formData.get('name'),
+                email: formData.get('email'),
+                bio: formData.get('bio'),
+                avatar: formData.get('avatar')
+            };
+
+            await API.updateUserProfile(userId, profileData);
+            Utils.showSuccess('用户档案更新成功');
+
+            // 重新加载用户数据
+            await this.loadUserProfile(userId);
+
+        } catch (error) {
+            Utils.showError('更新用户档案失败: ' + error.message);
+        }
+    }
+
+    /**
      * 初始化用户档案页面
      */
     initUserProfile() {
@@ -215,6 +658,718 @@ class SceneApp {
 
         // 初始化技能管理
         this.initSkillsManagement(userId);
+    }
+
+    // ========================================
+    // 技能管理
+    // ========================================
+
+    // 在 app.js 的用户管理功能部分添加这个方法
+
+    /**
+     * 初始化技能管理
+     */
+    initSkillsManagement(userId) {
+        // 绑定添加技能按钮
+        const addSkillBtn = document.getElementById('add-skill-btn');
+        if (addSkillBtn) {
+            addSkillBtn.addEventListener('click', () => {
+                this.showAddSkillModal(userId);
+            });
+        }
+
+        // 绑定技能筛选功能
+        const skillCategoryFilter = document.getElementById('skill-category-filter');
+        if (skillCategoryFilter) {
+            skillCategoryFilter.addEventListener('change', () => {
+                this.filterUserSkills();
+            });
+        }
+
+        const skillSearchInput = document.getElementById('skill-search');
+        if (skillSearchInput) {
+            skillSearchInput.addEventListener('input', () => {
+                this.filterUserSkills();
+            });
+        }
+
+        // 加载现有技能
+        this.loadUserSkills(userId);
+    }
+
+    /**
+     * 加载用户技能
+     */
+    async loadUserSkills(userId) {
+        try {
+            const skills = await API.getUserSkills(userId);
+            this.userSkills = skills || [];
+            this.renderUserSkills(skills);
+        } catch (error) {
+            console.error('加载技能失败:', error);
+            Utils.showError('加载技能失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 渲染用户技能
+     */
+    renderUserSkills(skills) {
+        const container = document.getElementById('user-skills-container');
+        if (!container) return;
+
+        container.innerHTML = '';
+
+        if (!skills || skills.length === 0) {
+            container.innerHTML = `
+            <div class="text-center text-muted py-4">
+                <i class="bi bi-lightning fs-1"></i>
+                <p class="mt-2">还没有技能<br>添加一些技能来增强你的能力吧！</p>
+                <button class="btn btn-primary mt-2" onclick="app.showAddSkillModal('${this.getCurrentUserId()}')">
+                    <i class="bi bi-plus-circle"></i> 添加第一个技能
+                </button>
+            </div>
+        `;
+            return;
+        }
+
+        skills.forEach(skill => {
+            const skillEl = document.createElement('div');
+            skillEl.className = 'col-md-6 col-lg-4 mb-3';
+
+            const categoryIcon = this.getSkillCategoryIcon(skill.category);
+            const categoryLabel = this.getSkillCategoryLabel(skill.category);
+
+            skillEl.innerHTML = `
+            <div class="card skill-card h-100">
+                <div class="card-body">
+                    <div class="skill-header d-flex justify-content-between align-items-start mb-2">
+                        <h6 class="card-title mb-0">${Utils.escapeHtml(skill.name)}</h6>
+                        <span class="skill-category-icon" title="${categoryLabel}">${categoryIcon}</span>
+                    </div>
+                    
+                    <p class="card-text small text-muted mb-3">
+                        ${Utils.escapeHtml(skill.description || '无描述')}
+                    </p>
+                    
+                    <div class="skill-meta mb-3">
+                        <div class="row g-2">
+                            <div class="col-6">
+                                <small class="text-muted">类别:</small>
+                                <div class="fw-medium">${categoryLabel}</div>
+                            </div>
+                            <div class="col-6">
+                                <small class="text-muted">冷却:</small>
+                                <div class="fw-medium">${this.formatCooldown(skill.cooldown)}</div>
+                            </div>
+                        </div>
+                        
+                        ${skill.mana_cost ? `
+                            <div class="mt-2">
+                                <small class="text-muted">法力消耗:</small>
+                                <span class="badge bg-info ms-1">${skill.mana_cost}</span>
+                            </div>
+                        ` : ''}
+                        
+                        ${skill.requirements && skill.requirements.length > 0 ? `
+                            <div class="mt-2">
+                                <small class="text-muted">需求:</small>
+                                <div class="skill-requirements">
+                                    ${skill.requirements.map(req => `
+                                        <span class="badge bg-secondary me-1">${Utils.escapeHtml(req)}</span>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        ` : ''}
+                    </div>
+                    
+                    ${skill.effects && skill.effects.length > 0 ? `
+                        <div class="skill-effects mb-3">
+                            <small class="text-muted">效果:</small>
+                            <div class="effects-list">
+                                ${skill.effects.map(effect => `
+                                    <div class="effect-item small">
+                                        <i class="bi bi-star"></i>
+                                        ${this.formatSkillEffect(effect)}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    ` : ''}
+                    
+                    <div class="skill-actions">
+                        <button class="btn btn-sm btn-outline-primary me-1" onclick="app.editSkill('${skill.id}')">
+                            <i class="bi bi-pencil"></i> 编辑
+                        </button>
+                        <button class="btn btn-sm btn-outline-success me-1" onclick="app.useSkill('${skill.id}')">
+                            <i class="bi bi-lightning"></i> 使用
+                        </button>
+                        <button class="btn btn-sm btn-outline-danger" onclick="app.deleteSkill('${skill.id}')">
+                            <i class="bi bi-trash"></i> 删除
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="card-footer bg-transparent">
+                    <small class="text-muted">
+                        创建于 ${Utils.formatTime(skill.created)}
+                    </small>
+                </div>
+            </div>
+        `;
+
+            container.appendChild(skillEl);
+        });
+    }
+
+    /**
+     * 显示添加技能模态框
+     */
+    showAddSkillModal(userId) {
+        // 创建模态框HTML
+        const modalHtml = `
+        <div class="modal fade" id="addSkillModal" tabindex="-1">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">
+                            <i class="bi bi-lightning"></i> 添加新技能
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <form id="addSkillForm">
+                            <div class="row g-3">
+                                <div class="col-md-8">
+                                    <label for="skillName" class="form-label">技能名称 *</label>
+                                    <input type="text" class="form-control" id="skillName" required>
+                                </div>
+                                <div class="col-md-4">
+                                    <label for="skillCategory" class="form-label">类别 *</label>
+                                    <select class="form-select" id="skillCategory" required>
+                                        <option value="">选择类别</option>
+                                        <option value="combat">战斗</option>
+                                        <option value="magic">魔法</option>
+                                        <option value="social">社交</option>
+                                        <option value="mental">心理</option>
+                                        <option value="physical">物理</option>
+                                        <option value="crafting">制作</option>
+                                        <option value="survival">生存</option>
+                                        <option value="other">其他</option>
+                                    </select>
+                                </div>
+                                
+                                <div class="col-12">
+                                    <label for="skillDescription" class="form-label">技能描述</label>
+                                    <textarea class="form-control" id="skillDescription" rows="3" 
+                                              placeholder="描述这个技能的作用和效果..."></textarea>
+                                </div>
+                                
+                                <div class="col-md-6">
+                                    <label for="skillCooldown" class="form-label">冷却时间 (秒)</label>
+                                    <input type="number" class="form-control" id="skillCooldown" min="0" value="0">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="skillManaCost" class="form-label">法力消耗</label>
+                                    <input type="number" class="form-control" id="skillManaCost" min="0" value="0">
+                                </div>
+                                
+                                <div class="col-12">
+                                    <label class="form-label">技能效果</label>
+                                    <div id="skillEffects">
+                                        <div class="effect-item row g-2 mb-2">
+                                            <div class="col-3">
+                                                <select class="form-control form-control-sm effect-target">
+                                                    <option value="self">自己</option>
+                                                    <option value="other">他人</option>
+                                                    <option value="area">范围</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-3">
+                                                <select class="form-control form-control-sm effect-type">
+                                                    <option value="heal">治疗</option>
+                                                    <option value="damage">伤害</option>
+                                                    <option value="buff">增益</option>
+                                                    <option value="debuff">减益</option>
+                                                    <option value="emotion_reveal">情感揭示</option>
+                                                    <option value="mind_read">读心</option>
+                                                    <option value="other">其他</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-2">
+                                                <input type="number" class="form-control form-control-sm effect-value" 
+                                                       placeholder="数值" required>
+                                            </div>
+                                            <div class="col-3">
+                                                <input type="number" class="form-control form-control-sm effect-probability" 
+                                                       placeholder="概率(0-1)" min="0" max="1" step="0.1" value="1" required>
+                                            </div>
+                                            <div class="col-1">
+                                                <button type="button" class="btn btn-outline-danger btn-sm remove-effect-btn">
+                                                    <i class="bi bi-x"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-success" onclick="app.addSkillEffectRow()">
+                                        <i class="bi bi-plus"></i> 添加效果
+                                    </button>
+                                </div>
+                                
+                                <div class="col-12">
+                                    <label class="form-label">使用需求</label>
+                                    <div id="skillRequirements">
+                                        <div class="requirement-item row g-2 mb-2">
+                                            <div class="col-10">
+                                                <input type="text" class="form-control form-control-sm requirement-text" 
+                                                       placeholder="例如: mana >= 10, target_distance <= 5">
+                                            </div>
+                                            <div class="col-2">
+                                                <button type="button" class="btn btn-outline-danger btn-sm remove-requirement-btn">
+                                                    <i class="bi bi-x"></i>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-success" onclick="app.addRequirementRow()">
+                                        <i class="bi bi-plus"></i> 添加需求
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                        <button type="button" class="btn btn-primary save-skill-btn" onclick="app.saveNewSkill('${userId}')">
+                            <i class="bi bi-lightning"></i> 保存技能
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+        // 移除已存在的模态框
+        const existingModal = document.getElementById('addSkillModal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        // 添加新模态框
+        document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+        // 绑定删除按钮事件
+        this.bindSkillModalEvents();
+
+        // 显示模态框
+        if (typeof bootstrap !== 'undefined') {
+            const modal = new bootstrap.Modal(document.getElementById('addSkillModal'));
+            modal.show();
+        }
+    }
+
+    /**
+     * 绑定技能模态框事件
+     */
+    bindSkillModalEvents() {
+        // 绑定删除效果按钮
+        document.addEventListener('click', (e) => {
+            if (e.target.matches('.remove-effect-btn') || e.target.closest('.remove-effect-btn')) {
+                const row = e.target.closest('.effect-item');
+                if (row && document.querySelectorAll('.effect-item').length > 1) {
+                    row.remove();
+                }
+            }
+
+            if (e.target.matches('.remove-requirement-btn') || e.target.closest('.remove-requirement-btn')) {
+                const row = e.target.closest('.requirement-item');
+                if (row) {
+                    row.remove();
+                }
+            }
+        });
+    }
+
+    /**
+     * 添加技能效果行
+     */
+    addSkillEffectRow() {
+        const container = document.getElementById('skillEffects');
+        if (!container) return;
+
+        const effectRow = document.createElement('div');
+        effectRow.className = 'effect-item row g-2 mb-2';
+        effectRow.innerHTML = `
+        <div class="col-3">
+            <select class="form-control form-control-sm effect-target">
+                <option value="self">自己</option>
+                <option value="other">他人</option>
+                <option value="area">范围</option>
+            </select>
+        </div>
+        <div class="col-3">
+            <select class="form-control form-control-sm effect-type">
+                <option value="heal">治疗</option>
+                <option value="damage">伤害</option>
+                <option value="buff">增益</option>
+                <option value="debuff">减益</option>
+                <option value="emotion_reveal">情感揭示</option>
+                <option value="mind_read">读心</option>
+                <option value="other">其他</option>
+            </select>
+        </div>
+        <div class="col-2">
+            <input type="number" class="form-control form-control-sm effect-value" 
+                   placeholder="数值" required>
+        </div>
+        <div class="col-3">
+            <input type="number" class="form-control form-control-sm effect-probability" 
+                   placeholder="概率(0-1)" min="0" max="1" step="0.1" value="1" required>
+        </div>
+        <div class="col-1">
+            <button type="button" class="btn btn-outline-danger btn-sm remove-effect-btn">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
+    `;
+
+        container.appendChild(effectRow);
+    }
+
+    /**
+     * 添加需求行
+     */
+    addRequirementRow() {
+        const container = document.getElementById('skillRequirements');
+        if (!container) return;
+
+        const requirementRow = document.createElement('div');
+        requirementRow.className = 'requirement-item row g-2 mb-2';
+        requirementRow.innerHTML = `
+        <div class="col-10">
+            <input type="text" class="form-control form-control-sm requirement-text" 
+                   placeholder="例如: mana >= 10, target_distance <= 5">
+        </div>
+        <div class="col-2">
+            <button type="button" class="btn btn-outline-danger btn-sm remove-requirement-btn">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
+    `;
+
+        container.appendChild(requirementRow);
+    }
+
+    /**
+     * 保存新技能
+     */
+    async saveNewSkill(userId) {
+        try {
+            const form = document.getElementById('addSkillForm');
+            if (!form) return;
+
+            // 禁用保存按钮
+            const saveBtn = document.querySelector('.save-skill-btn');
+            if (saveBtn) {
+                saveBtn.disabled = true;
+                saveBtn.innerHTML = '<i class="bi bi-hourglass"></i> 保存中...';
+            }
+
+            // 收集表单数据
+            const skillData = {
+                name: document.getElementById('skillName').value.trim(),
+                description: document.getElementById('skillDescription').value.trim(),
+                category: document.getElementById('skillCategory').value,
+                cooldown: parseInt(document.getElementById('skillCooldown').value) || 0,
+                mana_cost: parseInt(document.getElementById('skillManaCost').value) || 0,
+                effects: [],
+                requirements: []
+            };
+
+            // 验证必填字段
+            if (!skillData.name || !skillData.category) {
+                throw new Error('请填写技能名称和类别');
+            }
+
+            // 收集效果数据
+            const effectElements = document.querySelectorAll('.effect-item');
+            effectElements.forEach(effectEl => {
+                const target = effectEl.querySelector('.effect-target').value;
+                const type = effectEl.querySelector('.effect-type').value;
+                const value = parseFloat(effectEl.querySelector('.effect-value').value);
+                const probability = parseFloat(effectEl.querySelector('.effect-probability').value);
+
+                if (target && type && !isNaN(value) && !isNaN(probability)) {
+                    skillData.effects.push({
+                        target,
+                        type,
+                        value,
+                        probability
+                    });
+                }
+            });
+
+            // 收集需求数据
+            const requirementElements = document.querySelectorAll('.requirement-text');
+            requirementElements.forEach(reqEl => {
+                const requirement = reqEl.value.trim();
+                if (requirement) {
+                    skillData.requirements.push(requirement);
+                }
+            });
+
+            // 调用API保存技能
+            await API.addUserSkill(userId, skillData);
+
+            // 关闭模态框
+            const modal = bootstrap.Modal.getInstance(document.getElementById('addSkillModal'));
+            if (modal) {
+                modal.hide();
+            }
+
+            // 重新加载技能列表
+            await this.loadUserSkills(userId);
+
+            Utils.showSuccess('技能添加成功！');
+
+        } catch (error) {
+            console.error('保存技能失败:', error);
+            Utils.showError('保存技能失败: ' + error.message);
+        } finally {
+            // 恢复保存按钮
+            const saveBtn = document.querySelector('.save-skill-btn');
+            if (saveBtn) {
+                saveBtn.disabled = false;
+                saveBtn.innerHTML = '<i class="bi bi-lightning"></i> 保存技能';
+            }
+        }
+    }
+
+    /**
+     * 编辑技能
+     */
+    async editSkill(skillId) {
+        try {
+            const skill = this.userSkills?.find(s => s.id === skillId);
+            if (!skill) {
+                Utils.showError('未找到指定技能');
+                return;
+            }
+
+            // 这里可以复用添加技能的模态框，但填充现有数据
+            this.showAddSkillModal(this.getCurrentUserId());
+
+            // 等待模态框渲染完成后填充数据
+            setTimeout(() => {
+                this.populateSkillForm(skill);
+            }, 200);
+
+        } catch (error) {
+            console.error('编辑技能失败:', error);
+            Utils.showError('编辑技能失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 填充技能表单
+     */
+    populateSkillForm(skill) {
+        document.getElementById('skillName').value = skill.name || '';
+        document.getElementById('skillDescription').value = skill.description || '';
+        document.getElementById('skillCategory').value = skill.category || '';
+        document.getElementById('skillCooldown').value = skill.cooldown || 0;
+        document.getElementById('skillManaCost').value = skill.mana_cost || 0;
+
+        // 填充效果
+        const effectsContainer = document.getElementById('skillEffects');
+        if (effectsContainer && skill.effects && skill.effects.length > 0) {
+            effectsContainer.innerHTML = '';
+            skill.effects.forEach(effect => {
+                this.addSkillEffectRow();
+                const lastEffect = effectsContainer.lastElementChild;
+                if (lastEffect) {
+                    lastEffect.querySelector('.effect-target').value = effect.target || 'self';
+                    lastEffect.querySelector('.effect-type').value = effect.type || 'other';
+                    lastEffect.querySelector('.effect-value').value = effect.value || '';
+                    lastEffect.querySelector('.effect-probability').value = effect.probability || 1;
+                }
+            });
+        }
+
+        // 填充需求
+        const requirementsContainer = document.getElementById('skillRequirements');
+        if (requirementsContainer && skill.requirements && skill.requirements.length > 0) {
+            requirementsContainer.innerHTML = '';
+            skill.requirements.forEach(requirement => {
+                this.addRequirementRow();
+                const lastRequirement = requirementsContainer.lastElementChild;
+                if (lastRequirement) {
+                    lastRequirement.querySelector('.requirement-text').value = requirement;
+                }
+            });
+        }
+    }
+
+    /**
+     * 使用技能
+     */
+    async useSkill(skillId) {
+        try {
+            const skill = this.userSkills?.find(s => s.id === skillId);
+            if (!skill) {
+                Utils.showError('未找到指定技能');
+                return;
+            }
+
+            Utils.showInfo(`使用技能: ${skill.name}`);
+
+            // 这里可以集成到场景交互中
+            if (this.currentScene && this.selectedCharacter) {
+                // 将技能使用作为特殊交互发送
+                const response = await API.createInteraction({
+                    scene_id: this.currentScene.id,
+                    character_id: this.selectedCharacter,
+                    message: `使用技能: ${skill.name}`,
+                    interaction_type: 'skill_use',
+                    context: {
+                        skill_id: skillId,
+                        skill_data: skill
+                    }
+                });
+
+                if (response.success || response.data) {
+                    Utils.showSuccess(`${skill.name} 使用成功！`);
+                }
+            } else {
+                Utils.showInfo(`模拟使用技能: ${skill.name}`);
+            }
+
+        } catch (error) {
+            console.error('使用技能失败:', error);
+            Utils.showError('使用技能失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 删除技能
+     */
+    async deleteSkill(skillId) {
+        try {
+            const skill = this.userSkills?.find(s => s.id === skillId);
+            if (!skill) {
+                Utils.showError('未找到指定技能');
+                return;
+            }
+
+            const confirmed = confirm(`确定要删除技能 "${skill.name}" 吗？`);
+            if (!confirmed) return;
+
+            await API.deleteUserSkill(this.getCurrentUserId(), skillId);
+
+            // 重新加载技能列表
+            await this.loadUserSkills(this.getCurrentUserId());
+
+            Utils.showSuccess('技能删除成功');
+
+        } catch (error) {
+            console.error('删除技能失败:', error);
+            Utils.showError('删除技能失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 筛选用户技能
+     */
+    filterUserSkills() {
+        const categoryFilter = document.getElementById('skill-category-filter')?.value || '';
+        const searchFilter = document.getElementById('skill-search')?.value.toLowerCase() || '';
+
+        const filteredSkills = this.userSkills.filter(skill => {
+            const categoryMatch = !categoryFilter || skill.category === categoryFilter;
+            const searchMatch = !searchFilter ||
+                skill.name.toLowerCase().includes(searchFilter) ||
+                (skill.description && skill.description.toLowerCase().includes(searchFilter));
+
+            return categoryMatch && searchMatch;
+        });
+
+        this.renderUserSkills(filteredSkills);
+    }
+
+    /**
+     * 获取技能类别图标
+     */
+    getSkillCategoryIcon(category) {
+        const icons = {
+            'combat': '⚔️',
+            'magic': '🔮',
+            'social': '💬',
+            'mental': '🧠',
+            'physical': '💪',
+            'crafting': '🔨',
+            'survival': '🏕️',
+            'other': '⚡'
+        };
+        return icons[category] || '⚡';
+    }
+
+    /**
+     * 获取技能类别标签
+     */
+    getSkillCategoryLabel(category) {
+        const labels = {
+            'combat': '战斗',
+            'magic': '魔法',
+            'social': '社交',
+            'mental': '心理',
+            'physical': '物理',
+            'crafting': '制作',
+            'survival': '生存',
+            'other': '其他'
+        };
+        return labels[category] || category;
+    }
+
+    /**
+     * 格式化冷却时间
+     */
+    formatCooldown(cooldown) {
+        if (!cooldown || cooldown === 0) return '无';
+
+        if (cooldown < 60) {
+            return `${cooldown}秒`;
+        } else if (cooldown < 3600) {
+            return `${Math.floor(cooldown / 60)}分钟`;
+        } else {
+            return `${Math.floor(cooldown / 3600)}小时`;
+        }
+    }
+
+    /**
+     * 格式化技能效果
+     */
+    formatSkillEffect(effect) {
+        const targetLabels = {
+            'self': '自己',
+            'other': '他人',
+            'area': '范围'
+        };
+
+        const typeLabels = {
+            'heal': '治疗',
+            'damage': '伤害',
+            'buff': '增益',
+            'debuff': '减益',
+            'emotion_reveal': '情感揭示',
+            'mind_read': '读心',
+            'other': '其他'
+        };
+
+        const target = targetLabels[effect.target] || effect.target;
+        const type = typeLabels[effect.type] || effect.type;
+        const probability = effect.probability < 1 ? ` (${Math.round(effect.probability * 100)}%几率)` : '';
+
+        return `对${target}造成${effect.value}点${type}${probability}`;
     }
 
     // ========================================
@@ -385,6 +1540,720 @@ class SceneApp {
         this.displaySelectedCharacterInfo(characterId);
     }
 
+    // 在 app.js 的场景交互核心功能部分添加这个方法
+
+    /**
+     * 显示选中角色的详细信息
+     */
+    displaySelectedCharacterInfo(characterId) {
+        if (!characterId) {
+            this.clearCharacterInfo();
+            return;
+        }
+
+        // 查找角色信息
+        const character = this.findCharacterById(characterId);
+        if (!character) {
+            console.warn('未找到角色信息:', characterId);
+            this.clearCharacterInfo();
+            return;
+        }
+
+        // 获取角色信息显示容器
+        const infoContainer = document.getElementById('character-info');
+        if (!infoContainer) {
+            console.warn('未找到角色信息容器 #character-info');
+            return;
+        }
+
+        // 渲染角色详细信息
+        infoContainer.innerHTML = `
+        <div class="character-info-card">
+            <div class="character-header mb-3">
+                <div class="d-flex align-items-center">
+                    <div class="character-avatar me-3">
+                        ${character.avatar ?
+                `<img src="${character.avatar}" alt="${character.name}" class="rounded-circle" width="64" height="64">` :
+                `<div class="avatar-placeholder rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style="width: 64px; height: 64px; font-size: 1.5rem;">${character.name[0]}</div>`
+            }
+                    </div>
+                    <div class="character-basic-info">
+                        <h5 class="mb-1">${Utils.escapeHtml(character.name)}</h5>
+                        <div class="character-role text-muted mb-1">${Utils.escapeHtml(character.role || '角色')}</div>
+                        <div class="character-status">
+                            <span class="badge bg-success">在线</span>
+                            ${this.getCharacterMoodBadge(character)}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="character-details">
+                <!-- 基本信息 -->
+                <div class="info-section mb-3">
+                    <h6 class="section-title">
+                        <i class="bi bi-person"></i> 基本信息
+                    </h6>
+                    <div class="info-content">
+                        ${character.description ? `
+                            <div class="mb-2">
+                                <strong>描述：</strong>
+                                <div class="character-description">${Utils.escapeHtml(character.description)}</div>
+                            </div>
+                        ` : ''}
+                        
+                        ${character.age ? `
+                            <div class="mb-2">
+                                <strong>年龄：</strong> ${Utils.escapeHtml(character.age)}
+                            </div>
+                        ` : ''}
+                        
+                        ${character.background ? `
+                            <div class="mb-2">
+                                <strong>背景：</strong>
+                                <div class="character-background">${Utils.escapeHtml(character.background)}</div>
+                            </div>
+                        ` : ''}
+                    </div>
+                </div>
+
+                <!-- 性格特征 -->
+                ${character.personality ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-heart"></i> 性格特征
+                        </h6>
+                        <div class="info-content">
+                            <div class="personality-traits">
+                                ${Utils.escapeHtml(character.personality)}
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 说话风格 -->
+                ${character.speech_style ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-chat-quote"></i> 说话风格
+                        </h6>
+                        <div class="info-content">
+                            <div class="speech-style">
+                                ${Utils.escapeHtml(character.speech_style)}
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 知识背景 -->
+                ${character.knowledge && character.knowledge.length > 0 ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-book"></i> 知识背景
+                        </h6>
+                        <div class="info-content">
+                            <div class="knowledge-list">
+                                ${character.knowledge.map(item => `
+                                    <div class="knowledge-item">
+                                        <i class="bi bi-check2"></i>
+                                        ${Utils.escapeHtml(item)}
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 关系网络 -->
+                ${character.relationships && Object.keys(character.relationships).length > 0 ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-people"></i> 关系网络
+                        </h6>
+                        <div class="info-content">
+                            <div class="relationships-list">
+                                ${Object.entries(character.relationships).map(([name, relation]) => `
+                                    <div class="relationship-item d-flex justify-content-between align-items-center">
+                                        <span class="relationship-name">${Utils.escapeHtml(name)}</span>
+                                        <span class="relationship-type badge bg-light text-dark">${Utils.escapeHtml(relation)}</span>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 互动统计 -->
+                <div class="info-section mb-3">
+                    <h6 class="section-title">
+                        <i class="bi bi-graph-up"></i> 互动统计
+                    </h6>
+                    <div class="info-content">
+                        <div class="interaction-stats">
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <div class="stat-card text-center">
+                                        <div class="stat-number">${this.getCharacterInteractionCount(characterId)}</div>
+                                        <div class="stat-label">对话次数</div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="stat-card text-center">
+                                        <div class="stat-number">${this.getCharacterLastInteractionTime(characterId)}</div>
+                                        <div class="stat-label">最后互动</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 操作按钮 -->
+                <div class="character-actions mt-3">
+                    <div class="btn-group w-100" role="group">
+                        <button class="btn btn-primary" onclick="app.startChatWithCharacter('${characterId}')">
+                            <i class="bi bi-chat"></i> 开始对话
+                        </button>
+                        <button class="btn btn-outline-secondary" onclick="app.viewCharacterHistory('${characterId}')">
+                            <i class="bi bi-clock-history"></i> 历史记录
+                        </button>
+                        <button class="btn btn-outline-info" onclick="app.showCharacterDetails('${characterId}')">
+                            <i class="bi bi-info-circle"></i> 详细信息
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+        // 确保容器可见
+        infoContainer.style.display = 'block';
+
+        // 添加显示动画
+        infoContainer.classList.add('character-info-animate');
+        setTimeout(() => {
+            infoContainer.classList.remove('character-info-animate');
+        }, 300);
+    }
+
+    /**
+     * 清空角色信息显示
+     */
+    clearCharacterInfo() {
+        const infoContainer = document.getElementById('character-info');
+        if (infoContainer) {
+            infoContainer.innerHTML = `
+            <div class="character-info-placeholder text-center text-muted py-4">
+                <i class="bi bi-person-circle fs-1"></i>
+                <p class="mt-2">选择一个角色查看详细信息</p>
+            </div>
+        `;
+        }
+    }
+
+    /**
+     * 根据ID查找角色
+     */
+    findCharacterById(characterId) {
+        if (!this.currentScene?.characters) {
+            return null;
+        }
+
+        return this.currentScene.characters.find(char => char.id === characterId);
+    }
+
+    /**
+     * 获取角色情绪徽章
+     */
+    getCharacterMoodBadge(character) {
+        // 从最近的对话中获取情绪信息
+        const recentEmotion = this.getCharacterRecentEmotion(character.id);
+
+        if (recentEmotion) {
+            const emotionColors = {
+                '开心': 'bg-success',
+                '悲伤': 'bg-primary',
+                '愤怒': 'bg-danger',
+                '惊讶': 'bg-warning',
+                '恐惧': 'bg-dark',
+                '厌恶': 'bg-secondary',
+                '中性': 'bg-light text-dark'
+            };
+
+            const colorClass = emotionColors[recentEmotion] || 'bg-light text-dark';
+            return `<span class="badge ${colorClass}">${recentEmotion}</span>`;
+        }
+
+        return '<span class="badge bg-light text-dark">平静</span>';
+    }
+
+    /**
+     * 获取角色最近的情绪
+     */
+    getCharacterRecentEmotion(characterId) {
+        if (!this.conversations || this.conversations.length === 0) {
+            return null;
+        }
+
+        // 从最近的对话中查找该角色的情绪
+        for (let i = this.conversations.length - 1; i >= 0; i--) {
+            const conv = this.conversations[i];
+            if (conv.speaker_id === characterId && conv.emotion) {
+                return conv.emotion;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * 获取角色互动次数
+     */
+    getCharacterInteractionCount(characterId) {
+        if (!this.conversations) return 0;
+
+        return this.conversations.filter(conv => conv.speaker_id === characterId).length;
+    }
+
+    /**
+     * 获取角色最后互动时间
+     */
+    getCharacterLastInteractionTime(characterId) {
+        if (!this.conversations) return '从未';
+
+        const characterConvs = this.conversations.filter(conv => conv.speaker_id === characterId);
+        if (characterConvs.length === 0) return '从未';
+
+        const lastConv = characterConvs[characterConvs.length - 1];
+        return Utils.formatTime(lastConv.timestamp, 'relative');
+    }
+
+    /**
+     * 开始与指定角色对话
+     */
+    startChatWithCharacter(characterId) {
+        // 选择角色并启用聊天界面
+        this.selectCharacter(characterId);
+
+        // 聚焦到消息输入框
+        const messageInput = document.getElementById('message-input');
+        if (messageInput) {
+            messageInput.focus();
+        }
+
+        // 滚动到聊天区域
+        const chatContainer = document.getElementById('chat-container');
+        if (chatContainer) {
+            chatContainer.scrollIntoView({ behavior: 'smooth' });
+        }
+    }
+
+    /**
+     * 查看角色对话历史
+     */
+    async viewCharacterHistory(characterId) {
+        try {
+            // 获取与该角色的对话历史
+            const characterConversations = this.conversations.filter(conv =>
+                conv.speaker_id === characterId ||
+                (conv.speaker_id === 'user' && this.selectedCharacter === characterId)
+            );
+
+            if (characterConversations.length === 0) {
+                Utils.showInfo('暂无与该角色的对话记录');
+                return;
+            }
+
+            // 创建历史记录模态框
+            this.showCharacterHistoryModal(characterId, characterConversations);
+
+        } catch (error) {
+            console.error('查看角色历史失败:', error);
+            Utils.showError('查看历史记录失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 显示角色历史记录模态框
+     */
+    showCharacterHistoryModal(characterId, conversations) {
+        const character = this.findCharacterById(characterId);
+        if (!character) return;
+
+        // 移除已存在的模态框
+        const existingModal = document.getElementById('character-history-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'character-history-modal';
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-clock-history"></i> 
+                        与 ${Utils.escapeHtml(character.name)} 的对话记录
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="conversation-history" style="max-height: 400px; overflow-y: auto;">
+                        ${conversations.map(conv => `
+                            <div class="history-message mb-3 ${conv.speaker_id === 'user' ? 'user-message' : 'character-message'}">
+                                <div class="message-header d-flex justify-content-between mb-1">
+                                    <strong class="${conv.speaker_id === 'user' ? 'text-primary' : 'text-success'}">
+                                        ${conv.speaker_id === 'user' ? '你' : character.name}
+                                    </strong>
+                                    <small class="text-muted">${Utils.formatTime(conv.timestamp)}</small>
+                                </div>
+                                <div class="message-content">
+                                    ${Utils.escapeHtml(conv.content)}
+                                    ${conv.emotion ? `<div class="message-emotion mt-1"><span class="badge bg-light text-dark">${conv.emotion}</span></div>` : ''}
+                                </div>
+                            </div>
+                        `).join('')}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-primary" onclick="app.exportCharacterHistory('${characterId}')">
+                        <i class="bi bi-download"></i> 导出记录
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(modal);
+
+        // 显示模态框
+        if (typeof bootstrap !== 'undefined') {
+            const bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+        }
+    }
+
+    /**
+     * 显示角色详细信息模态框
+     */
+    showCharacterDetails(characterId) {
+        const character = this.findCharacterById(characterId);
+        if (!character) return;
+
+        // 创建详细信息模态框
+        const existingModal = document.getElementById('character-details-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'character-details-modal';
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-person-badge"></i> 
+                        ${Utils.escapeHtml(character.name)} - 详细档案
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="character-full-details">
+                        <!-- 完整的角色信息展示 -->
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="character-avatar-large text-center mb-3">
+                                    ${character.avatar ?
+                `<img src="${character.avatar}" alt="${character.name}" class="rounded-circle" width="150" height="150">` :
+                `<div class="avatar-placeholder-large rounded-circle bg-primary text-white d-flex align-items-center justify-content-center mx-auto" style="width: 150px; height: 150px; font-size: 3rem;">${character.name[0]}</div>`
+            }
+                                    <h4 class="mt-3">${Utils.escapeHtml(character.name)}</h4>
+                                    <p class="text-muted">${Utils.escapeHtml(character.role || '角色')}</p>
+                                </div>
+                            </div>
+                            <div class="col-md-8">
+                                <!-- 详细信息内容 -->
+                                ${this.renderCharacterFullDetails(character)}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <button type="button" class="btn btn-outline-primary" onclick="app.editCharacter('${characterId}')">
+                        <i class="bi bi-pencil"></i> 编辑
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(modal);
+
+        // 显示模态框
+        if (typeof bootstrap !== 'undefined') {
+            const bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+        }
+    }
+
+    /**
+     * 渲染角色完整详细信息
+     */
+    renderCharacterFullDetails(character) {
+        return `
+        <div class="character-details-tabs">
+            <ul class="nav nav-tabs" role="tablist">
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#basic-info" type="button" role="tab">基本信息</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#personality" type="button" role="tab">性格特征</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#relationships" type="button" role="tab">人际关系</button>
+                </li>
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#statistics" type="button" role="tab">互动统计</button>
+                </li>
+            </ul>
+            
+            <div class="tab-content mt-3">
+                <div class="tab-pane fade show active" id="basic-info" role="tabpanel">
+                    ${this.renderBasicInfoTab(character)}
+                </div>
+                <div class="tab-pane fade" id="personality" role="tabpanel">
+                    ${this.renderPersonalityTab(character)}
+                </div>
+                <div class="tab-pane fade" id="relationships" role="tabpanel">
+                    ${this.renderRelationshipsTab(character)}
+                </div>
+                <div class="tab-pane fade" id="statistics" role="tabpanel">
+                    ${this.renderStatisticsTab(character)}
+                </div>
+            </div>
+        </div>
+    `;
+    }
+
+    /**
+     * 渲染基本信息标签页
+     */
+    renderBasicInfoTab(character) {
+        return `
+        <div class="basic-info-content">
+            <div class="info-group mb-3">
+                <label class="fw-bold">描述：</label>
+                <p>${Utils.escapeHtml(character.description || '暂无描述')}</p>
+            </div>
+            
+            <div class="info-group mb-3">
+                <label class="fw-bold">背景：</label>
+                <p>${Utils.escapeHtml(character.background || '暂无背景信息')}</p>
+            </div>
+            
+            ${character.age ? `
+                <div class="info-group mb-3">
+                    <label class="fw-bold">年龄：</label>
+                    <p>${Utils.escapeHtml(character.age)}</p>
+                </div>
+            ` : ''}
+            
+            <div class="info-group mb-3">
+                <label class="fw-bold">创建时间：</label>
+                <p>${Utils.formatTime(character.created_at || new Date())}</p>
+            </div>
+        </div>
+    `;
+    }
+
+    /**
+     * 渲染性格特征标签页
+     */
+    renderPersonalityTab(character) {
+        return `
+        <div class="personality-content">
+            <div class="info-group mb-3">
+                <label class="fw-bold">性格描述：</label>
+                <p>${Utils.escapeHtml(character.personality || '暂无性格描述')}</p>
+            </div>
+            
+            ${character.speech_style ? `
+                <div class="info-group mb-3">
+                    <label class="fw-bold">说话风格：</label>
+                    <p>${Utils.escapeHtml(character.speech_style)}</p>
+                </div>
+            ` : ''}
+            
+            ${character.knowledge && character.knowledge.length > 0 ? `
+                <div class="info-group mb-3">
+                    <label class="fw-bold">知识领域：</label>
+                    <ul class="list-unstyled">
+                        ${character.knowledge.map(item => `
+                            <li><i class="bi bi-check2 text-success"></i> ${Utils.escapeHtml(item)}</li>
+                        `).join('')}
+                    </ul>
+                </div>
+            ` : ''}
+        </div>
+    `;
+    }
+
+    /**
+     * 渲染人际关系标签页
+     */
+    renderRelationshipsTab(character) {
+        if (!character.relationships || Object.keys(character.relationships).length === 0) {
+            return '<p class="text-muted">暂无人际关系信息</p>';
+        }
+
+        return `
+        <div class="relationships-content">
+            <div class="relationships-grid">
+                ${Object.entries(character.relationships).map(([name, relation]) => `
+                    <div class="relationship-card card mb-2">
+                        <div class="card-body p-3">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <div class="relationship-info">
+                                    <h6 class="mb-1">${Utils.escapeHtml(name)}</h6>
+                                    <span class="badge bg-primary">${Utils.escapeHtml(relation)}</span>
+                                </div>
+                                <i class="bi bi-person-lines-fill fs-4 text-muted"></i>
+                            </div>
+                        </div>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+    }
+
+    /**
+     * 渲染统计信息标签页
+     */
+    renderStatisticsTab(character) {
+        const interactionCount = this.getCharacterInteractionCount(character.id);
+        const lastInteraction = this.getCharacterLastInteractionTime(character.id);
+        const recentEmotion = this.getCharacterRecentEmotion(character.id);
+
+        return `
+        <div class="statistics-content">
+            <div class="stats-grid row g-3">
+                <div class="col-md-6">
+                    <div class="stat-card card">
+                        <div class="card-body text-center">
+                            <i class="bi bi-chat-dots fs-1 text-primary"></i>
+                            <h4 class="mt-2">${interactionCount}</h4>
+                            <p class="text-muted">对话次数</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="col-md-6">
+                    <div class="stat-card card">
+                        <div class="card-body text-center">
+                            <i class="bi bi-clock fs-1 text-success"></i>
+                            <h5 class="mt-2">${lastInteraction}</h5>
+                            <p class="text-muted">最后互动</p>
+                        </div>
+                    </div>
+                </div>
+                
+                ${recentEmotion ? `
+                    <div class="col-md-6">
+                        <div class="stat-card card">
+                            <div class="card-body text-center">
+                                <i class="bi bi-emoji-smile fs-1 text-warning"></i>
+                                <h5 class="mt-2">${recentEmotion}</h5>
+                                <p class="text-muted">当前情绪</p>
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+                
+                <div class="col-md-6">
+                    <div class="stat-card card">
+                        <div class="card-body text-center">
+                            <i class="bi bi-graph-up fs-1 text-info"></i>
+                            <h5 class="mt-2">活跃</h5>
+                            <p class="text-muted">互动状态</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    }
+
+    /**
+     * 导出角色历史记录
+     */
+    async exportCharacterHistory(characterId) {
+        try {
+            const character = this.findCharacterById(characterId);
+            if (!character) {
+                Utils.showError('未找到角色信息');
+                return;
+            }
+
+            const characterConversations = this.conversations.filter(conv =>
+                conv.speaker_id === characterId ||
+                (conv.speaker_id === 'user' && this.selectedCharacter === characterId)
+            );
+
+            if (characterConversations.length === 0) {
+                Utils.showInfo('没有可导出的对话记录');
+                return;
+            }
+
+            const exportData = {
+                character: {
+                    id: character.id,
+                    name: character.name,
+                    role: character.role
+                },
+                scene: {
+                    id: this.currentScene.id,
+                    name: this.currentScene.name
+                },
+                conversations: characterConversations,
+                export_time: new Date().toISOString(),
+                total_messages: characterConversations.length
+            };
+
+            const content = JSON.stringify(exportData, null, 2);
+            const filename = `chat_history_${character.name}_${Date.now()}.json`;
+
+            // 创建下载
+            const blob = new Blob([content], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            Utils.showSuccess('对话记录导出成功');
+
+        } catch (error) {
+            console.error('导出历史记录失败:', error);
+            Utils.showError('导出失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 编辑角色信息 (预留接口)
+     */
+    editCharacter(characterId) {
+        Utils.showInfo('角色编辑功能正在开发中...');
+        // 这里将来可以集成角色编辑功能
+    }
+
     /**
      * 启用聊天界面
      */
@@ -440,41 +2309,52 @@ class SceneApp {
             messageInput.value = '';
 
             // 使用聚合交互API
-            const response = await API.processInteractionAggregate({
+            const response = await API.createInteraction({
                 scene_id: this.currentScene.id,
-                character_ids: [this.selectedCharacter],
+                character_id: this.selectedCharacter,
                 message: message,
                 interaction_type: 'chat',
                 context: {
                     use_emotion: true,
-                    include_story_update: this.state.storyMode
+                    include_story_update: this.state.storyMode,
+                    user_preferences: this.currentUser?.preferences
                 }
             });
 
-            // 处理响应
-            if (response.character_response) {
-                this.addMessageToChat({
-                    speaker_id: this.selectedCharacter,
-                    content: response.character_response.content,
-                    emotion: response.character_response.emotion,
-                    timestamp: new Date()
-                });
-            }
+            // 处理响应 - 适配后端返回格式
+            if (response.success || response.data) {
+                const responseData = response.data || response;
 
-            // 更新故事状态（如果启用了故事模式）
-            if (response.story_update && this.state.storyMode) {
-                this.updateStoryDisplay(response.story_update);
-            }
+                if (responseData.character_response) {
+                    this.addMessageToChat({
+                        speaker_id: this.selectedCharacter,
+                        content: responseData.character_response.content || responseData.character_response.message,
+                        emotion: responseData.character_response.emotion,
+                        timestamp: new Date()
+                    });
 
-            // 记录统计
-            if (response.stats) {
-                this.updateStats(response.stats);
+                    // 更新对话列表
+                    this.conversations.push({
+                        speaker_id: 'user',
+                        content: message,
+                        timestamp: new Date()
+                    }, {
+                        speaker_id: this.selectedCharacter,
+                        content: responseData.character_response.content || responseData.character_response.message,
+                        emotion: responseData.character_response.emotion,
+                        timestamp: new Date()
+                    });
+                }
+
+                // 更新故事状态
+                if (responseData.story_update && this.state.storyMode) {
+                    this.updateStoryDisplay(responseData.story_update);
+                }
             }
 
         } catch (error) {
             Utils.showError('发送消息失败: ' + error.message);
         } finally {
-            // 重新启用输入
             this.setInputState(true);
         }
     }
@@ -531,6 +2411,276 @@ class SceneApp {
     }
 
     /**
+     * 渲染故事操作按钮
+     */
+    renderStoryActions() {
+        const actionsContainer = document.getElementById('story-actions');
+        if (!actionsContainer) return;
+
+        actionsContainer.innerHTML = `
+        <div class="story-actions-header mb-3">
+            <h6 class="mb-0">
+                <i class="bi bi-gear"></i> 故事操作
+            </h6>
+        </div>
+        <div class="story-action-buttons">
+            <div class="btn-group flex-wrap" role="group">
+                <button class="btn btn-outline-primary" onclick="app.advanceStory()" ${!this.storyData ? 'disabled' : ''}>
+                    <i class="bi bi-play-circle"></i> 推进故事
+                </button>
+                <button class="btn btn-outline-secondary" onclick="app.refreshStoryData()" title="刷新故事数据">
+                    <i class="bi bi-arrow-clockwise"></i> 刷新
+                </button>
+                <button class="btn btn-outline-info" onclick="app.viewStoryBranches()" ${!this.storyData?.nodes ? 'disabled' : ''}>
+                    <i class="bi bi-diagram-3"></i> 查看分支
+                </button>
+                <button class="btn btn-outline-warning" onclick="app.exportStoryData()" ${!this.storyData ? 'disabled' : ''}>
+                    <i class="bi bi-download"></i> 导出故事
+                </button>
+                <button class="btn btn-outline-danger" onclick="app.resetStory()" ${!this.storyData ? 'disabled' : ''}>
+                    <i class="bi bi-arrow-counterclockwise"></i> 重置故事
+                </button>
+            </div>
+        </div>
+        
+        ${this.storyData ? `
+            <div class="story-info mt-3">
+                <div class="row g-2">
+                    <div class="col-sm-6">
+                        <div class="story-stat">
+                            <small class="text-muted">当前状态:</small>
+                            <div class="fw-medium">${this.storyData.current_state || '开始'}</div>
+                        </div>
+                    </div>
+                    <div class="col-sm-6">
+                        <div class="story-stat">
+                            <small class="text-muted">节点数量:</small>
+                            <div class="fw-medium">${this.storyData.nodes?.length || 0}</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        ` : ''}
+    `;
+    }
+
+    /**
+ * 刷新故事数据
+ */
+    async refreshStoryData() {
+        try {
+            this.setState({ isLoading: true });
+
+            const storyData = await API.getStoryData(this.currentScene.id);
+            this.storyData = storyData;
+
+            // 重新渲染故事界面
+            this.renderStoryInterface();
+
+            Utils.showSuccess('故事数据已刷新');
+        } catch (error) {
+            Utils.showError('刷新故事数据失败: ' + error.message);
+        } finally {
+            this.setState({ isLoading: false });
+        }
+    }
+
+    /**
+     * 查看故事分支
+     */
+    async viewStoryBranches() {
+        try {
+            const branches = await API.getStoryBranches(this.currentScene.id);
+
+            // 创建分支查看模态框
+            this.showStoryBranchesModal(branches);
+
+        } catch (error) {
+            Utils.showError('获取故事分支失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 显示故事分支模态框
+     */
+    showStoryBranchesModal(branches) {
+        // 移除已存在的模态框
+        const existingModal = document.getElementById('story-branches-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'story-branches-modal';
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-diagram-3"></i> 故事分支图
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    ${this.renderBranchesTree(branches)}
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(modal);
+
+        // 显示模态框
+        if (typeof bootstrap !== 'undefined') {
+            const bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+        }
+    }
+
+    /**
+     * 渲染分支树
+     */
+    renderBranchesTree(branches) {
+        if (!branches || !branches.nodes) {
+            return '<p class="text-muted">暂无故事分支数据</p>';
+        }
+
+        return `
+        <div class="story-branches-tree">
+            ${branches.nodes.map((node, index) => `
+                <div class="branch-node ${node.is_revealed ? 'revealed' : 'hidden'}" data-node-id="${node.id}">
+                    <div class="node-header">
+                        <span class="node-number">${index + 1}</span>
+                        <span class="node-title">${Utils.escapeHtml(node.content.substring(0, 50))}...</span>
+                        ${node.is_revealed ?
+                '<span class="badge bg-success">已解锁</span>' :
+                '<span class="badge bg-secondary">未解锁</span>'
+            }
+                    </div>
+                    ${node.choices && node.choices.length > 0 ? `
+                        <div class="node-choices mt-2">
+                            ${node.choices.map(choice => `
+                                <div class="choice-item ${choice.selected ? 'selected' : ''}">
+                                    <i class="bi bi-arrow-right"></i>
+                                    ${Utils.escapeHtml(choice.text)}
+                                    ${choice.selected ? '<i class="bi bi-check-circle text-success"></i>' : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                    ` : ''}
+                </div>
+            `).join('')}
+        </div>
+    `;
+    }
+
+    /**
+     * 导出故事数据
+     */
+    async exportStoryData(format = 'json') {
+        try {
+            const result = await API.exportStoryDocument(this.currentScene.id, format);
+
+            // 处理下载
+            let content, mimeType, filename;
+
+            if (typeof result === 'string') {
+                content = result;
+            } else if (result.content) {
+                content = result.content;
+            } else {
+                content = JSON.stringify(result, null, 2);
+            }
+
+            switch (format) {
+                case 'json':
+                    mimeType = 'application/json';
+                    break;
+                case 'markdown':
+                case 'md':
+                    mimeType = 'text/markdown';
+                    break;
+                case 'txt':
+                    mimeType = 'text/plain';
+                    break;
+                default:
+                    mimeType = 'application/octet-stream';
+            }
+
+            filename = `story_${this.currentScene.id}_${Date.now()}.${format}`;
+
+            // 创建下载
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            Utils.showSuccess('故事数据导出成功');
+        } catch (error) {
+            Utils.showError('导出故事数据失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 重置故事
+     */
+    async resetStory() {
+        try {
+            const confirmed = confirm('确定要重置整个故事吗？这将清除所有进度和选择记录。');
+            if (!confirmed) return;
+
+            this.setState({ isLoading: true });
+
+            // 传递当前用户偏好设置（如果有的话）
+            await API.resetStory(this.currentScene.id, this.currentUser?.preferences || null);
+
+            // 重新加载故事数据
+            await this.refreshStoryData();
+
+            Utils.showSuccess('故事已重置');
+        } catch (error) {
+            Utils.showError('重置故事失败: ' + error.message);
+        } finally {
+            this.setState({ isLoading: false });
+        }
+    }
+
+    /**
+     * 更新故事显示 - 处理实时故事更新
+     */
+    updateStoryDisplay(storyUpdate) {
+        if (!storyUpdate) return;
+
+        // 更新故事数据
+        if (storyUpdate.story_data) {
+            this.storyData = storyUpdate.story_data;
+        }
+
+        // 显示更新通知
+        if (storyUpdate.new_content) {
+            Utils.showInfo('故事更新: ' + storyUpdate.new_content);
+        }
+
+        // 重新渲染故事界面
+        this.renderStoryInterface();
+
+        // 滚动到新内容
+        setTimeout(() => {
+            const storyContainer = document.getElementById('story-container');
+            if (storyContainer) {
+                storyContainer.scrollTop = storyContainer.scrollHeight;
+            }
+        }, 100);
+    }
+
+    /**
      * 创建故事节点元素
      */
     createStoryNodeElement(node) {
@@ -572,7 +2722,7 @@ class SceneApp {
             this.setState({ isLoading: true });
 
             const result = await API.makeStoryChoice(
-                this.currentScene.id,
+                this.currentScene.id,   // sceneId
                 nodeId,
                 choiceId,
                 this.currentUser?.preferences
@@ -580,7 +2730,7 @@ class SceneApp {
 
             if (result.success) {
                 // 更新故事数据
-                this.storyData = result.story_data;
+                this.storyData = result.story_data || result.data;
 
                 // 重新渲染故事界面
                 this.renderStoryInterface();
@@ -608,10 +2758,10 @@ class SceneApp {
             );
 
             if (result.success) {
-                this.storyData = result.story_data;
+                this.storyData = result.story_data || result.data;
                 this.renderStoryInterface();
 
-                Utils.showSuccess('故事已推进: ' + result.new_content);
+                Utils.showSuccess('故事已推进: ' + result.new_content || '继续');
             }
 
         } catch (error) {
@@ -659,13 +2809,419 @@ class SceneApp {
             // 渲染用户信息
             this.renderUserProfile();
 
-            // 加载用户道具和技能
-            await this.loadUserItems(userId);
-            await this.loadUserSkills(userId);
+            // 并行加载用户相关数据
+            await Promise.all([
+                this.loadUserItems(userId),
+                this.loadUserSkills(userId)
+            ]);
 
         } catch (error) {
             Utils.showError('加载用户档案失败: ' + error.message);
         }
+    }
+
+    /**
+     * 渲染用户档案信息
+     */
+    renderUserProfile() {
+        const profileContainer = this.getUserProfileContainer();
+        if (!profileContainer) {
+            console.warn('未找到用户档案容器');
+            return;
+        }
+
+        // 如果没有当前用户数据，显示默认状态
+        if (!this.currentUser) {
+            profileContainer.innerHTML = `
+            <div class="user-profile-placeholder text-center text-muted py-4">
+                <i class="bi bi-person-circle fs-1"></i>
+                <p class="mt-2">用户信息加载中...</p>
+                <button class="btn btn-primary btn-sm" onclick="app.loadDefaultUserProfile()">
+                    <i class="bi bi-person-plus"></i> 加载默认用户
+                </button>
+            </div>
+        `;
+            return;
+        }
+
+        // 渲染用户基本信息
+        profileContainer.innerHTML = `
+        <div class="user-profile-card">
+            <!-- 用户头像和基本信息 -->
+            <div class="user-header mb-3">
+                <div class="d-flex align-items-center">
+                    <div class="user-avatar me-3">
+                        ${this.currentUser.avatar ?
+                `<img src="${this.currentUser.avatar}" alt="${this.currentUser.display_name || this.currentUser.username}" class="rounded-circle" width="64" height="64">` :
+                `<div class="avatar-placeholder rounded-circle bg-primary text-white d-flex align-items-center justify-content-center" style="width: 64px; height: 64px; font-size: 1.5rem;">
+                                ${(this.currentUser.display_name || this.currentUser.username || 'U')[0].toUpperCase()}
+                            </div>`
+            }
+                    </div>
+                    <div class="user-basic-info">
+                        <h5 class="mb-1">${Utils.escapeHtml(this.currentUser.display_name || this.currentUser.username || '未命名用户')}</h5>
+                        <div class="user-id text-muted mb-1">ID: ${Utils.escapeHtml(this.currentUser.id || 'unknown')}</div>
+                        <div class="user-status">
+                            <span class="badge bg-success">在线</span>
+                            ${this.currentUser.preferences ? '<span class="badge bg-info">已配置</span>' : '<span class="badge bg-warning">待配置</span>'}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 用户详细信息 -->
+            <div class="user-details">
+                <!-- 个人简介 -->
+                ${this.currentUser.bio ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-card-text"></i> 个人简介
+                        </h6>
+                        <div class="info-content">
+                            <p class="user-bio">${Utils.escapeHtml(this.currentUser.bio)}</p>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 统计信息 -->
+                <div class="info-section mb-3">
+                    <h6 class="section-title">
+                        <i class="bi bi-graph-up"></i> 统计信息
+                    </h6>
+                    <div class="info-content">
+                        <div class="user-stats">
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <div class="stat-card text-center">
+                                        <div class="stat-number">${this.currentUser.items_count || 0}</div>
+                                        <div class="stat-label">道具数量</div>
+                                    </div>
+                                </div>
+                                <div class="col-6">
+                                    <div class="stat-card text-center">
+                                        <div class="stat-number">${this.currentUser.skills_count || 0}</div>
+                                        <div class="stat-label">技能数量</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 用户偏好设置 -->
+                ${this.currentUser.preferences ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-gear"></i> 偏好设置
+                        </h6>
+                        <div class="info-content">
+                            <div class="preferences-summary">
+                                <div class="row g-2">
+                                    <div class="col-sm-6">
+                                        <small class="text-muted">创意等级:</small>
+                                        <div class="fw-medium">${this.formatCreativityLevel(this.currentUser.preferences.creativity_level)}</div>
+                                    </div>
+                                    <div class="col-sm-6">
+                                        <small class="text-muted">响应长度:</small>
+                                        <div class="fw-medium">${this.formatResponseLength(this.currentUser.preferences.response_length)}</div>
+                                    </div>
+                                    <div class="col-sm-6">
+                                        <small class="text-muted">语言风格:</small>
+                                        <div class="fw-medium">${this.formatLanguageStyle(this.currentUser.preferences.language_style)}</div>
+                                    </div>
+                                    <div class="col-sm-6">
+                                        <small class="text-muted">主题模式:</small>
+                                        <div class="fw-medium">${this.currentUser.preferences.dark_mode ? '深色' : '浅色'}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 保存的场景 -->
+                ${this.currentUser.saved_scenes && this.currentUser.saved_scenes.length > 0 ? `
+                    <div class="info-section mb-3">
+                        <h6 class="section-title">
+                            <i class="bi bi-bookmark"></i> 保存的场景
+                        </h6>
+                        <div class="info-content">
+                            <div class="saved-scenes-list">
+                                ${this.currentUser.saved_scenes.slice(0, 3).map(sceneId => `
+                                    <div class="saved-scene-item">
+                                        <i class="bi bi-bookmark-check"></i>
+                                        <span class="scene-link" onclick="app.navigateToScene('${sceneId}')">${sceneId}</span>
+                                    </div>
+                                `).join('')}
+                                ${this.currentUser.saved_scenes.length > 3 ? `
+                                    <div class="more-scenes text-muted">
+                                        还有 ${this.currentUser.saved_scenes.length - 3} 个场景...
+                                    </div>
+                                ` : ''}
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                <!-- 操作按钮 -->
+                <div class="user-actions mt-3">
+                    <div class="btn-group w-100" role="group">
+                        <button class="btn btn-primary" onclick="app.editUserProfile()">
+                            <i class="bi bi-pencil"></i> 编辑档案
+                        </button>
+                        <button class="btn btn-outline-secondary" onclick="app.manageUserItems()">
+                            <i class="bi bi-bag"></i> 管理道具
+                        </button>
+                        <button class="btn btn-outline-info" onclick="app.manageUserSkills()">
+                            <i class="bi bi-lightning"></i> 管理技能
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+
+        // 确保容器可见
+        profileContainer.style.display = 'block';
+
+        // 添加显示动画
+        profileContainer.classList.add('user-profile-animate');
+        setTimeout(() => {
+            profileContainer.classList.remove('user-profile-animate');
+        }, 300);
+    }
+
+    /**
+     * 获取用户档案容器
+     */
+    getUserProfileContainer() {
+        // 尝试多个可能的容器ID
+        const containerIds = ['user-profile-container', 'user-profile', 'profile-container'];
+
+        for (const id of containerIds) {
+            const container = document.getElementById(id);
+            if (container) return container;
+        }
+
+        // 如果没有找到专门的容器，尝试在现有容器中创建
+        const parentContainer = document.querySelector('.dashboard-content, .main-content, .content');
+        if (parentContainer) {
+            const newContainer = document.createElement('div');
+            newContainer.id = 'user-profile-container';
+            newContainer.className = 'user-profile-section';
+            parentContainer.appendChild(newContainer);
+            return newContainer;
+        }
+
+        return null;
+    }
+
+    /**
+     * 加载默认用户档案
+     */
+    async loadDefaultUserProfile() {
+        try {
+            const defaultUserId = 'user_default';
+            await this.loadUserProfile(defaultUserId);
+        } catch (error) {
+            console.error('加载默认用户档案失败:', error);
+            Utils.showError('加载用户档案失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 编辑用户档案
+     */
+    editUserProfile() {
+        // 检查是否有独立的用户档案管理器
+        if (typeof window.userProfile !== 'undefined' && window.userProfile.showEditProfileModal) {
+            window.userProfile.showEditProfileModal(this.currentUser.id);
+            return;
+        }
+
+        // 后备方案：显示简单的编辑模态框
+        this.showSimpleEditProfileModal();
+    }
+
+    /**
+     * 显示简单的编辑档案模态框
+     */
+    showSimpleEditProfileModal() {
+        // 移除已存在的模态框
+        const existingModal = document.getElementById('edit-profile-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'edit-profile-modal';
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-pencil"></i> 编辑用户档案
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="edit-profile-form">
+                        <div class="mb-3">
+                            <label for="edit-display-name" class="form-label">显示名称</label>
+                            <input type="text" class="form-control" id="edit-display-name" 
+                                   value="${Utils.escapeHtml(this.currentUser.display_name || '')}" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="edit-bio" class="form-label">个人简介</label>
+                            <textarea class="form-control" id="edit-bio" rows="3" 
+                                      placeholder="介绍一下自己...">${Utils.escapeHtml(this.currentUser.bio || '')}</textarea>
+                        </div>
+                        <div class="mb-3">
+                            <label for="edit-avatar" class="form-label">头像URL</label>
+                            <input type="url" class="form-control" id="edit-avatar" 
+                                   value="${Utils.escapeHtml(this.currentUser.avatar || '')}" 
+                                   placeholder="https://example.com/avatar.jpg">
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary" onclick="app.saveUserProfile()">
+                        <i class="bi bi-check"></i> 保存更改
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(modal);
+
+        // 显示模态框
+        if (typeof bootstrap !== 'undefined') {
+            const bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+        }
+    }
+
+    /**
+     * 保存用户档案
+     */
+    async saveUserProfile() {
+        try {
+            const form = document.getElementById('edit-profile-form');
+            if (!form) return;
+
+            const profileData = {
+                display_name: document.getElementById('edit-display-name').value.trim(),
+                bio: document.getElementById('edit-bio').value.trim(),
+                avatar: document.getElementById('edit-avatar').value.trim()
+            };
+
+            // 验证数据
+            if (!profileData.display_name) {
+                Utils.showError('显示名称不能为空');
+                return;
+            }
+
+            // 保存到后端
+            const updatedProfile = await API.updateUserProfile(this.currentUser.id, profileData);
+
+            // 更新本地数据
+            Object.assign(this.currentUser, updatedProfile);
+
+            // 重新渲染
+            this.renderUserProfile();
+
+            // 关闭模态框
+            const modal = bootstrap.Modal.getInstance(document.getElementById('edit-profile-modal'));
+            if (modal) {
+                modal.hide();
+            }
+
+            Utils.showSuccess('用户档案更新成功');
+
+        } catch (error) {
+            console.error('保存用户档案失败:', error);
+            Utils.showError('保存失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 管理用户道具
+     */
+    manageUserItems() {
+        // 检查是否有独立的用户档案管理器
+        if (typeof window.userProfile !== 'undefined') {
+            // 导航到用户档案页面的道具部分
+            window.location.href = `/user/profile?user_id=${this.currentUser.id}&tab=items`;
+            return;
+        }
+
+        // 后备方案：简单提示
+        Utils.showInfo('请前往用户档案页面管理道具');
+    }
+
+    /**
+     * 管理用户技能
+     */
+    manageUserSkills() {
+        // 检查是否有独立的用户档案管理器
+        if (typeof window.userProfile !== 'undefined') {
+            // 导航到用户档案页面的技能部分
+            window.location.href = `/user/profile?user_id=${this.currentUser.id}&tab=skills`;
+            return;
+        }
+
+        // 后备方案：调用app.js中的技能管理方法
+        if (this.initSkillsManagement) {
+            this.initSkillsManagement(this.currentUser.id);
+        } else {
+            Utils.showInfo('请前往用户档案页面管理技能');
+        }
+    }
+
+    /**
+     * 导航到指定场景
+     */
+    navigateToScene(sceneId) {
+        window.location.href = `/scenes/${sceneId}`;
+    }
+
+    /**
+     * 格式化创意等级
+     */
+    formatCreativityLevel(level) {
+        const levels = {
+            'STRICT': '严格',
+            'BALANCED': '平衡',
+            'EXPANSIVE': '扩展'
+        };
+        return levels[level] || level;
+    }
+
+    /**
+     * 格式化响应长度
+     */
+    formatResponseLength(length) {
+        const lengths = {
+            'short': '简短',
+            'medium': '中等',
+            'long': '详细'
+        };
+        return lengths[length] || length;
+    }
+
+    /**
+     * 格式化语言风格
+     */
+    formatLanguageStyle(style) {
+        const styles = {
+            'formal': '正式',
+            'casual': '随意',
+            'literary': '文学'
+        };
+        return styles[style] || style;
     }
 
     /**
@@ -685,14 +3241,570 @@ class SceneApp {
     }
 
     /**
+     * 显示添加道具模态框
+     */
+    showAddItemModal(userId) {
+        if (!userId) {
+            Utils.showError('请先指定用户ID');
+            return;
+        }
+
+        // 检查是否有独立的用户档案管理器
+        if (typeof window.userProfile !== 'undefined' && window.userProfile.showAddItemModal) {
+            window.userProfile.showAddItemModal();
+            return;
+        }
+
+        // 后备方案：创建简单的添加道具模态框
+        this.createAddItemModal(userId);
+    }
+
+    /**
+     * 创建添加道具模态框
+     */
+    createAddItemModal(userId) {
+        // 移除已存在的模态框
+        const existingModal = document.getElementById('add-item-modal');
+        if (existingModal) {
+            existingModal.remove();
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'add-item-modal';
+        modal.className = 'modal fade';
+        modal.innerHTML = `
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-bag-plus"></i> 添加新道具
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="add-item-form">
+                        <div class="row g-3">
+                            <!-- 基本信息 -->
+                            <div class="col-12">
+                                <h6 class="border-bottom pb-2 mb-3">
+                                    <i class="bi bi-info-circle"></i> 基本信息
+                                </h6>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <label for="item-name" class="form-label">道具名称 *</label>
+                                <input type="text" class="form-control" id="item-name" 
+                                       placeholder="输入道具名称" required>
+                                <div class="form-text">道具的显示名称</div>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <label for="item-type" class="form-label">道具类型</label>
+                                <select class="form-select" id="item-type">
+                                    <option value="">选择类型</option>
+                                    <option value="weapon">武器</option>
+                                    <option value="armor">护甲</option>
+                                    <option value="consumable">消耗品</option>
+                                    <option value="tool">工具</option>
+                                    <option value="key_item">关键物品</option>
+                                    <option value="accessory">饰品</option>
+                                    <option value="material">材料</option>
+                                    <option value="other">其他</option>
+                                </select>
+                                <div class="form-text">道具的分类</div>
+                            </div>
+                            
+                            <div class="col-12">
+                                <label for="item-description" class="form-label">道具描述</label>
+                                <textarea class="form-control" id="item-description" rows="3" 
+                                          placeholder="描述道具的外观、用途等..."></textarea>
+                                <div class="form-text">详细描述道具的特征和用途</div>
+                            </div>
+
+                            <!-- 属性配置 -->
+                            <div class="col-12 mt-4">
+                                <h6 class="border-bottom pb-2 mb-3">
+                                    <i class="bi bi-sliders"></i> 属性配置
+                                </h6>
+                            </div>
+                            
+                            <div class="col-md-4">
+                                <label for="item-rarity" class="form-label">稀有度</label>
+                                <select class="form-select" id="item-rarity">
+                                    <option value="">选择稀有度</option>
+                                    <option value="common">普通</option>
+                                    <option value="uncommon">不常见</option>
+                                    <option value="rare">稀有</option>
+                                    <option value="epic">史诗</option>
+                                    <option value="legendary">传说</option>
+                                </select>
+                            </div>
+                            
+                            <div class="col-md-4">
+                                <label for="item-value" class="form-label">道具价值</label>
+                                <input type="number" class="form-control" id="item-value" 
+                                       placeholder="0" min="0" step="1">
+                                <div class="form-text">道具的经济价值</div>
+                            </div>
+                            
+                            <div class="col-md-4">
+                                <label for="item-quantity" class="form-label">数量</label>
+                                <input type="number" class="form-control" id="item-quantity" 
+                                       placeholder="1" min="1" step="1" value="1">
+                                <div class="form-text">拥有的数量</div>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <label for="item-durability" class="form-label">耐久度</label>
+                                <input type="number" class="form-control" id="item-durability" 
+                                       placeholder="100" min="0" max="100" step="1">
+                                <div class="form-text">道具的耐用程度 (0-100)</div>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <label for="item-weight" class="form-label">重量</label>
+                                <input type="number" class="form-control" id="item-weight" 
+                                       placeholder="0" min="0" step="0.1">
+                                <div class="form-text">道具重量 (kg)</div>
+                            </div>
+
+                            <!-- 效果配置 -->
+                            <div class="col-12 mt-4">
+                                <h6 class="border-bottom pb-2 mb-3">
+                                    <i class="bi bi-magic"></i> 效果配置
+                                </h6>
+                            </div>
+                            
+                            <div class="col-12">
+                                <label class="form-label">道具效果</label>
+                                <div id="item-effects-container">
+                                    <div class="effect-item row g-2 mb-2">
+                                        <div class="col-md-4">
+                                            <input type="text" class="form-control form-control-sm effect-type" 
+                                                   placeholder="效果类型 (如: attack_bonus)">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <input type="number" class="form-control form-control-sm effect-value" 
+                                                   placeholder="效果数值" step="0.1">
+                                        </div>
+                                        <div class="col-md-3">
+                                            <input type="number" class="form-control form-control-sm effect-duration" 
+                                                   placeholder="持续时间(秒)" min="0">
+                                        </div>
+                                        <div class="col-md-2">
+                                            <button type="button" class="btn btn-outline-danger btn-sm remove-effect-btn">
+                                                <i class="bi bi-x"></i>
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button type="button" class="btn btn-sm btn-outline-success" onclick="app.addItemEffectRow()">
+                                    <i class="bi bi-plus"></i> 添加效果
+                                </button>
+                                <div class="form-text mt-2">定义道具使用时产生的效果</div>
+                            </div>
+
+                            <!-- 使用限制 -->
+                            <div class="col-12 mt-4">
+                                <h6 class="border-bottom pb-2 mb-3">
+                                    <i class="bi bi-shield-check"></i> 使用限制
+                                </h6>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="item-consumable">
+                                    <label class="form-check-label" for="item-consumable">
+                                        消耗性道具
+                                    </label>
+                                    <div class="form-text">使用后会减少数量</div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-md-6">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="item-tradeable" checked>
+                                    <label class="form-check-label" for="item-tradeable">
+                                        可交易
+                                    </label>
+                                    <div class="form-text">允许与其他玩家交易</div>
+                                </div>
+                            </div>
+                            
+                            <div class="col-12">
+                                <label for="item-requirements" class="form-label">使用需求</label>
+                                <textarea class="form-control" id="item-requirements" rows="2" 
+                                          placeholder="例如: level >= 10, strength >= 15"></textarea>
+                                <div class="form-text">使用此道具所需的条件</div>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                    <button type="button" class="btn btn-primary save-item-btn" onclick="app.saveNewItem('${userId}')">
+                        <i class="bi bi-check"></i> 保存道具
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(modal);
+
+        // 绑定表单事件
+        this.bindAddItemEvents();
+
+        // 显示模态框
+        if (typeof bootstrap !== 'undefined') {
+            const bsModal = new bootstrap.Modal(modal);
+            bsModal.show();
+        }
+    }
+
+    /**
+     * 绑定添加道具表单事件
+     */
+    bindAddItemEvents() {
+        const form = document.getElementById('add-item-form');
+        if (!form) return;
+
+        // 实时验证
+        form.addEventListener('input', (e) => {
+            this.validateItemField(e.target);
+        });
+
+        // 移除效果行事件
+        form.addEventListener('click', (e) => {
+            if (e.target.matches('.remove-effect-btn') || e.target.closest('.remove-effect-btn')) {
+                const effectItem = e.target.closest('.effect-item');
+                if (effectItem && document.querySelectorAll('.effect-item').length > 1) {
+                    effectItem.remove();
+                }
+            }
+        });
+
+        // 道具类型变化事件
+        const typeSelect = document.getElementById('item-type');
+        if (typeSelect) {
+            typeSelect.addEventListener('change', (e) => {
+                this.updateItemFormByType(e.target.value);
+            });
+        }
+    }
+
+    /**
+     * 验证道具字段
+     */
+    validateItemField(field) {
+        const value = field.value.trim();
+        let isValid = true;
+        let message = '';
+
+        switch (field.id) {
+            case 'item-name':
+                isValid = value.length >= 2;
+                message = isValid ? '' : '道具名称至少2个字符';
+                break;
+            case 'item-value':
+                isValid = !value || (!isNaN(value) && parseFloat(value) >= 0);
+                message = isValid ? '' : '价值必须是非负数';
+                break;
+            case 'item-quantity':
+                isValid = !isNaN(value) && parseInt(value) >= 1;
+                message = isValid ? '' : '数量必须是正整数';
+                break;
+            case 'item-durability':
+                isValid = !value || (!isNaN(value) && parseFloat(value) >= 0 && parseFloat(value) <= 100);
+                message = isValid ? '' : '耐久度必须在0-100之间';
+                break;
+            case 'item-weight':
+                isValid = !value || (!isNaN(value) && parseFloat(value) >= 0);
+                message = isValid ? '' : '重量必须是非负数';
+                break;
+        }
+
+        // 更新字段状态
+        field.classList.toggle('is-invalid', !isValid);
+        field.classList.toggle('is-valid', isValid && value);
+
+        // 更新错误消息
+        let feedback = field.parentNode.querySelector('.invalid-feedback');
+        if (!isValid && message) {
+            if (!feedback) {
+                feedback = document.createElement('div');
+                feedback.className = 'invalid-feedback';
+                field.parentNode.appendChild(feedback);
+            }
+            feedback.textContent = message;
+        } else if (feedback) {
+            feedback.remove();
+        }
+
+        return isValid;
+    }
+
+    /**
+     * 根据道具类型更新表单
+     */
+    updateItemFormByType(itemType) {
+        const durabilityField = document.getElementById('item-durability');
+        const consumableCheck = document.getElementById('item-consumable');
+
+        // 根据类型设置默认值
+        switch (itemType) {
+            case 'weapon':
+            case 'armor':
+                if (durabilityField) durabilityField.value = '100';
+                if (consumableCheck) consumableCheck.checked = false;
+                break;
+            case 'consumable':
+                if (durabilityField) durabilityField.value = '';
+                if (consumableCheck) consumableCheck.checked = true;
+                break;
+            case 'tool':
+                if (durabilityField) durabilityField.value = '100';
+                if (consumableCheck) consumableCheck.checked = false;
+                break;
+            case 'key_item':
+                if (durabilityField) durabilityField.value = '';
+                if (consumableCheck) consumableCheck.checked = false;
+                break;
+        }
+    }
+
+    /**
+     * 添加道具效果行
+     */
+    addItemEffectRow() {
+        const container = document.getElementById('item-effects-container');
+        if (!container) return;
+
+        const effectRow = document.createElement('div');
+        effectRow.className = 'effect-item row g-2 mb-2';
+        effectRow.innerHTML = `
+        <div class="col-md-4">
+            <input type="text" class="form-control form-control-sm effect-type" 
+                   placeholder="效果类型 (如: attack_bonus)">
+        </div>
+        <div class="col-md-3">
+            <input type="number" class="form-control form-control-sm effect-value" 
+                   placeholder="效果数值" step="0.1">
+        </div>
+        <div class="col-md-3">
+            <input type="number" class="form-control form-control-sm effect-duration" 
+                   placeholder="持续时间(秒)" min="0">
+        </div>
+        <div class="col-md-2">
+            <button type="button" class="btn btn-outline-danger btn-sm remove-effect-btn">
+                <i class="bi bi-x"></i>
+            </button>
+        </div>
+    `;
+
+        container.appendChild(effectRow);
+    }
+
+    /**
+     * 保存新道具
+     */
+    async saveNewItem(userId) {
+        try {
+            const form = document.getElementById('add-item-form');
+            if (!form) {
+                throw new Error('找不到添加道具表单');
+            }
+
+            // 验证所有必填字段
+            const nameField = document.getElementById('item-name');
+            if (!this.validateItemField(nameField) || !nameField.value.trim()) {
+                Utils.showError('请输入有效的道具名称');
+                nameField.focus();
+                return;
+            }
+
+            // 禁用保存按钮
+            this.setButtonLoading('.save-item-btn', true, '保存中...');
+
+            // 收集表单数据
+            const itemData = this.collectItemFormData();
+
+            console.log('💾 保存新道具:', itemData);
+
+            // 调用API保存道具
+            const result = await API.addUserItem(userId, itemData);
+
+            if (result) {
+                // 重新加载道具列表
+                await this.loadUserItems(userId);
+
+                // 隐藏模态框
+                const modal = bootstrap.Modal.getInstance(document.getElementById('add-item-modal'));
+                if (modal) {
+                    modal.hide();
+                }
+
+                Utils.showSuccess('道具添加成功！');
+            }
+
+        } catch (error) {
+            console.error('❌ 保存道具失败:', error);
+            Utils.showError('保存失败: ' + error.message);
+        } finally {
+            // 恢复保存按钮
+            this.setButtonLoading('.save-item-btn', false, '保存道具');
+        }
+    }
+
+    /**
+     * 收集道具表单数据
+     */
+    collectItemFormData() {
+        const effects = [];
+        const effectItems = document.querySelectorAll('.effect-item');
+
+        effectItems.forEach(item => {
+            const type = item.querySelector('.effect-type')?.value.trim();
+            const value = item.querySelector('.effect-value')?.value.trim();
+            const duration = item.querySelector('.effect-duration')?.value.trim();
+
+            if (type && value) {
+                effects.push({
+                    type: type,
+                    value: parseFloat(value) || 0,
+                    duration: duration ? parseInt(duration) : null
+                });
+            }
+        });
+
+        return {
+            name: document.getElementById('item-name').value.trim(),
+            type: document.getElementById('item-type').value || 'other',
+            description: document.getElementById('item-description').value.trim(),
+            rarity: document.getElementById('item-rarity').value || 'common',
+            value: parseFloat(document.getElementById('item-value').value) || 0,
+            quantity: parseInt(document.getElementById('item-quantity').value) || 1,
+            durability: document.getElementById('item-durability').value ?
+                parseFloat(document.getElementById('item-durability').value) : null,
+            weight: document.getElementById('item-weight').value ?
+                parseFloat(document.getElementById('item-weight').value) : null,
+            effects: effects,
+            properties: {
+                consumable: document.getElementById('item-consumable').checked,
+                tradeable: document.getElementById('item-tradeable').checked,
+                requirements: document.getElementById('item-requirements').value.trim()
+            }
+        };
+    }
+
+    /**
+     * 编辑道具
+     */
+    editItem(itemId) {
+        // 确保用户档案管理器可用
+        if (typeof window.userProfile === 'undefined') {
+            Utils.showError('用户档案管理器不可用');
+            return;
+        }
+
+        // 确保用户ID已设置
+        const userId = this.getCurrentUserId();
+        if (!userId) {
+            Utils.showError('无法获取用户ID');
+            return;
+        }
+
+        try {
+            // 确保用户档案管理器有当前用户ID
+            if (!window.userProfile.currentUserId) {
+                window.userProfile.setCurrentUser(userId);
+            }
+
+            // 安全调用用户档案管理器的方法
+            window.userProfile.editItem(itemId);
+
+        } catch (error) {
+            console.error('调用编辑道具失败:', error);
+            Utils.showError('编辑道具失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 删除道具
+     */
+    async deleteItem(itemId) {
+        try {
+            const confirmed = await Utils.showConfirm('确定要删除这个道具吗？', {
+                title: '确认删除',
+                confirmText: '删除',
+                cancelText: '取消',
+                type: 'danger'
+            });
+
+            if (!confirmed) return;
+
+            // 检查是否有独立的用户档案管理器
+            if (typeof window.userProfile !== 'undefined' && window.userProfile.deleteItem) {
+                await window.userProfile.deleteItem(itemId);
+                return;
+            }
+
+            // 后备方案：调用API删除
+            const userId = this.getCurrentUserId();
+            if (!userId) {
+                Utils.showError('无法获取用户ID');
+                return;
+            }
+
+            await API.deleteUserItem(userId, itemId);
+
+            // 重新加载道具列表
+            await this.loadUserItems(userId);
+
+            Utils.showSuccess('道具删除成功');
+
+        } catch (error) {
+            console.error('删除道具失败:', error);
+            Utils.showError('删除失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 设置按钮加载状态
+     */
+    setButtonLoading(selector, loading, text = null) {
+        const button = document.querySelector(selector);
+        if (!button) return;
+
+        if (loading) {
+            button.disabled = true;
+            button.dataset.originalText = button.innerHTML;
+            button.innerHTML = `
+            <span class="spinner-border spinner-border-sm me-2" role="status"></span>
+            ${text || '处理中...'}
+        `;
+        } else {
+            button.disabled = false;
+            button.innerHTML = button.dataset.originalText || text || '保存';
+        }
+    }
+
+    /**
      * 加载用户道具
      */
     async loadUserItems(userId) {
         try {
             const items = await API.getUserItems(userId);
             this.renderUserItems(items);
+
+            // 更新用户状态中的道具计数
+            if (this.currentUser) {
+                this.currentUser.items_count = items.length;
+            }
+
         } catch (error) {
             console.error('加载道具失败:', error);
+            Utils.showError('加载道具失败: ' + error.message);
         }
     }
 
@@ -762,14 +3874,21 @@ class SceneApp {
                 <i class="bi bi-graph-up"></i> 场景数据分析
             </h4>
             <div class="dashboard-actions">
-                <button class="btn btn-sm btn-outline-secondary refresh-dashboard-btn" title="刷新数据">
+                <button class="btn btn-sm btn-outline-secondary refresh-dashboard-btn dashboard-tooltip" 
+                        title="刷新数据" data-tooltip="刷新仪表板数据">
                     <i class="bi bi-arrow-clockwise"></i>
                 </button>
-                <button class="btn btn-sm btn-outline-info toggle-dashboard-btn" title="切换显示">
-                    <i class="bi bi-eye"></i>
+                <button class="btn btn-sm btn-outline-info toggle-dashboard-btn dashboard-tooltip" 
+                        title="切换显示" data-tooltip="隐藏/显示仪表板">
+                    <i class="bi bi-eye-slash"></i>
                 </button>
-                <button class="btn btn-sm btn-outline-success export-dashboard-btn" title="导出报告">
+                <button class="btn btn-sm btn-outline-success export-dashboard-btn dashboard-tooltip" 
+                        title="导出报告" data-tooltip="导出仪表板报告">
                     <i class="bi bi-download"></i>
+                </button>
+                <button class="btn btn-sm btn-outline-warning force-refresh-dashboard-btn dashboard-tooltip" 
+                        title="强制刷新" data-tooltip="强制重新渲染">
+                    <i class="bi bi-arrow-repeat"></i>
                 </button>
             </div>
         </div>
@@ -852,8 +3971,653 @@ class SceneApp {
     }
 
     /**
- * 渲染统计卡片
- */
+     * 渲染故事完成度图表
+     */
+    renderStoryProgressChart() {
+        if (typeof Chart === 'undefined') {
+            console.warn('Chart.js 未加载，无法渲染故事完成度图表');
+            return;
+        }
+
+        const canvas = document.getElementById('story-progress-chart');
+        if (!canvas) {
+            console.warn('未找到故事完成度图表容器');
+            return;
+        }
+
+        // 计算故事进度数据
+        const progressData = this.calculateStoryProgressData();
+
+        const chart = new Chart(canvas, {
+            type: 'line',
+            data: {
+                labels: progressData.labels,
+                datasets: [{
+                    label: '故事完成度',
+                    data: progressData.progress,
+                    borderColor: '#007bff',
+                    backgroundColor: 'rgba(0, 123, 255, 0.1)',
+                    borderWidth: 3,
+                    fill: true,
+                    tension: 0.4,
+                    pointBackgroundColor: '#007bff',
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 2,
+                    pointRadius: 5
+                }, {
+                    label: '节点揭示',
+                    data: progressData.nodes,
+                    borderColor: '#28a745',
+                    backgroundColor: 'rgba(40, 167, 69, 0.1)',
+                    borderWidth: 2,
+                    fill: false,
+                    tension: 0.3,
+                    pointBackgroundColor: '#28a745',
+                    pointBorderColor: '#fff',
+                    pointBorderWidth: 2,
+                    pointRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: '故事进展时间线',
+                        font: {
+                            size: 16,
+                            weight: 'bold'
+                        }
+                    },
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            usePointStyle: true,
+                            padding: 20
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            label: function (context) {
+                                const label = context.dataset.label || '';
+                                const value = context.parsed.y;
+                                if (label === '故事完成度') {
+                                    return `${label}: ${value}%`;
+                                } else {
+                                    return `${label}: ${value} 个节点`;
+                                }
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: '时间'
+                        }
+                    },
+                    y: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: '进度 (%)'
+                        },
+                        min: 0,
+                        max: 100
+                    }
+                },
+                interaction: {
+                    mode: 'nearest',
+                    axis: 'x',
+                    intersect: false
+                },
+                elements: {
+                    point: {
+                        hoverRadius: 8
+                    }
+                }
+            }
+        });
+
+        this.charts.set('story-progress', chart);
+    }
+
+    /**
+     * 计算故事进度数据
+     */
+    calculateStoryProgressData() {
+        const data = {
+            labels: [],
+            progress: [],
+            nodes: []
+        };
+
+        if (!this.aggregateData || !this.aggregateData.story_data) {
+            // 如果没有数据，返回示例数据
+            const now = new Date();
+            for (let i = 0; i < 7; i++) {
+                const date = new Date(now.getTime() - (6 - i) * 24 * 60 * 60 * 1000);
+                data.labels.push(date.toLocaleDateString());
+                data.progress.push(Math.min(i * 15 + Math.random() * 10, 100));
+                data.nodes.push(i * 2 + Math.floor(Math.random() * 3));
+            }
+            return data;
+        }
+
+        const storyData = this.aggregateData.story_data;
+
+        // 如果有真实数据，基于节点时间戳构建进度
+        if (storyData.nodes && storyData.nodes.length > 0) {
+            const nodes = storyData.nodes
+                .filter(node => node.is_revealed)
+                .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+            const totalNodes = storyData.nodes.length;
+            let revealedCount = 0;
+
+            nodes.forEach((node, index) => {
+                if (node.is_revealed) {
+                    revealedCount++;
+                    const date = new Date(node.created_at);
+                    data.labels.push(date.toLocaleDateString());
+                    data.progress.push(Math.round((revealedCount / totalNodes) * 100));
+                    data.nodes.push(revealedCount);
+                }
+            });
+        }
+
+        // 如果数据点不足，补充当前状态
+        if (data.labels.length === 0) {
+            data.labels.push('当前');
+            data.progress.push(storyData.progress || 0);
+            data.nodes.push(storyData.nodes ? storyData.nodes.filter(n => n.is_revealed).length : 0);
+        }
+
+        return data;
+    }
+
+    /**
+     * 渲染角色关系网络图
+     */
+    renderCharacterRelationshipGraph() {
+        const container = document.getElementById('character-relationship-graph');
+        if (!container) {
+            console.warn('未找到角色关系图容器');
+            return;
+        }
+
+        // 检查是否有可用的图形库
+        if (typeof d3 === 'undefined' && typeof vis === 'undefined') {
+            // 使用简单的HTML/CSS实现
+            this.renderSimpleRelationshipGraph(container);
+            return;
+        }
+
+        // 计算角色关系数据
+        const relationshipData = this.calculateCharacterRelationships();
+
+        // 如果有 vis.js 可用
+        if (typeof vis !== 'undefined') {
+            this.renderVisNetworkGraph(container, relationshipData);
+        } else if (typeof d3 !== 'undefined') {
+            this.renderD3ForceGraph(container, relationshipData);
+        } else {
+            this.renderSimpleRelationshipGraph(container);
+        }
+    }
+
+    /**
+     * 使用简单HTML/CSS渲染关系图
+     */
+    renderSimpleRelationshipGraph(container) {
+        const relationships = this.calculateCharacterRelationships();
+
+        container.innerHTML = `
+        <div class="simple-relationship-graph">
+            <div class="characters-container">
+                ${relationships.nodes.map(node => `
+                    <div class="character-node" data-character="${node.id}">
+                        <div class="character-avatar">
+                            ${node.avatar ?
+                `<img src="${node.avatar}" alt="${node.name}">` :
+                `<div class="avatar-placeholder">${node.name[0]}</div>`
+            }
+                        </div>
+                        <div class="character-name">${node.name}</div>
+                        <div class="interaction-count">${node.interactions || 0} 次互动</div>
+                    </div>
+                `).join('')}
+            </div>
+            <div class="relationships-list">
+                <h6>角色关系</h6>
+                ${relationships.edges.map(edge => `
+                    <div class="relationship-item">
+                        <span class="from-character">${edge.from_name}</span>
+                        <span class="relationship-type">${edge.type}</span>
+                        <span class="to-character">${edge.to_name}</span>
+                        <span class="strength">(强度: ${edge.strength})</span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+    }
+
+    /**
+     * 使用vis.js渲染网络图
+     */
+    renderVisNetworkGraph(container, relationshipData) {
+        try {
+            const nodes = new vis.DataSet(relationshipData.nodes.map(node => ({
+                id: node.id,
+                label: node.name,
+                title: `${node.name}\n互动次数: ${node.interactions || 0}`,
+                color: {
+                    background: node.color || '#97c2fc',
+                    border: '#2b7ce9'
+                },
+                font: { size: 14 }
+            })));
+
+            const edges = new vis.DataSet(relationshipData.edges.map(edge => ({
+                from: edge.from,
+                to: edge.to,
+                label: edge.type,
+                width: Math.max(1, edge.strength),
+                color: {
+                    color: edge.strength > 5 ? '#ff6b6b' : '#4ecdc4'
+                }
+            })));
+
+            const data = { nodes, edges };
+            const options = {
+                physics: {
+                    enabled: true,
+                    stabilization: { iterations: 100 }
+                },
+                interaction: {
+                    hover: true,
+                    tooltipDelay: 200
+                },
+                layout: {
+                    improvedLayout: true
+                }
+            };
+
+            const network = new vis.Network(container, data, options);
+
+            // 保存网络实例以便后续操作
+            this.charts.set('character-relationship', network);
+        } catch (error) {
+            console.error('渲染vis.js网络图失败:', error);
+            this.renderSimpleRelationshipGraph(container);
+        }
+    }
+
+    /**
+     * 使用D3.js渲染力导向图
+     */
+    renderD3ForceGraph(container, relationshipData) {
+        try {
+            const width = container.clientWidth || 400;
+            const height = container.clientHeight || 400;
+
+            // 清空容器
+            d3.select(container).selectAll("*").remove();
+
+            const svg = d3.select(container)
+                .append("svg")
+                .attr("width", width)
+                .attr("height", height);
+
+            const simulation = d3.forceSimulation(relationshipData.nodes)
+                .force("link", d3.forceLink(relationshipData.edges).id(d => d.id))
+                .force("charge", d3.forceManyBody().strength(-300))
+                .force("center", d3.forceCenter(width / 2, height / 2));
+
+            const link = svg.append("g")
+                .selectAll("line")
+                .data(relationshipData.edges)
+                .enter().append("line")
+                .attr("stroke", "#999")
+                .attr("stroke-opacity", 0.6)
+                .attr("stroke-width", d => Math.sqrt(d.strength));
+
+            const node = svg.append("g")
+                .selectAll("circle")
+                .data(relationshipData.nodes)
+                .enter().append("circle")
+                .attr("r", 20)
+                .attr("fill", d => d.color || "#69b3a2")
+                .call(d3.drag()
+                    .on("start", dragstarted)
+                    .on("drag", dragged)
+                    .on("end", dragended));
+
+            const label = svg.append("g")
+                .selectAll("text")
+                .data(relationshipData.nodes)
+                .enter().append("text")
+                .text(d => d.name)
+                .attr("font-size", "12px")
+                .attr("text-anchor", "middle");
+
+            simulation.on("tick", () => {
+                link
+                    .attr("x1", d => d.source.x)
+                    .attr("y1", d => d.source.y)
+                    .attr("x2", d => d.target.x)
+                    .attr("y2", d => d.target.y);
+
+                node
+                    .attr("cx", d => d.x)
+                    .attr("cy", d => d.y);
+
+                label
+                    .attr("x", d => d.x)
+                    .attr("y", d => d.y + 5);
+            });
+
+            function dragstarted(event, d) {
+                if (!event.active) simulation.alphaTarget(0.3).restart();
+                d.fx = d.x;
+                d.fy = d.y;
+            }
+
+            function dragged(event, d) {
+                d.fx = event.x;
+                d.fy = event.y;
+            }
+
+            function dragended(event, d) {
+                if (!event.active) simulation.alphaTarget(0);
+                d.fx = null;
+                d.fy = null;
+            }
+
+            this.charts.set('character-relationship-d3', svg);
+        } catch (error) {
+            console.error('渲染D3.js图表失败:', error);
+            this.renderSimpleRelationshipGraph(container);
+        }
+    }
+
+    /**
+     * 计算角色关系数据
+     */
+    calculateCharacterRelationships() {
+        const nodes = [];
+        const edges = [];
+        const interactionMap = new Map();
+
+        // 构建角色节点
+        if (this.aggregateData && this.aggregateData.characters) {
+            this.aggregateData.characters.forEach((character, index) => {
+                nodes.push({
+                    id: character.id,
+                    name: character.name,
+                    avatar: character.avatar,
+                    interactions: 0,
+                    color: this.getCharacterColor(index)
+                });
+            });
+        }
+
+        // 分析对话数据，构建关系边
+        if (this.aggregateData && this.aggregateData.recent_conversations) {
+            this.aggregateData.recent_conversations.forEach(conv => {
+                const charId = conv.character_id;
+
+                // 统计角色互动次数
+                const nodeIndex = nodes.findIndex(n => n.id === charId);
+                if (nodeIndex !== -1) {
+                    nodes[nodeIndex].interactions++;
+                }
+
+                // 构建角色间关系
+                // 这里简化处理，实际应该分析对话内容中提及的其他角色
+                nodes.forEach(otherChar => {
+                    if (otherChar.id !== charId && conv.content) {
+                        const content = conv.content.toLowerCase();
+                        const otherName = otherChar.name.toLowerCase();
+
+                        if (content.includes(otherName)) {
+                            const key = `${charId}-${otherChar.id}`;
+                            if (!interactionMap.has(key)) {
+                                interactionMap.set(key, {
+                                    from: charId,
+                                    to: otherChar.id,
+                                    from_name: nodes.find(n => n.id === charId)?.name || charId,
+                                    to_name: otherChar.name,
+                                    strength: 1,
+                                    type: '提及'
+                                });
+                            } else {
+                                interactionMap.get(key).strength++;
+                            }
+                        }
+                    }
+                });
+            });
+        }
+
+        // 转换关系映射为边数组
+        interactionMap.forEach(relation => {
+            edges.push(relation);
+        });
+
+        // 如果没有真实数据，创建示例数据
+        if (nodes.length === 0) {
+            const exampleChars = ['主角', '导师', '反派', '伙伴'];
+            exampleChars.forEach((name, index) => {
+                nodes.push({
+                    id: `char_${index}`,
+                    name: name,
+                    interactions: Math.floor(Math.random() * 20) + 5,
+                    color: this.getCharacterColor(index)
+                });
+            });
+
+            // 添加示例关系
+            edges.push(
+                { from: 'char_0', to: 'char_1', from_name: '主角', to_name: '导师', strength: 8, type: '师徒' },
+                { from: 'char_0', to: 'char_2', from_name: '主角', to_name: '反派', strength: 5, type: '对立' },
+                { from: 'char_0', to: 'char_3', from_name: '主角', to_name: '伙伴', strength: 6, type: '友谊' }
+            );
+        }
+
+        return { nodes, edges };
+    }
+
+    /**
+     * 获取角色颜色
+     */
+    getCharacterColor(index) {
+        const colors = [
+            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0',
+            '#9966FF', '#FF9F40', '#FF6384', '#C9CBCF'
+        ];
+        return colors[index % colors.length];
+    }
+
+    /**
+     * 渲染互动时间线图表
+     */
+    renderInteractionTimelineChart() {
+        if (typeof Chart === 'undefined') {
+            console.warn('Chart.js 未加载，无法渲染互动时间线图表');
+            return;
+        }
+
+        const canvas = document.getElementById('interaction-timeline-chart');
+        if (!canvas) {
+            console.warn('未找到互动时间线图表容器');
+            return;
+        }
+
+        // 计算时间线数据
+        const timelineData = this.calculateInteractionTimelineData();
+
+        const chart = new Chart(canvas, {
+            type: 'bar',
+            data: {
+                labels: timelineData.labels,
+                datasets: timelineData.datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: '角色互动时间线',
+                        font: {
+                            size: 16,
+                            weight: 'bold'
+                        }
+                    },
+                    legend: {
+                        position: 'top',
+                        labels: {
+                            usePointStyle: true,
+                            padding: 15
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            label: function (context) {
+                                const label = context.dataset.label || '';
+                                const value = context.parsed.y;
+                                return `${label}: ${value} 次互动`;
+                            }
+                        }
+                    }
+                },
+                scales: {
+                    x: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: '时间段'
+                        },
+                        stacked: false
+                    },
+                    y: {
+                        display: true,
+                        title: {
+                            display: true,
+                            text: '互动次数'
+                        },
+                        beginAtZero: true,
+                        stacked: false
+                    }
+                },
+                interaction: {
+                    mode: 'nearest',
+                    axis: 'x',
+                    intersect: false
+                }
+            }
+        });
+
+        this.charts.set('interaction-timeline', chart);
+    }
+
+    /**
+     * 计算互动时间线数据
+     */
+    calculateInteractionTimelineData() {
+        const now = new Date();
+        const labels = [];
+        const characterData = new Map();
+
+        // 生成过去7天的标签
+        for (let i = 6; i >= 0; i--) {
+            const date = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+            labels.push(date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' }));
+        }
+
+        // 如果有真实数据，分析对话记录
+        if (this.aggregateData && this.aggregateData.recent_conversations) {
+            // 按角色分组统计每天的互动
+            this.aggregateData.recent_conversations.forEach(conv => {
+                const convDate = new Date(conv.timestamp);
+                const dayIndex = Math.floor((now - convDate) / (24 * 60 * 60 * 1000));
+
+                if (dayIndex >= 0 && dayIndex < 7) {
+                    const labelIndex = 6 - dayIndex;
+                    const charId = conv.character_id;
+
+                    if (!characterData.has(charId)) {
+                        characterData.set(charId, {
+                            name: this.getCharacterName(charId),
+                            data: new Array(7).fill(0),
+                            color: this.getCharacterColor(Array.from(characterData.keys()).length)
+                        });
+                    }
+
+                    characterData.get(charId).data[labelIndex]++;
+                }
+            });
+        }
+
+        // 如果没有数据，生成示例数据
+        if (characterData.size === 0) {
+            const exampleChars = [
+                { name: '主角', color: '#FF6384' },
+                { name: '导师', color: '#36A2EB' },
+                { name: '伙伴', color: '#FFCE56' },
+                { name: '反派', color: '#4BC0C0' }
+            ];
+
+            exampleChars.forEach((char, index) => {
+                const data = labels.map(() => Math.floor(Math.random() * 8) + 1);
+                characterData.set(`char_${index}`, {
+                    name: char.name,
+                    data: data,
+                    color: char.color
+                });
+            });
+        }
+
+        // 转换为Chart.js格式
+        const datasets = Array.from(characterData.values()).map(char => ({
+            label: char.name,
+            data: char.data,
+            backgroundColor: char.color,
+            borderColor: char.color,
+            borderWidth: 1,
+            borderRadius: 2
+        }));
+
+        return { labels, datasets };
+    }
+
+    /**
+     * 计算平均响应时间（模拟数据）
+     */
+    calculateAverageResponseTime() {
+        // 这里应该基于真实的响应时间数据计算
+        // 暂时返回模拟数据
+        if (this.aggregateData && this.aggregateData.recent_conversations) {
+            // 基于对话数量估算响应时间
+            const convCount = this.aggregateData.recent_conversations.length;
+            return Math.max(0.5, 3.0 - convCount * 0.1).toFixed(1);
+        }
+
+        return (2.5 + Math.random() * 1.5).toFixed(1);
+    }
+
+    /**
+    * 渲染统计卡片
+    */
     renderStatsCards() {
         const stats = this.calculateSceneStats();
 
@@ -933,8 +4697,8 @@ class SceneApp {
     }
 
     /**
- * 渲染角色互动分布图
- */
+    * 渲染角色互动分布图
+    */
     renderCharacterInteractionChart() {
         if (typeof Chart === 'undefined') return;
 
@@ -988,8 +4752,8 @@ class SceneApp {
     }
 
     /**
- * 计算角色互动数据
- */
+    * 计算角色互动数据
+    */
     calculateCharacterInteractions() {
         const interactions = new Map();
 
@@ -1012,25 +4776,225 @@ class SceneApp {
      * 绑定仪表板事件
      */
     bindDashboardEvents() {
-        // 刷新仪表板
-        document.addEventListener('click', (e) => {
-            if (e.target.matches('.refresh-dashboard-btn')) {
+        // 使用事件委托避免重复绑定
+        document.removeEventListener('click', this.dashboardEventHandler);
+
+        this.dashboardEventHandler = (e) => {
+            // 刷新仪表板
+            if (e.target.matches('.refresh-dashboard-btn') || e.target.closest('.refresh-dashboard-btn')) {
+                e.preventDefault();
                 this.refreshDashboard();
             }
 
-            if (e.target.matches('.toggle-dashboard-btn')) {
+            // 切换仪表板显示
+            if (e.target.matches('.toggle-dashboard-btn') || e.target.closest('.toggle-dashboard-btn')) {
+                e.preventDefault();
                 this.toggleDashboard();
             }
 
-            if (e.target.matches('.export-dashboard-btn')) {
+            // 导出仪表板报告
+            if (e.target.matches('.export-dashboard-btn') || e.target.closest('.export-dashboard-btn')) {
+                e.preventDefault();
                 this.exportDashboardReport();
+            }
+
+            // 智能切换按钮
+            if (e.target.matches('.smart-toggle-dashboard-btn') || e.target.closest('.smart-toggle-dashboard-btn')) {
+                e.preventDefault();
+                this.smartToggleDashboard();
+            }
+
+            // 强制刷新按钮
+            if (e.target.matches('.force-refresh-dashboard-btn') || e.target.closest('.force-refresh-dashboard-btn')) {
+                e.preventDefault();
+                this.forceRefreshDashboard();
+            }
+        };
+
+        document.addEventListener('click', this.dashboardEventHandler);
+
+        // 键盘快捷键
+        document.addEventListener('keydown', (e) => {
+            // Ctrl/Cmd + D: 切换仪表板
+            if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
+                e.preventDefault();
+                this.toggleDashboard();
+            }
+
+            // Ctrl/Cmd + R: 刷新仪表板
+            if ((e.ctrlKey || e.metaKey) && e.key === 'r' && this.state.dashboardVisible) {
+                e.preventDefault();
+                this.refreshDashboard();
             }
         });
     }
 
     /**
- * 刷新仪表板
- */
+     * 切换仪表板显示/隐藏
+     */
+    toggleDashboard() {
+        const dashboardContainer = this.getDashboardContainer();
+        const toggleBtn = document.querySelector('.toggle-dashboard-btn');
+
+        if (!dashboardContainer) {
+            console.warn('未找到仪表板容器');
+            return;
+        }
+
+        // 切换显示状态
+        const isVisible = this.state.dashboardVisible;
+        this.setState({ dashboardVisible: !isVisible });
+
+        if (this.state.dashboardVisible) {
+            // 显示仪表板
+            dashboardContainer.style.display = 'block';
+            dashboardContainer.classList.add('dashboard-show');
+            dashboardContainer.classList.remove('dashboard-hide');
+
+            // 更新按钮图标和提示
+            if (toggleBtn) {
+                toggleBtn.innerHTML = '<i class="bi bi-eye-slash"></i>';
+                toggleBtn.title = '隐藏仪表板';
+                toggleBtn.classList.remove('btn-outline-info');
+                toggleBtn.classList.add('btn-outline-warning');
+            }
+
+            // 延迟渲染图表，确保容器可见
+            setTimeout(() => {
+                this.renderCharacterInteractionChart();
+                this.renderStoryProgressChart();
+                this.renderCharacterRelationshipGraph();
+                this.renderInteractionTimelineChart();
+            }, 300);
+
+            console.log('✅ 仪表板已显示');
+        } else {
+            // 隐藏仪表板
+            dashboardContainer.classList.add('dashboard-hide');
+            dashboardContainer.classList.remove('dashboard-show');
+
+            // 更新按钮图标和提示
+            if (toggleBtn) {
+                toggleBtn.innerHTML = '<i class="bi bi-eye"></i>';
+                toggleBtn.title = '显示仪表板';
+                toggleBtn.classList.remove('btn-outline-warning');
+                toggleBtn.classList.add('btn-outline-info');
+            }
+
+            // 延迟隐藏，等待动画完成
+            setTimeout(() => {
+                dashboardContainer.style.display = 'none';
+                // 清理图表资源
+                this.destroyCharts();
+            }, 300);
+
+            console.log('✅ 仪表板已隐藏');
+        }
+
+        // 保存状态到本地存储
+        localStorage.setItem('dashboard-visible', this.state.dashboardVisible.toString());
+    }
+
+    /**
+     * 初始化仪表板显示状态
+     */
+    initDashboardState() {
+        // 从本地存储读取上次的显示状态
+        const savedState = localStorage.getItem('dashboard-visible');
+        const defaultVisible = true; // 默认显示
+
+        this.setState({
+            dashboardVisible: savedState !== null ? savedState === 'true' : defaultVisible
+        });
+
+        // 同步按钮状态
+        const toggleBtn = document.querySelector('.toggle-dashboard-btn');
+        if (toggleBtn) {
+            if (this.state.dashboardVisible) {
+                toggleBtn.innerHTML = '<i class="bi bi-eye-slash"></i>';
+                toggleBtn.title = '隐藏仪表板';
+                toggleBtn.classList.add('btn-outline-warning');
+            } else {
+                toggleBtn.innerHTML = '<i class="bi bi-eye"></i>';
+                toggleBtn.title = '显示仪表板';
+                toggleBtn.classList.add('btn-outline-info');
+            }
+        }
+
+        // 应用初始状态
+        if (!this.state.dashboardVisible) {
+            const dashboardContainer = this.getDashboardContainer();
+            if (dashboardContainer) {
+                dashboardContainer.style.display = 'none';
+            }
+        }
+    }
+
+    /**
+     * 智能切换仪表板（根据内容自动决定）
+     */
+    smartToggleDashboard() {
+        // 如果没有聚合数据，提示用户
+        if (!this.aggregateData) {
+            Utils.showInfo('正在加载数据，请稍后再试...');
+            return;
+        }
+
+        // 如果有数据但图表未渲染，先渲染再显示
+        if (this.state.dashboardVisible && this.charts.size === 0) {
+            Utils.showInfo('正在准备仪表板...');
+
+            setTimeout(() => {
+                this.renderSceneDashboard();
+            }, 100);
+        } else {
+            // 正常切换
+            this.toggleDashboard();
+        }
+    }
+
+    /**
+     * 强制刷新仪表板
+     */
+    forceRefreshDashboard() {
+        // 先隐藏
+        if (this.state.dashboardVisible) {
+            this.setState({ dashboardVisible: false });
+            const dashboardContainer = this.getDashboardContainer();
+            if (dashboardContainer) {
+                dashboardContainer.style.display = 'none';
+            }
+        }
+
+        // 清理现有图表
+        this.destroyCharts();
+
+        // 重新显示并渲染
+        setTimeout(() => {
+            this.setState({ dashboardVisible: true });
+            this.renderSceneDashboard();
+        }, 200);
+    }
+
+    /**
+     * 获取仪表板可见状态
+     */
+    isDashboardVisible() {
+        return this.state.dashboardVisible;
+    }
+
+    /**
+     * 设置仪表板可见状态
+     */
+    setDashboardVisible(visible) {
+        if (this.state.dashboardVisible !== visible) {
+            this.toggleDashboard();
+        }
+    }
+
+    /**
+    * 刷新仪表板
+    */
     async refreshDashboard() {
         try {
             Utils.showSuccess('正在刷新数据...');
@@ -1079,9 +5043,26 @@ class SceneApp {
      * 销毁所有图表
      */
     destroyCharts() {
-        this.charts.forEach(chart => {
-            if (chart && typeof chart.destroy === 'function') {
-                chart.destroy();
+        this.charts.forEach((chart, key) => {
+            try {
+                // Chart.js 图表
+                if (chart && typeof chart.destroy === 'function') {
+                    chart.destroy();
+                }
+                // vis.js 网络图
+                else if (chart && typeof chart.destroy === 'function') {
+                    chart.destroy();
+                }
+                // D3.js 图表
+                else if (chart && chart.remove) {
+                    chart.remove();
+                }
+                // 其他清理
+                else if (chart && chart.clear) {
+                    chart.clear();
+                }
+            } catch (error) {
+                console.warn(`清理图表 ${key} 时出错:`, error);
             }
         });
         this.charts.clear();
@@ -1581,16 +5562,47 @@ class SceneApp {
      */
     async exportSceneData(format = 'json') {
         try {
-            const result = await API.exportSceneData(this.currentScene.id, format, true);
+            // 修正：使用正确的导出API方法
+            const result = await API.exportSceneData(
+                this.currentScene.id,
+                format,
+                true // includeConversations
+            );
+
+            // 处理不同的响应格式
+            let content, mimeType, filename;
+
+            if (typeof result === 'string') {
+                content = result;
+            } else if (result.content) {
+                content = result.content;
+            } else {
+                content = JSON.stringify(result, null, 2);
+            }
+
+            // 设置MIME类型
+            switch (format) {
+                case 'json':
+                    mimeType = 'application/json';
+                    break;
+                case 'txt':
+                    mimeType = 'text/plain';
+                    break;
+                case 'md':
+                    mimeType = 'text/markdown';
+                    break;
+                default:
+                    mimeType = 'application/octet-stream';
+            }
+
+            filename = `scene_${this.currentScene.id}_${Date.now()}.${format}`;
 
             // 创建下载链接
-            const blob = new Blob([result.content], {
-                type: format === 'json' ? 'application/json' : 'text/plain'
-            });
+            const blob = new Blob([content], { type: mimeType });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = `scene_${this.currentScene.id}.${format}`;
+            a.download = filename;
             a.click();
             URL.revokeObjectURL(url);
 
@@ -1598,6 +5610,2813 @@ class SceneApp {
         } catch (error) {
             Utils.showError('导出失败: ' + error.message);
         }
+    }
+
+    /**
+     * 导出仪表板报告
+     */
+    async exportDashboardReport() {
+        try {
+            Utils.showSuccess('正在生成报告...');
+
+            // 获取仪表板数据
+            const stats = this.calculateSceneStats();
+            const interactionData = this.calculateCharacterInteractions();
+
+            const report = {
+                scene: {
+                    id: this.currentScene.id,
+                    name: this.currentScene.name,
+                    created_at: this.currentScene.created_at
+                },
+                stats: stats,
+                character_interactions: interactionData,
+                conversations_count: this.conversations.length,
+                export_time: new Date().toISOString()
+            };
+
+            const content = JSON.stringify(report, null, 2);
+            const blob = new Blob([content], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `scene_${this.currentScene.id}_dashboard_report.json`;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            Utils.showSuccess('仪表板报告导出成功');
+        } catch (error) {
+            Utils.showError('导出报告失败: ' + error.message);
+        }
+    }
+
+    /**
+    * 增强错误处理 - 匹配后端错误响应格式
+    */
+    handleAPIError(error, operation = '操作') {
+        let errorMessage = `${operation}失败`;
+
+        if (error.response) {
+            // HTTP错误响应
+            if (error.response.data?.error) {
+                errorMessage += `: ${error.response.data.error}`;
+            } else if (error.response.data?.message) {
+                errorMessage += `: ${error.response.data.message}`;
+            } else {
+                errorMessage += `: HTTP ${error.response.status}`;
+            }
+        } else if (error.message) {
+            errorMessage += `: ${error.message}`;
+        }
+
+        console.error(`${operation}失败:`, error);
+        Utils.showError(errorMessage);
+
+        return errorMessage;
+    }
+
+    /**
+     * 更新统计显示 - 新增方法
+    */
+    updateStats(stats) {
+        if (!stats) return;
+
+        // 更新统计显示
+        const statsContainer = document.querySelector('.stats-cards-container');
+        if (statsContainer && stats) {
+            // 重新渲染统计卡片
+            statsContainer.innerHTML = this.renderStatsCards();
+        }
+
+        // 更新图表数据
+        if (this.charts.has('character-interaction')) {
+            this.renderCharacterInteractionChart(stats.character_interactions);
+        }
+    }
+
+    /**
+     * 初始化实时通信 - 完整实现
+     */
+    async initRealtimeConnection(sceneId) {
+        try {
+            // 1. 检查 RealtimeManager 是否可用
+            if (typeof window.RealtimeManager === 'undefined') {
+                console.warn('⚠️ RealtimeManager 未加载，跳过实时通信初始化');
+                return false;
+            }
+
+            // 2. 获取或创建 RealtimeManager 实例
+            if (!window.realtimeManager) {
+                window.realtimeManager = new window.RealtimeManager();
+                console.log('🔗 RealtimeManager 实例已创建');
+            }
+
+            console.log(`🔄 正在初始化场景 ${sceneId} 的实时通信...`);
+
+            // 3. 初始化场景实时功能
+            const success = await window.realtimeManager.initSceneRealtime(sceneId);
+
+            if (!success) {
+                console.warn('⚠️ 场景实时功能初始化失败');
+                return false;
+            }
+
+            // 4. 设置应用级别的事件监听器
+            this.setupRealtimeEventListeners(sceneId);
+
+            // 5. 绑定实时消息处理器
+            this.bindRealtimeMessageHandlers();
+
+            // 6. 初始化实时状态管理
+            this.initRealtimeStateManagement();
+
+            // 7. 设置连接状态监控
+            this.setupConnectionMonitoring();
+
+            // 8. 保存实时管理器引用
+            this.realtimeManager = window.realtimeManager;
+
+            console.log('✅ 实时通信初始化完成');
+
+            // 9. 显示连接状态
+            this.updateRealtimeStatus('connected', '实时通信已启用');
+
+            return true;
+
+        } catch (error) {
+            console.error('❌ 实时通信初始化失败:', error);
+            this.updateRealtimeStatus('error', '实时通信初始化失败: ' + error.message);
+            return false;
+        }
+    }
+
+    /**
+     * 设置实时事件监听器
+     */
+    setupRealtimeEventListeners(sceneId) {
+        if (!this.realtimeManager) return;
+
+        // 监听新对话消息
+        this.realtimeManager.on('conversation:new', (data) => {
+            if (data.sceneId === sceneId) {
+                this.handleNewConversation(data);
+            }
+        });
+
+        // 监听角色状态更新
+        this.realtimeManager.on('character:status_updated', (data) => {
+            if (data.sceneId === sceneId) {
+                this.handleCharacterStatusUpdate(data);
+            }
+        });
+
+        // 监听故事事件
+        this.realtimeManager.on('story:event', (data) => {
+            if (data.sceneId === sceneId) {
+                this.handleStoryEvent(data);
+            }
+        });
+
+        // 监听用户在线状态
+        this.realtimeManager.on('user:presence', (data) => {
+            if (data.sceneId === sceneId) {
+                this.handleUserPresence(data);
+            }
+        });
+
+        // 监听场景状态更新
+        this.realtimeManager.on('scene:state_updated', (data) => {
+            if (data.sceneId === sceneId) {
+                this.handleSceneStateUpdate(data);
+            }
+        });
+
+        // 监听连接状态
+        this.realtimeManager.on('scene:connected', (data) => {
+            if (data.sceneId === sceneId) {
+                this.updateRealtimeStatus('connected', '场景连接已建立');
+            }
+        });
+
+        console.log('📡 实时事件监听器已设置');
+    }
+
+    /**
+     * 绑定实时消息处理器
+     */
+    bindRealtimeMessageHandlers() {
+        // 绑定发送消息功能
+        const sendBtn = document.getElementById('send-btn');
+        const messageInput = document.getElementById('message-input');
+
+        if (sendBtn && messageInput) {
+            // 移除旧的事件监听器
+            const newSendBtn = sendBtn.cloneNode(true);
+            sendBtn.parentNode.replaceChild(newSendBtn, sendBtn);
+
+            // 绑定新的实时发送逻辑
+            newSendBtn.addEventListener('click', () => {
+                this.sendRealtimeMessage();
+            });
+
+            messageInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    this.sendRealtimeMessage();
+                }
+            });
+
+            console.log('💬 实时消息处理器已绑定');
+        }
+
+        // 绑定角色选择功能
+        document.addEventListener('click', (e) => {
+            if (e.target.closest('.character-item')) {
+                const characterItem = e.target.closest('.character-item');
+                const characterId = characterItem.dataset.characterId;
+                this.selectCharacterForRealtime(characterId);
+            }
+        });
+    }
+
+    /**
+     * 初始化实时状态管理
+     */
+    initRealtimeStateManagement() {
+        // 创建实时状态存储
+        if (!this.realtimeState) {
+            this.realtimeState = {
+                connected: false,
+                selectedCharacter: null,
+                lastActivity: Date.now(),
+                messageQueue: [],
+                userStatus: 'active'
+            };
+        }
+
+        // 定期更新用户活动状态
+        this.activityTimer = setInterval(() => {
+            this.updateUserActivity();
+        }, 30000); // 每30秒更新一次
+
+        console.log('📊 实时状态管理已初始化');
+    }
+
+    /**
+     * 设置连接状态监控
+     */
+    setupConnectionMonitoring() {
+        if (!this.realtimeManager) return;
+
+        // 监听心跳事件
+        this.realtimeManager.on('heartbeat', (data) => {
+            this.updateConnectionMetrics(data);
+        });
+
+        // 定期检查连接状态
+        this.connectionCheckTimer = setInterval(() => {
+            this.checkRealtimeConnection();
+        }, 60000); // 每分钟检查一次
+
+        console.log('🔍 连接状态监控已启用');
+    }
+
+    /**
+     * 发送实时消息
+     */
+    sendRealtimeMessage() {
+        const messageInput = document.getElementById('message-input');
+        const message = messageInput?.value?.trim();
+
+        if (!message) return;
+
+        const selectedCharacter = this.getSelectedCharacter();
+        if (!selectedCharacter) {
+            Utils.showWarning('请先选择一个角色');
+            return;
+        }
+
+        const sceneId = this.getSceneIdFromPage();
+        if (!sceneId) {
+            Utils.showError('无法获取场景ID');
+            return;
+        }
+
+        // 通过实时管理器发送消息
+        const success = this.realtimeManager.sendCharacterInteraction(
+            sceneId,
+            selectedCharacter,
+            message,
+            {
+                user_id: this.getCurrentUserId(),
+                timestamp: Date.now(),
+                message_type: 'chat'
+            }
+        );
+
+        if (success) {
+            // 清空输入框
+            messageInput.value = '';
+
+            // 更新UI状态
+            this.setInputState(false);
+
+            // 显示发送状态
+            this.showMessageSendingStatus(message);
+
+            // 记录最后活动时间
+            this.realtimeState.lastActivity = Date.now();
+
+            console.log('📤 实时消息已发送:', { sceneId, selectedCharacter, message });
+        } else {
+            Utils.showError('消息发送失败，请检查连接状态');
+        }
+    }
+
+    /**
+     * 选择角色进行实时互动
+     */
+    selectCharacterForRealtime(characterId) {
+        // 更新本地状态
+        this.realtimeState.selectedCharacter = characterId;
+
+        // 更新UI显示
+        document.querySelectorAll('.character-item').forEach(item => {
+            item.classList.remove('selected', 'border-primary');
+        });
+
+        const characterElement = document.querySelector(`[data-character-id="${characterId}"]`);
+        if (characterElement) {
+            characterElement.classList.add('selected', 'border-primary');
+
+            // 更新选择状态显示
+            const characterName = characterElement.querySelector('.fw-bold')?.textContent;
+            const selectedDisplay = document.getElementById('selected-character');
+            if (selectedDisplay) {
+                selectedDisplay.textContent = `已选择: ${characterName}`;
+            }
+
+            // 启用输入控件
+            this.setInputState(true);
+        }
+
+        // 通知实时管理器角色选择变化
+        const sceneId = this.getSceneIdFromPage();
+        if (sceneId && this.realtimeManager) {
+            this.realtimeManager.sendCharacterStatusUpdate(sceneId, characterId, 'selected');
+        }
+
+        console.log('👤 已选择角色进行实时互动:', characterId);
+    }
+
+    /**
+     * 处理新对话消息 - 增强版
+     */
+    handleNewConversation(data) {
+        const { conversation, speakerId, message, timestamp } = data;
+
+        console.log('📨 收到新对话:', data);
+
+        // 调用现有的添加对话方法
+        if (this.addConversationToUI) {
+            this.addConversationToUI(conversation);
+        } else {
+            // 降级处理
+            this.addMessageToChat(conversation);
+        }
+
+        // 如果不是当前用户发送的消息，播放提示音
+        if (speakerId !== this.getCurrentUserId()) {
+            this.playNotificationSound();
+
+            // 显示新消息通知
+            this.showNewMessageNotification(conversation);
+        }
+
+        // 更新统计信息
+        this.updateConversationStats();
+
+        // 自动滚动到最新消息
+        this.scrollToLatestMessage();
+    }
+
+    /**
+     * 更新对话统计信息
+     */
+    updateConversationStats() {
+        try {
+            // 计算基础统计数据
+            const stats = {
+                totalConversations: this.conversations ? this.conversations.length : 0,
+                charactersCount: this.currentScene ? (this.currentScene.characters ? this.currentScene.characters.length : 0) : 0,
+                lastActivity: new Date().toISOString(),
+                activeCharacters: new Set()
+            };
+
+            // 统计活跃角色
+            if (this.conversations) {
+                this.conversations.forEach(conv => {
+                    if (conv.character_id || conv.speaker_id) {
+                        stats.activeCharacters.add(conv.character_id || conv.speaker_id);
+                    }
+                });
+            }
+
+            // 转换为数组
+            stats.activeCharactersCount = stats.activeCharacters.size;
+            delete stats.activeCharacters; // 移除Set对象，因为不能序列化
+
+            // 更新UI中的统计显示
+            this.updateStatsDisplay(stats);
+
+            // 更新仪表板（如果可见）
+            if (this.state.dashboardVisible && this.charts.size > 0) {
+                // 延迟更新仪表板，避免频繁刷新
+                if (this.statsUpdateTimer) {
+                    clearTimeout(this.statsUpdateTimer);
+                }
+
+                this.statsUpdateTimer = setTimeout(() => {
+                    this.refreshDashboardStats();
+                }, 1000);
+            }
+
+            // 保存统计到本地存储（可选）
+            this.saveStatsToLocalStorage(stats);
+
+            console.log('📊 对话统计已更新:', stats);
+
+        } catch (error) {
+            console.error('❌ 更新对话统计失败:', error);
+        }
+    }
+
+    /**
+     * 更新统计显示
+     */
+    updateStatsDisplay(stats) {
+        // 更新页面中的统计卡片
+        const statsElements = {
+            'total-conversations': stats.totalConversations,
+            'characters-count': stats.charactersCount,
+            'active-characters': stats.activeCharactersCount,
+            'last-activity': this.formatLastActivity(stats.lastActivity)
+        };
+
+        Object.entries(statsElements).forEach(([id, value]) => {
+            const element = document.getElementById(id);
+            if (element) {
+                if (typeof value === 'number') {
+                    this.animateNumber(element, value);
+                } else {
+                    element.textContent = value;
+                }
+            }
+        });
+
+        // 更新统计卡片（如果存在）
+        this.updateStatCards(stats);
+
+        // 更新页面标题中的未读消息数（如果有新消息）
+        this.updatePageTitle(stats);
+    }
+
+    /**
+     * 更新统计卡片
+     */
+    updateStatCards(stats) {
+        const cardMappings = [
+            { selector: '.stat-card .stat-value:contains("参与角色")', value: stats.charactersCount },
+            { selector: '.stat-card .stat-value:contains("对话次数")', value: stats.totalConversations },
+            { selector: '.stat-card .stat-value:contains("活跃角色")', value: stats.activeCharactersCount }
+        ];
+
+        cardMappings.forEach(mapping => {
+            // 查找包含特定文本的统计卡片
+            const cards = document.querySelectorAll('.stat-card');
+            cards.forEach(card => {
+                const label = card.querySelector('.stat-label');
+                if (label && label.textContent.includes(mapping.selector.split('"')[1])) {
+                    const valueElement = card.querySelector('.stat-value');
+                    if (valueElement) {
+                        this.animateNumber(valueElement, mapping.value);
+                    }
+                }
+            });
+        });
+    }
+
+    /**
+     * 数字动画效果
+     */
+    animateNumber(element, targetValue) {
+        const currentValue = parseInt(element.textContent) || 0;
+        const difference = targetValue - currentValue;
+
+        if (difference === 0) return;
+
+        const duration = 500; // 动画持续时间
+        const steps = 20; // 动画步数
+        const stepValue = difference / steps;
+        const stepDuration = duration / steps;
+
+        let currentStep = 0;
+
+        const animate = () => {
+            if (currentStep <= steps) {
+                const newValue = Math.round(currentValue + (stepValue * currentStep));
+                element.textContent = newValue;
+                currentStep++;
+                setTimeout(animate, stepDuration);
+            } else {
+                element.textContent = targetValue; // 确保最终值正确
+            }
+        };
+
+        animate();
+    }
+
+    /**
+     * 格式化最后活动时间
+     */
+    formatLastActivity(timestamp) {
+        const now = new Date();
+        const lastActivity = new Date(timestamp);
+        const diffMs = now - lastActivity;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+
+        if (diffMins < 1) {
+            return '刚刚';
+        } else if (diffMins < 60) {
+            return `${diffMins}分钟前`;
+        } else if (diffHours < 24) {
+            return `${diffHours}小时前`;
+        } else {
+            return lastActivity.toLocaleDateString();
+        }
+    }
+
+    /**
+     * 更新页面标题
+     */
+    updatePageTitle(stats) {
+        const baseTitle = document.title.split(' - ')[0] || 'SceneIntruderMCP';
+
+        // 如果有新的对话，在标题中显示
+        if (this.lastConversationCount && stats.totalConversations > this.lastConversationCount) {
+            const newMessages = stats.totalConversations - this.lastConversationCount;
+            document.title = `(${newMessages}) ${baseTitle}`;
+
+            // 3秒后恢复原标题
+            setTimeout(() => {
+                document.title = baseTitle;
+            }, 3000);
+        }
+
+        this.lastConversationCount = stats.totalConversations;
+    }
+
+    /**
+     * 保存统计到本地存储
+     */
+    saveStatsToLocalStorage(stats) {
+        try {
+            const sceneId = this.getSceneIdFromPage();
+            if (sceneId) {
+                const key = `scene_stats_${sceneId}`;
+                const statsData = {
+                    ...stats,
+                    timestamp: Date.now(),
+                    sceneId: sceneId
+                };
+                localStorage.setItem(key, JSON.stringify(statsData));
+            }
+        } catch (error) {
+            console.warn('保存统计到本地存储失败:', error);
+        }
+    }
+
+    /**
+     * 自动滚动到最新消息
+     */
+    scrollToLatestMessage() {
+        try {
+            // 查找对话容器
+            const conversationContainer = this.findConversationContainer();
+
+            if (!conversationContainer) {
+                console.warn('未找到对话容器，无法滚动');
+                return;
+            }
+
+            // 平滑滚动到底部
+            this.smoothScrollToBottom(conversationContainer);
+
+            // 如果页面不在焦点，闪烁标签页标题
+            if (document.hidden) {
+                this.flashPageTitle();
+            }
+
+            // 标记最新消息（添加视觉效果）
+            this.highlightLatestMessage();
+
+            console.log('📜 已滚动到最新消息');
+
+        } catch (error) {
+            console.error('❌ 滚动到最新消息失败:', error);
+        }
+    }
+
+    /**
+     * 查找对话容器
+     */
+    findConversationContainer() {
+        // 按优先级查找对话容器
+        const selectors = [
+            '#conversation-history',
+            '#chat-messages',
+            '.conversation-container',
+            '.chat-container',
+            '.messages-container',
+            '#messages',
+            '.conversation-list'
+        ];
+
+        for (const selector of selectors) {
+            const container = document.querySelector(selector);
+            if (container) {
+                return container;
+            }
+        }
+
+        // 如果没找到专门的容器，查找包含消息的通用容器
+        const messageElements = document.querySelectorAll('.message, .conversation-item, .chat-message');
+        if (messageElements.length > 0) {
+            return messageElements[0].closest('.container, .content, .main, main, body');
+        }
+
+        return null;
+    }
+
+    /**
+     * 平滑滚动到底部
+     */
+    smoothScrollToBottom(container) {
+        if (!container) return;
+
+        // 检查是否需要滚动
+        const isNearBottom = this.isNearBottom(container);
+
+        // 如果用户已经滚动到其他位置，询问是否要滚动到最新消息
+        if (!isNearBottom && this.shouldAskBeforeScroll()) {
+            this.showScrollToBottomPrompt(container);
+            return;
+        }
+
+        // 执行平滑滚动
+        const scrollOptions = {
+            top: container.scrollHeight,
+            behavior: 'smooth'
+        };
+
+        // 优先使用 scrollTo，如果不支持则使用 scrollTop
+        if (container.scrollTo) {
+            container.scrollTo(scrollOptions);
+        } else {
+            // 降级到即时滚动
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // 添加滚动动画效果
+        this.addScrollAnimation(container);
+    }
+
+    /**
+     * 检查是否接近底部
+     */
+    isNearBottom(container, threshold = 100) {
+        const scrollTop = container.scrollTop;
+        const scrollHeight = container.scrollHeight;
+        const clientHeight = container.clientHeight;
+
+        return (scrollHeight - scrollTop - clientHeight) < threshold;
+    }
+
+    /**
+     * 是否应该询问用户是否滚动
+     */
+    shouldAskBeforeScroll() {
+        // 如果用户最近有交互行为，则不自动滚动
+        const lastUserInteraction = this.realtimeState?.lastActivity || 0;
+        const timeSinceInteraction = Date.now() - lastUserInteraction;
+
+        return timeSinceInteraction > 10000; // 10秒内有交互则不自动滚动
+    }
+
+    /**
+     * 显示滚动到底部提示
+     */
+    showScrollToBottomPrompt(container) {
+        // 创建提示元素
+        const prompt = document.createElement('div');
+        prompt.className = 'scroll-to-bottom-prompt';
+        prompt.innerHTML = `
+        <div class="prompt-content">
+            <span>有新消息</span>
+            <button class="btn btn-sm btn-primary scroll-btn">查看</button>
+            <button class="btn btn-sm btn-outline-secondary dismiss-btn">×</button>
+        </div>
+    `;
+
+        // 添加样式
+        prompt.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: rgba(0, 123, 255, 0.9);
+        color: white;
+        padding: 10px 15px;
+        border-radius: 25px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+        z-index: 1000;
+        animation: slideInUp 0.3s ease;
+        font-size: 14px;
+    `;
+
+        // 绑定事件
+        prompt.querySelector('.scroll-btn').addEventListener('click', () => {
+            this.smoothScrollToBottom(container);
+            prompt.remove();
+        });
+
+        prompt.querySelector('.dismiss-btn').addEventListener('click', () => {
+            prompt.remove();
+        });
+
+        // 添加到页面
+        document.body.appendChild(prompt);
+
+        // 5秒后自动消失
+        setTimeout(() => {
+            if (prompt.parentNode) {
+                prompt.remove();
+            }
+        }, 5000);
+    }
+
+    /**
+     * 添加滚动动画效果
+     */
+    addScrollAnimation(container) {
+        container.style.transition = 'scroll-behavior 0.3s ease';
+
+        setTimeout(() => {
+            container.style.transition = '';
+        }, 300);
+    }
+
+    /**
+     * 高亮最新消息
+     */
+    highlightLatestMessage() {
+        // 查找最新的消息元素
+        const messageSelectors = [
+            '.message:last-child',
+            '.conversation-item:last-child',
+            '.chat-message:last-child'
+        ];
+
+        let latestMessage = null;
+        for (const selector of messageSelectors) {
+            latestMessage = document.querySelector(selector);
+            if (latestMessage) break;
+        }
+
+        if (!latestMessage) return;
+
+        // 添加高亮效果
+        latestMessage.classList.add('new-message-highlight');
+
+        // 2秒后移除高亮
+        setTimeout(() => {
+            latestMessage.classList.remove('new-message-highlight');
+        }, 2000);
+    }
+
+    /**
+     * 闪烁页面标题
+     */
+    flashPageTitle() {
+        const originalTitle = document.title;
+        let flashCount = 0;
+        const maxFlashes = 6;
+
+        const flashInterval = setInterval(() => {
+            document.title = flashCount % 2 === 0 ? '💬 新消息!' : originalTitle;
+            flashCount++;
+
+            if (flashCount >= maxFlashes) {
+                clearInterval(flashInterval);
+                document.title = originalTitle;
+            }
+        }, 500);
+
+        // 当用户回到页面时停止闪烁
+        const stopFlashing = () => {
+            clearInterval(flashInterval);
+            document.title = originalTitle;
+            document.removeEventListener('visibilitychange', stopFlashing);
+        };
+
+        document.addEventListener('visibilitychange', () => {
+            if (!document.hidden) {
+                stopFlashing();
+            }
+        });
+    }
+
+    /**
+     * 刷新仪表板统计
+     */
+    refreshDashboardStats() {
+        if (!this.state.dashboardVisible) return;
+
+        try {
+            // 重新计算统计数据
+            const stats = this.calculateSceneStats();
+
+            // 更新统计卡片
+            const statsContainer = document.querySelector('.stats-cards-container');
+            if (statsContainer) {
+                statsContainer.innerHTML = this.renderStatsCards();
+            }
+
+            // 更新角色互动图表
+            if (this.charts.has('character-interaction')) {
+                this.renderCharacterInteractionChart();
+            }
+
+            // 更新时间线图表
+            if (this.charts.has('interaction-timeline')) {
+                this.renderInteractionTimelineChart();
+            }
+
+            console.log('📊 仪表板统计已刷新');
+
+        } catch (error) {
+            console.error('❌ 刷新仪表板统计失败:', error);
+        }
+    }
+
+    /**
+     * 获取消息发送状态显示
+     */
+    showMessageSendingStatus(message) {
+        // 创建发送状态提示
+        const statusElement = document.createElement('div');
+        statusElement.className = 'message-sending-status';
+        statusElement.innerHTML = `
+        <div class="status-content">
+            <i class="bi bi-clock-history"></i>
+            <span>发送中...</span>
+        </div>
+    `;
+
+        // 添加样式
+        statusElement.style.cssText = `
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0, 123, 255, 0.1);
+        border: 1px solid #007bff;
+        color: #007bff;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 14px;
+        z-index: 1000;
+        animation: fadeInDown 0.3s ease;
+    `;
+
+        // 添加到页面
+        document.body.appendChild(statusElement);
+
+        // 2秒后自动移除
+        setTimeout(() => {
+            if (statusElement.parentNode) {
+                statusElement.style.animation = 'fadeOutUp 0.3s ease';
+                setTimeout(() => {
+                    statusElement.remove();
+                }, 300);
+            }
+        }, 2000);
+
+        // 保存引用以便外部更新状态
+        this.currentSendingStatus = statusElement;
+    }
+
+    /**
+     * 更新消息发送状态
+     */
+    updateMessageSendingStatus(status, message) {
+        if (!this.currentSendingStatus) return;
+
+        const statusContent = this.currentSendingStatus.querySelector('.status-content');
+        if (!statusContent) return;
+
+        switch (status) {
+            case 'success':
+                statusContent.innerHTML = `
+                <i class="bi bi-check-circle text-success"></i>
+                <span class="text-success">发送成功</span>
+            `;
+                break;
+            case 'error':
+                statusContent.innerHTML = `
+                <i class="bi bi-exclamation-circle text-danger"></i>
+                <span class="text-danger">发送失败</span>
+            `;
+                break;
+            case 'retry':
+                statusContent.innerHTML = `
+                <i class="bi bi-arrow-clockwise text-warning"></i>
+                <span class="text-warning">重试中...</span>
+            `;
+                break;
+        }
+
+        // 1.5秒后移除状态提示
+        setTimeout(() => {
+            if (this.currentSendingStatus && this.currentSendingStatus.parentNode) {
+                this.currentSendingStatus.remove();
+                this.currentSendingStatus = null;
+            }
+        }, 1500);
+    }
+
+    /**
+     * 初始化消息滚动监听
+     */
+    initScrollMonitoring() {
+        const container = this.findConversationContainer();
+        if (!container) return;
+
+        // 监听滚动事件
+        let scrollTimeout;
+        container.addEventListener('scroll', () => {
+            // 清除之前的定时器
+            if (scrollTimeout) {
+                clearTimeout(scrollTimeout);
+            }
+
+            // 延迟检查滚动状态
+            scrollTimeout = setTimeout(() => {
+                const isNearBottom = this.isNearBottom(container);
+
+                // 更新滚动状态
+                this.state.isScrolledToBottom = isNearBottom;
+
+                // 如果用户滚动离开底部，显示"滚动到底部"按钮
+                this.toggleScrollToBottomButton(!isNearBottom);
+            }, 100);
+        });
+
+        console.log('📜 消息滚动监听已初始化');
+    }
+
+    /**
+     * 切换滚动到底部按钮
+     */
+    toggleScrollToBottomButton(show) {
+        let button = document.getElementById('scroll-to-bottom-btn');
+
+        if (show && !button) {
+            // 创建滚动按钮
+            button = document.createElement('button');
+            button.id = 'scroll-to-bottom-btn';
+            button.className = 'btn btn-primary btn-sm';
+            button.innerHTML = '<i class="bi bi-arrow-down"></i>';
+            button.title = '滚动到最新消息';
+
+            button.style.cssText = `
+            position: fixed;
+            bottom: 100px;
+            right: 20px;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            z-index: 1000;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            animation: fadeInUp 0.3s ease;
+        `;
+
+            button.addEventListener('click', () => {
+                const container = this.findConversationContainer();
+                if (container) {
+                    this.smoothScrollToBottom(container);
+                }
+            });
+
+            document.body.appendChild(button);
+        } else if (!show && button) {
+            // 隐藏滚动按钮
+            button.style.animation = 'fadeOutDown 0.3s ease';
+            setTimeout(() => {
+                if (button.parentNode) {
+                    button.remove();
+                }
+            }, 300);
+        }
+    }
+
+    /**
+     * 处理角色状态更新
+     */
+    handleCharacterStatusUpdate(data) {
+        const { characterId, status, mood, activity } = data;
+
+        console.log('👤 角色状态更新:', data);
+
+        // 更新角色UI显示
+        const characterElement = document.querySelector(`[data-character-id="${characterId}"]`);
+        if (characterElement) {
+            // 使用新的方法更新状态指示器和卡片样式
+            this.updateCharacterStatusIndicator(characterElement, status, mood);
+            this.updateCharacterCardStyle(characterElement, status);
+
+            // 触发状态监听器
+            this.triggerCharacterStatusListeners(characterId, status, mood);
+        }
+
+        // 显示状态变化通知
+        if (status === 'busy') {
+            const characterName = this.getCharacterName(characterId);
+            Utils.showInfo(`${characterName} 正在忙碌中...`, 3000);
+        } else if (status === 'online') {
+            const characterName = this.getCharacterName(characterId);
+            Utils.showSuccess(`${characterName} 现在可以互动了`, 2000);
+        }
+
+        // 更新全局角色状态缓存
+        if (!this.characterStatusCache) {
+            this.characterStatusCache = new Map();
+        }
+
+        this.characterStatusCache.set(characterId, { status, mood, timestamp: Date.now() });
+
+        // 如果是当前选中的角色，更新交互界面
+        if (this.realtimeState?.selectedCharacter === characterId) {
+            this.updateSelectedCharacterInterface(status, mood);
+        }
+    }
+
+    /**
+ * 更新选中角色的交互界面
+ */
+    updateSelectedCharacterInterface(status, mood) {
+        const messageInput = document.getElementById('message-input');
+        const sendBtn = document.getElementById('send-btn');
+
+        // 根据状态更新交互控件
+        const isInteractive = ['online', 'typing'].includes(status);
+
+        if (messageInput) {
+            messageInput.disabled = !isInteractive;
+            messageInput.placeholder = isInteractive ?
+                '输入消息...' :
+                `角色当前${this.getStatusConfig(status).text}，请稍后再试`;
+        }
+
+        if (sendBtn) {
+            sendBtn.disabled = !isInteractive;
+        }
+
+        // 显示状态提示
+        const statusDisplay = document.getElementById('selected-character-status');
+        if (statusDisplay) {
+            const statusConfig = this.getStatusConfig(status);
+            const moodConfig = this.getMoodConfig(mood);
+
+            statusDisplay.innerHTML = `
+            <span class="status-info">
+                <i class="bi bi-${statusConfig.icon}" style="color: ${statusConfig.color}"></i>
+                ${statusConfig.text} ${moodConfig.emoji}
+            </span>
+        `;
+        }
+    }
+
+    /**
+     * 更新角色状态指示器
+     */
+    updateCharacterStatusIndicator(characterElement, status, mood) {
+        if (!characterElement) return;
+
+        try {
+            // 查找或创建状态指示器
+            let statusIndicator = characterElement.querySelector('.character-status-indicator');
+            if (!statusIndicator) {
+                statusIndicator = this.createCharacterStatusIndicator();
+                characterElement.appendChild(statusIndicator);
+            }
+
+            // 更新状态显示
+            this.updateStatusIndicatorContent(statusIndicator, status, mood);
+
+            // 添加状态变化动画
+            this.animateStatusChange(statusIndicator, status);
+
+            console.log(`✅ 角色状态指示器已更新: status=${status}, mood=${mood}`);
+
+        } catch (error) {
+            console.error('❌ 更新角色状态指示器失败:', error);
+        }
+    }
+
+    /**
+     * 创建角色状态指示器元素
+     */
+    createCharacterStatusIndicator() {
+        const indicator = document.createElement('div');
+        indicator.className = 'character-status-indicator';
+        indicator.innerHTML = `
+        <div class="status-badge">
+            <i class="status-icon"></i>
+            <span class="status-text"></span>
+        </div>
+        <div class="mood-indicator">
+            <span class="mood-emoji"></span>
+            <span class="mood-text"></span>
+        </div>
+    `;
+
+        // 添加基础样式
+        indicator.style.cssText = `
+        position: absolute;
+        top: 5px;
+        right: 5px;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        font-size: 11px;
+    `;
+
+        return indicator;
+    }
+
+    /**
+     * 更新状态指示器内容
+     */
+    updateStatusIndicatorContent(statusIndicator, status, mood) {
+        const statusBadge = statusIndicator.querySelector('.status-badge');
+        const statusIcon = statusIndicator.querySelector('.status-icon');
+        const statusText = statusIndicator.querySelector('.status-text');
+        const moodEmoji = statusIndicator.querySelector('.mood-emoji');
+        const moodText = statusIndicator.querySelector('.mood-text');
+
+        // 状态配置映射
+        const statusConfig = this.getStatusConfig(status);
+        const moodConfig = this.getMoodConfig(mood);
+
+        // 更新状态徽章
+        if (statusBadge && statusConfig) {
+            statusBadge.className = `status-badge ${statusConfig.class}`;
+            statusBadge.title = statusConfig.description;
+        }
+
+        // 更新状态图标
+        if (statusIcon && statusConfig) {
+            statusIcon.className = `status-icon bi bi-${statusConfig.icon}`;
+        }
+
+        // 更新状态文本
+        if (statusText && statusConfig) {
+            statusText.textContent = statusConfig.text;
+        }
+
+        // 更新心情指示器
+        if (moodEmoji && moodConfig) {
+            moodEmoji.textContent = moodConfig.emoji;
+            moodEmoji.title = moodConfig.description;
+        }
+
+        if (moodText && moodConfig) {
+            moodText.textContent = moodConfig.text;
+            moodText.className = `mood-text ${moodConfig.class}`;
+        }
+    }
+
+    /**
+     * 获取状态配置
+     */
+    getStatusConfig(status) {
+        const configs = {
+            'online': {
+                class: 'status-online',
+                icon: 'circle-fill',
+                text: '在线',
+                description: '角色当前在线并可以互动',
+                color: '#28a745'
+            },
+            'busy': {
+                class: 'status-busy',
+                icon: 'hourglass-split',
+                text: '忙碌',
+                description: '角色正在处理其他事务',
+                color: '#ffc107'
+            },
+            'away': {
+                class: 'status-away',
+                icon: 'moon',
+                text: '离开',
+                description: '角色暂时离开',
+                color: '#6c757d'
+            },
+            'offline': {
+                class: 'status-offline',
+                icon: 'circle',
+                text: '离线',
+                description: '角色当前离线',
+                color: '#dc3545'
+            },
+            'typing': {
+                class: 'status-typing',
+                icon: 'three-dots',
+                text: '输入中',
+                description: '角色正在输入回复',
+                color: '#007bff'
+            },
+            'thinking': {
+                class: 'status-thinking',
+                icon: 'lightbulb',
+                text: '思考中',
+                description: '角色正在思考回应',
+                color: '#17a2b8'
+            }
+        };
+
+        return configs[status] || configs['offline'];
+    }
+
+    /**
+     * 获取心情配置
+     */
+    getMoodConfig(mood) {
+        const configs = {
+            'happy': {
+                emoji: '😊',
+                text: '开心',
+                class: 'mood-positive',
+                description: '角色心情愉快'
+            },
+            'excited': {
+                emoji: '🤩',
+                text: '兴奋',
+                class: 'mood-positive',
+                description: '角色情绪高涨'
+            },
+            'sad': {
+                emoji: '😢',
+                text: '伤心',
+                class: 'mood-negative',
+                description: '角色感到悲伤'
+            },
+            'angry': {
+                emoji: '😠',
+                text: '愤怒',
+                class: 'mood-negative',
+                description: '角色感到愤怒'
+            },
+            'confused': {
+                emoji: '😕',
+                text: '困惑',
+                class: 'mood-neutral',
+                description: '角色感到困惑'
+            },
+            'calm': {
+                emoji: '😌',
+                text: '平静',
+                class: 'mood-neutral',
+                description: '角色心情平静'
+            },
+            'surprised': {
+                emoji: '😲',
+                text: '惊讶',
+                class: 'mood-neutral',
+                description: '角色感到惊讶'
+            },
+            'tired': {
+                emoji: '😴',
+                text: '疲惫',
+                class: 'mood-negative',
+                description: '角色感到疲惫'
+            },
+            'curious': {
+                emoji: '🤔',
+                text: '好奇',
+                class: 'mood-positive',
+                description: '角色充满好奇'
+            },
+            'worried': {
+                emoji: '😟',
+                text: '担心',
+                class: 'mood-negative',
+                description: '角色感到担心'
+            }
+        };
+
+        return configs[mood] || configs['calm'];
+    }
+
+    /**
+     * 添加状态变化动画
+     */
+    animateStatusChange(statusIndicator, status) {
+        // 移除之前的动画类
+        statusIndicator.classList.remove('status-changing', 'status-pulse', 'status-glow');
+
+        // 根据状态添加不同的动画效果
+        switch (status) {
+            case 'typing':
+            case 'thinking':
+                statusIndicator.classList.add('status-pulse');
+                break;
+            case 'online':
+                statusIndicator.classList.add('status-glow');
+                break;
+            default:
+                statusIndicator.classList.add('status-changing');
+        }
+
+        // 动画结束后移除类
+        setTimeout(() => {
+            statusIndicator.classList.remove('status-changing', 'status-pulse', 'status-glow');
+        }, 1000);
+    }
+
+    /**
+     * 更新角色卡片样式
+     */
+    updateCharacterCardStyle(characterElement, status) {
+        if (!characterElement) return;
+
+        try {
+            // 移除所有状态相关的CSS类
+            const statusClasses = [
+                'character-online', 'character-busy', 'character-away',
+                'character-offline', 'character-typing', 'character-thinking'
+            ];
+
+            statusClasses.forEach(cls => {
+                characterElement.classList.remove(cls);
+            });
+
+            // 添加新的状态类
+            const statusClass = `character-${status}`;
+            characterElement.classList.add(statusClass);
+
+            // 更新边框和背景色
+            this.updateCharacterCardVisuals(characterElement, status);
+
+            // 更新交互状态
+            this.updateCharacterInteractivity(characterElement, status);
+
+            // 添加状态变化的视觉反馈
+            this.addCharacterCardAnimation(characterElement, status);
+
+            console.log(`✅ 角色卡片样式已更新: ${status}`);
+
+        } catch (error) {
+            console.error('❌ 更新角色卡片样式失败:', error);
+        }
+    }
+
+    /**
+     * 更新角色卡片视觉效果
+     */
+    updateCharacterCardVisuals(characterElement, status) {
+        const statusConfig = this.getStatusConfig(status);
+
+        // 更新边框颜色
+        characterElement.style.borderLeftColor = statusConfig.color;
+        characterElement.style.borderLeftWidth = '4px';
+        characterElement.style.borderLeftStyle = 'solid';
+
+        // 更新背景色（轻微的状态提示）
+        const alpha = status === 'offline' ? 0.05 : 0.1;
+        const rgb = this.hexToRgb(statusConfig.color);
+        if (rgb) {
+            characterElement.style.backgroundColor = `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${alpha})`;
+        }
+
+        // 更新阴影效果
+        if (status === 'online' || status === 'typing') {
+            characterElement.style.boxShadow = `0 2px 8px rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, 0.3)`;
+        } else {
+            characterElement.style.boxShadow = '0 2px 4px rgba(0,0,0,0.1)';
+        }
+    }
+
+    /**
+     * 更新角色交互性
+     */
+    updateCharacterInteractivity(characterElement, status) {
+        // 根据状态启用/禁用交互
+        const isInteractive = ['online', 'typing', 'thinking'].includes(status);
+
+        // 更新指针样式
+        characterElement.style.cursor = isInteractive ? 'pointer' : 'default';
+
+        // 更新不透明度
+        characterElement.style.opacity = status === 'offline' ? '0.6' : '1';
+
+        // 添加/移除交互提示
+        if (isInteractive) {
+            characterElement.title = '点击与此角色互动';
+            characterElement.classList.add('interactive');
+        } else {
+            characterElement.title = `角色当前${this.getStatusConfig(status).text}，暂时无法互动`;
+            characterElement.classList.remove('interactive');
+        }
+
+        // 更新内部按钮状态
+        const buttons = characterElement.querySelectorAll('button, .btn');
+        buttons.forEach(btn => {
+            btn.disabled = !isInteractive;
+            if (!isInteractive) {
+                btn.classList.add('disabled');
+            } else {
+                btn.classList.remove('disabled');
+            }
+        });
+    }
+
+    /**
+     * 添加角色卡片动画效果
+     */
+    addCharacterCardAnimation(characterElement, status) {
+        // 移除之前的动画类
+        const animationClasses = [
+            'card-pulse', 'card-glow', 'card-shake', 'card-bounce', 'card-fade'
+        ];
+        animationClasses.forEach(cls => {
+            characterElement.classList.remove(cls);
+        });
+
+        // 根据状态添加相应动画
+        switch (status) {
+            case 'online':
+                characterElement.classList.add('card-glow');
+                break;
+            case 'typing':
+            case 'thinking':
+                characterElement.classList.add('card-pulse');
+                break;
+            case 'busy':
+                characterElement.classList.add('card-shake');
+                setTimeout(() => {
+                    characterElement.classList.remove('card-shake');
+                }, 1000);
+                break;
+            case 'offline':
+                characterElement.classList.add('card-fade');
+                break;
+            default:
+                characterElement.classList.add('card-bounce');
+                setTimeout(() => {
+                    characterElement.classList.remove('card-bounce');
+                }, 600);
+        }
+    }
+
+    /**
+     * 辅助函数：十六进制颜色转RGB
+     */
+    hexToRgb(hex) {
+        const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+        return result ? {
+            r: parseInt(result[1], 16),
+            g: parseInt(result[2], 16),
+            b: parseInt(result[3], 16)
+        } : null;
+    }
+
+    /**
+     * 批量更新角色状态
+     */
+    updateMultipleCharacterStatus(updates) {
+        if (!Array.isArray(updates)) return;
+
+        updates.forEach(update => {
+            const { characterId, status, mood } = update;
+            const characterElement = document.querySelector(`[data-character-id="${characterId}"]`);
+
+            if (characterElement) {
+                this.updateCharacterStatusIndicator(characterElement, status, mood);
+                this.updateCharacterCardStyle(characterElement, status);
+            }
+        });
+
+        console.log(`✅ 批量更新了 ${updates.length} 个角色的状态`);
+    }
+
+    /**
+     * 获取角色当前状态
+     */
+    getCharacterCurrentStatus(characterId) {
+        const characterElement = document.querySelector(`[data-character-id="${characterId}"]`);
+        if (!characterElement) return null;
+
+        // 从CSS类中提取状态
+        const statusClasses = [
+            'character-online', 'character-busy', 'character-away',
+            'character-offline', 'character-typing', 'character-thinking'
+        ];
+
+        for (const cls of statusClasses) {
+            if (characterElement.classList.contains(cls)) {
+                return cls.replace('character-', '');
+            }
+        }
+
+        return 'offline'; // 默认状态
+    }
+
+    /**
+     * 重置所有角色状态为默认
+     */
+    resetAllCharacterStatus() {
+        const characterElements = document.querySelectorAll('[data-character-id]');
+
+        characterElements.forEach(element => {
+            this.updateCharacterStatusIndicator(element, 'offline', 'calm');
+            this.updateCharacterCardStyle(element, 'offline');
+        });
+
+        console.log('✅ 所有角色状态已重置为默认');
+    }
+
+    /**
+     * 添加角色状态监听器
+     */
+    addCharacterStatusListener(characterId, callback) {
+        if (!this.characterStatusListeners) {
+            this.characterStatusListeners = new Map();
+        }
+
+        if (!this.characterStatusListeners.has(characterId)) {
+            this.characterStatusListeners.set(characterId, []);
+        }
+
+        this.characterStatusListeners.get(characterId).push(callback);
+    }
+
+    /**
+     * 移除角色状态监听器
+     */
+    removeCharacterStatusListener(characterId, callback) {
+        if (!this.characterStatusListeners || !this.characterStatusListeners.has(characterId)) {
+            return;
+        }
+
+        const listeners = this.characterStatusListeners.get(characterId);
+        const index = listeners.indexOf(callback);
+        if (index > -1) {
+            listeners.splice(index, 1);
+        }
+    }
+
+    /**
+     * 触发角色状态监听器
+     */
+    triggerCharacterStatusListeners(characterId, status, mood) {
+        if (!this.characterStatusListeners || !this.characterStatusListeners.has(characterId)) {
+            return;
+        }
+
+        const listeners = this.characterStatusListeners.get(characterId);
+        listeners.forEach(callback => {
+            try {
+                callback(characterId, status, mood);
+            } catch (error) {
+                console.error('角色状态监听器执行失败:', error);
+            }
+        });
+    }
+
+    /**
+     * 处理故事事件
+     */
+    handleStoryEvent(data) {
+        const { eventType, eventData, description } = data;
+
+        console.log('📖 故事事件:', data);
+
+        // 显示故事事件通知
+        if (description) {
+            this.showStoryEventNotification(description, eventType);
+        }
+
+        // 更新故事界面
+        if (this.storyData && eventData) {
+            this.updateStoryDisplay(eventData);
+        }
+
+        // 刷新仪表板数据
+        if (this.state.dashboardVisible) {
+            setTimeout(() => {
+                this.refreshDashboard();
+            }, 1000);
+        }
+    }
+
+    /**
+     * 显示故事事件通知
+     */
+    showStoryEventNotification(description, eventType) {
+        if (!description) return;
+
+        try {
+            // 根据事件类型确定通知样式
+            const notificationConfig = this.getStoryEventNotificationConfig(eventType);
+
+            // 创建通知元素
+            const notification = this.createStoryEventNotification(description, notificationConfig);
+
+            // 显示通知
+            this.displayStoryNotification(notification);
+
+            // 播放事件音效
+            this.playStoryEventSound(eventType);
+
+            // 记录故事事件
+            this.logStoryEvent(description, eventType);
+
+            console.log(`📖 故事事件通知已显示: ${eventType} - ${description}`);
+
+        } catch (error) {
+            console.error('❌ 显示故事事件通知失败:', error);
+            // 降级处理
+            this.showFallbackStoryNotification(description);
+        }
+    }
+
+    /**
+     * 获取故事事件通知配置
+     */
+    getStoryEventNotificationConfig(eventType) {
+        const configs = {
+            'story_progress': {
+                icon: '📖',
+                class: 'story-progress',
+                color: '#007bff',
+                duration: 4000,
+                sound: 'story_progress'
+            },
+            'character_development': {
+                icon: '👤',
+                class: 'character-development',
+                color: '#28a745',
+                duration: 5000,
+                sound: 'character_event'
+            },
+            'plot_twist': {
+                icon: '🌪️',
+                class: 'plot-twist',
+                color: '#dc3545',
+                duration: 6000,
+                sound: 'plot_twist'
+            },
+            'location_discovered': {
+                icon: '🗺️',
+                class: 'location-discovered',
+                color: '#17a2b8',
+                duration: 4000,
+                sound: 'discovery'
+            },
+            'item_acquired': {
+                icon: '📦',
+                class: 'item-acquired',
+                color: '#ffc107',
+                duration: 3000,
+                sound: 'item_acquired'
+            },
+            'objective_completed': {
+                icon: '✅',
+                class: 'objective-completed',
+                color: '#28a745',
+                duration: 5000,
+                sound: 'success'
+            },
+            'relationship_change': {
+                icon: '💫',
+                class: 'relationship-change',
+                color: '#e83e8c',
+                duration: 4000,
+                sound: 'relationship'
+            },
+            'time_passage': {
+                icon: '⏰',
+                class: 'time-passage',
+                color: '#6f42c1',
+                duration: 3000,
+                sound: 'time_event'
+            },
+            'environment_change': {
+                icon: '🌍',
+                class: 'environment-change',
+                color: '#20c997',
+                duration: 4000,
+                sound: 'environment'
+            },
+            'conflict_escalation': {
+                icon: '⚔️',
+                class: 'conflict-escalation',
+                color: '#fd7e14',
+                duration: 5000,
+                sound: 'conflict'
+            },
+            'mystery_revealed': {
+                icon: '🔍',
+                class: 'mystery-revealed',
+                color: '#6610f2',
+                duration: 6000,
+                sound: 'revelation'
+            }
+        };
+
+        return configs[eventType] || configs['story_progress'];
+    }
+
+    /**
+     * 创建故事事件通知元素
+     */
+    createStoryEventNotification(description, config) {
+        const notification = document.createElement('div');
+        notification.className = `story-event-notification ${config.class}`;
+
+        // 设置基础样式
+        notification.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        max-width: 400px;
+        background: linear-gradient(135deg, ${config.color}15, ${config.color}25);
+        border: 1px solid ${config.color}40;
+        border-left: 4px solid ${config.color};
+        border-radius: 8px;
+        padding: 16px 20px;
+        margin-bottom: 10px;
+        z-index: 1000;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(10px);
+        animation: storyNotificationSlideIn 0.4s ease-out;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    `;
+
+        // 创建内容结构
+        notification.innerHTML = `
+        <div class="story-notification-header">
+            <span class="story-event-icon">${config.icon}</span>
+            <span class="story-event-type">${this.getEventTypeLabel(notification.classList[1])}</span>
+            <button class="story-notification-close" aria-label="关闭通知">×</button>
+        </div>
+        <div class="story-notification-body">
+            <p class="story-event-description">${this.escapeHtml(description)}</p>
+        </div>
+        <div class="story-notification-footer">
+            <div class="story-progress-bar">
+                <div class="story-progress-fill" style="background-color: ${config.color}"></div>
+            </div>
+            <span class="story-notification-time">${new Date().toLocaleTimeString()}</span>
+        </div>
+    `;
+
+        // 存储配置信息
+        notification._config = config;
+        notification._timestamp = Date.now();
+
+        return notification;
+    }
+
+    /**
+     * 显示故事通知
+     */
+    displayStoryNotification(notification) {
+        // 添加到页面
+        document.body.appendChild(notification);
+
+        // 获取配置
+        const config = notification._config;
+
+        // 启动进度条动画
+        const progressFill = notification.querySelector('.story-progress-fill');
+        if (progressFill) {
+            setTimeout(() => {
+                progressFill.style.width = '100%';
+                progressFill.style.transition = `width ${config.duration}ms linear`;
+            }, 100);
+        }
+
+        // 绑定关闭按钮事件
+        const closeBtn = notification.querySelector('.story-notification-close');
+        if (closeBtn) {
+            closeBtn.addEventListener('click', () => {
+                this.dismissStoryNotification(notification);
+            });
+        }
+
+        // 添加点击展开功能
+        notification.addEventListener('click', (e) => {
+            if (!e.target.classList.contains('story-notification-close')) {
+                this.expandStoryNotification(notification);
+            }
+        });
+
+        // 自动消失
+        setTimeout(() => {
+            if (notification.parentNode) {
+                this.dismissStoryNotification(notification);
+            }
+        }, config.duration);
+
+        // 管理通知堆叠
+        this.manageNotificationStack();
+    }
+
+    /**
+     * 关闭故事通知
+     */
+    dismissStoryNotification(notification) {
+        if (!notification || !notification.parentNode) return;
+
+        notification.style.animation = 'storyNotificationSlideOut 0.3s ease-in forwards';
+
+        setTimeout(() => {
+            if (notification.parentNode) {
+                notification.remove();
+            }
+            this.manageNotificationStack();
+        }, 300);
+    }
+
+    /**
+     * 展开故事通知
+     */
+    expandStoryNotification(notification) {
+        const body = notification.querySelector('.story-notification-body');
+        const description = body.querySelector('.story-event-description');
+
+        if (body && description) {
+            // 切换展开状态
+            const isExpanded = notification.classList.contains('expanded');
+
+            if (isExpanded) {
+                notification.classList.remove('expanded');
+                description.style.maxHeight = '60px';
+                description.style.overflow = 'hidden';
+            } else {
+                notification.classList.add('expanded');
+                description.style.maxHeight = 'none';
+                description.style.overflow = 'visible';
+
+                // 添加展开指示器
+                if (!body.querySelector('.expansion-indicator')) {
+                    const indicator = document.createElement('div');
+                    indicator.className = 'expansion-indicator';
+                    indicator.innerHTML = '<small>点击收起</small>';
+                    body.appendChild(indicator);
+                }
+            }
+        }
+    }
+
+    /**
+     * 管理通知堆叠
+     */
+    manageNotificationStack() {
+        const notifications = document.querySelectorAll('.story-event-notification');
+
+        // 重新排列通知位置
+        notifications.forEach((notification, index) => {
+            const topOffset = 20 + (index * 10); // 每个通知间隔10px
+            notification.style.top = `${topOffset}px`;
+            notification.style.zIndex = 1000 - index;
+        });
+
+        // 如果通知太多，移除最老的
+        if (notifications.length > 5) {
+            for (let i = 5; i < notifications.length; i++) {
+                this.dismissStoryNotification(notifications[i]);
+            }
+        }
+    }
+
+    /**
+     * 播放故事事件音效
+     */
+    playStoryEventSound(eventType) {
+        // 检查是否启用音效
+        if (!this.state.soundEnabled) return;
+
+        try {
+            // 尝试使用实时管理器播放音效
+            if (this.realtimeManager && this.realtimeManager.playStorySound) {
+                this.realtimeManager.playStorySound(eventType);
+                return;
+            }
+
+            // 降级到简单音效播放
+            this.playSimpleStorySound(eventType);
+
+        } catch (error) {
+            console.warn('播放故事音效失败:', error);
+        }
+    }
+
+    /**
+     * 播放简单故事音效
+     */
+    playSimpleStorySound(eventType) {
+        // 音频频率映射
+        const soundMap = {
+            'story_progress': 440,     // A4
+            'character_development': 523, // C5
+            'plot_twist': 659,         // E5
+            'location_discovered': 392, // G4
+            'item_acquired': 523,      // C5
+            'objective_completed': 659, // E5
+            'relationship_change': 587, // D5
+            'time_passage': 349,       // F4
+            'environment_change': 440,  // A4
+            'conflict_escalation': 294, // D4
+            'mystery_revealed': 740     // F#5
+        };
+
+        const frequency = soundMap[eventType] || 440;
+
+        // 使用Web Audio API创建简单音效
+        if (typeof AudioContext !== 'undefined' || typeof webkitAudioContext !== 'undefined') {
+            try {
+                const audioContext = new (AudioContext || webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+
+                oscillator.frequency.value = frequency;
+                oscillator.type = 'sine';
+
+                gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+
+                oscillator.start(audioContext.currentTime);
+                oscillator.stop(audioContext.currentTime + 0.5);
+            } catch (error) {
+                console.warn('Web Audio API 音效播放失败:', error);
+            }
+        }
+    }
+
+    /**
+     * 记录故事事件
+     */
+    logStoryEvent(description, eventType) {
+        // 记录到本地存储
+        try {
+            const sceneId = this.getSceneIdFromPage();
+            if (sceneId) {
+                const key = `story_events_${sceneId}`;
+                let events = JSON.parse(localStorage.getItem(key) || '[]');
+
+                events.push({
+                    description,
+                    eventType,
+                    timestamp: new Date().toISOString(),
+                    sceneId
+                });
+
+                // 只保留最近50个事件
+                if (events.length > 50) {
+                    events = events.slice(-50);
+                }
+
+                localStorage.setItem(key, JSON.stringify(events));
+            }
+        } catch (error) {
+            console.warn('记录故事事件失败:', error);
+        }
+
+        // 更新故事统计
+        if (this.storyStats) {
+            this.storyStats.totalEvents = (this.storyStats.totalEvents || 0) + 1;
+            this.storyStats.eventTypes = this.storyStats.eventTypes || {};
+            this.storyStats.eventTypes[eventType] = (this.storyStats.eventTypes[eventType] || 0) + 1;
+        }
+    }
+
+    /**
+     * 显示场景变化通知
+     */
+    showSceneChangeNotification(description) {
+        if (!description) return;
+
+        try {
+            // 创建场景变化通知
+            const notification = document.createElement('div');
+            notification.className = 'scene-change-notification';
+
+            notification.innerHTML = `
+            <div class="scene-notification-content">
+                <div class="scene-notification-icon">🎭</div>
+                <div class="scene-notification-text">
+                    <h6>场景变化</h6>
+                    <p>${this.escapeHtml(description)}</p>
+                </div>
+                <button class="scene-notification-close">×</button>
+            </div>
+        `;
+
+            // 设置样式
+            notification.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            max-width: 350px;
+            background: linear-gradient(135deg, #6f42c1, #7952b3);
+            color: white;
+            border-radius: 10px;
+            padding: 16px;
+            box-shadow: 0 6px 20px rgba(111, 66, 193, 0.3);
+            z-index: 1000;
+            animation: sceneNotificationSlideUp 0.4s ease-out;
+        `;
+
+            // 绑定关闭事件
+            const closeBtn = notification.querySelector('.scene-notification-close');
+            closeBtn.addEventListener('click', () => {
+                notification.style.animation = 'sceneNotificationSlideDown 0.3s ease-in forwards';
+                setTimeout(() => notification.remove(), 300);
+            });
+
+            // 添加到页面
+            document.body.appendChild(notification);
+
+            // 自动关闭
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.style.animation = 'sceneNotificationSlideDown 0.3s ease-in forwards';
+                    setTimeout(() => notification.remove(), 300);
+                }
+            }, 5000);
+
+            console.log('🎭 场景变化通知已显示:', description);
+
+        } catch (error) {
+            console.error('❌ 显示场景变化通知失败:', error);
+            // 降级处理
+            Utils.showInfo(`场景变化: ${description}`, 5000);
+        }
+    }
+
+    /**
+     * 更新在线用户列表
+     */
+    updateOnlineUsersList(data) {
+        try {
+            const { userId, username, action, sceneId } = data;
+
+            // 查找或创建在线用户容器
+            let usersContainer = document.getElementById('online-users-list');
+            if (!usersContainer) {
+                usersContainer = this.createOnlineUsersContainer();
+            }
+
+            if (action === 'joined') {
+                this.addUserToOnlineList(usersContainer, userId, username);
+            } else if (action === 'left') {
+                this.removeUserFromOnlineList(usersContainer, userId);
+            }
+
+            // 更新用户计数
+            this.updateOnlineUsersCount();
+
+            console.log(`👥 在线用户列表已更新: ${username} ${action}`);
+
+        } catch (error) {
+            console.error('❌ 更新在线用户列表失败:', error);
+        }
+    }
+
+    /**
+     * 创建在线用户容器
+     */
+    createOnlineUsersContainer() {
+        const container = document.createElement('div');
+        container.id = 'online-users-list';
+        container.className = 'online-users-container';
+
+        container.innerHTML = `
+        <div class="online-users-header">
+            <h6>
+                <i class="bi bi-people"></i>
+                在线用户 (<span id="online-users-count">0</span>)
+            </h6>
+            <button class="btn btn-sm btn-outline-secondary toggle-users-list" title="折叠/展开">
+                <i class="bi bi-chevron-up"></i>
+            </button>
+        </div>
+        <div class="online-users-list" id="users-list-content"></div>
+    `;
+
+        // 设置样式
+        container.style.cssText = `
+        position: fixed;
+        top: 80px;
+        left: 20px;
+        width: 200px;
+        background: rgba(255, 255, 255, 0.95);
+        border: 1px solid #e9ecef;
+        border-radius: 8px;
+        padding: 12px;
+        z-index: 999;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        backdrop-filter: blur(5px);
+    `;
+
+        // 绑定折叠/展开事件
+        const toggleBtn = container.querySelector('.toggle-users-list');
+        const listContent = container.querySelector('#users-list-content');
+
+        toggleBtn.addEventListener('click', () => {
+            const isCollapsed = listContent.style.display === 'none';
+            listContent.style.display = isCollapsed ? 'block' : 'none';
+            toggleBtn.querySelector('i').className = isCollapsed ?
+                'bi bi-chevron-up' : 'bi bi-chevron-down';
+        });
+
+        // 添加到页面
+        document.body.appendChild(container);
+
+        return container;
+    }
+
+    /**
+     * 添加用户到在线列表
+     */
+    addUserToOnlineList(container, userId, username) {
+        const listContent = container.querySelector('#users-list-content');
+
+        // 检查用户是否已存在
+        if (listContent.querySelector(`[data-user-id="${userId}"]`)) {
+            return;
+        }
+
+        // 创建用户元素
+        const userElement = document.createElement('div');
+        userElement.className = 'online-user-item';
+        userElement.dataset.userId = userId;
+
+        userElement.innerHTML = `
+        <div class="user-avatar">
+            <i class="bi bi-person-circle"></i>
+        </div>
+        <div class="user-info">
+            <span class="username">${this.escapeHtml(username)}</span>
+            <div class="user-status online">
+                <span class="status-dot"></span>
+                <span class="status-text">在线</span>
+            </div>
+        </div>
+    `;
+
+        // 添加样式
+        userElement.style.cssText = `
+        display: flex;
+        align-items: center;
+        padding: 6px 0;
+        border-bottom: 1px solid #f1f3f4;
+        font-size: 12px;
+    `;
+
+        listContent.appendChild(userElement);
+    }
+
+    /**
+     * 从在线列表移除用户
+     */
+    removeUserFromOnlineList(container, userId) {
+        const userElement = container.querySelector(`[data-user-id="${userId}"]`);
+        if (userElement) {
+            userElement.style.animation = 'fadeOutLeft 0.3s ease-in forwards';
+            setTimeout(() => {
+                if (userElement.parentNode) {
+                    userElement.remove();
+                    this.updateOnlineUsersCount();
+                }
+            }, 300);
+        }
+    }
+
+    /**
+     * 更新在线用户数量
+     */
+    updateOnlineUsersCount() {
+        const countElement = document.getElementById('online-users-count');
+        const usersList = document.getElementById('users-list-content');
+
+        if (countElement && usersList) {
+            const count = usersList.querySelectorAll('.online-user-item').length;
+            countElement.textContent = count;
+        }
+    }
+
+    /**
+     * 更新故事显示
+     */
+    updateStoryDisplay(eventData) {
+        try {
+            // 更新故事数据
+            if (eventData && this.storyData) {
+                // 合并新的故事数据
+                Object.assign(this.storyData, eventData);
+            }
+
+            // 重新渲染故事界面
+            if (this.renderStoryInterface) {
+                this.renderStoryInterface();
+            }
+
+            // 更新故事进度显示
+            this.updateStoryProgressDisplay(eventData);
+
+            // 如果仪表板可见，更新相关图表
+            if (this.state.dashboardVisible) {
+                setTimeout(() => {
+                    if (this.charts.has('story-progress')) {
+                        this.renderStoryProgressChart();
+                    }
+                }, 500);
+            }
+
+            console.log('📖 故事显示已更新');
+
+        } catch (error) {
+            console.error('❌ 更新故事显示失败:', error);
+        }
+    }
+
+    /**
+     * 更新故事进度显示
+     */
+    updateStoryProgressDisplay(eventData) {
+        // 查找故事进度元素
+        const progressElements = [
+            '#story-progress',
+            '.story-progress',
+            '#story-completion',
+            '.story-completion-bar'
+        ];
+
+        for (const selector of progressElements) {
+            const element = document.querySelector(selector);
+            if (element) {
+                this.updateProgressElement(element, eventData);
+            }
+        }
+    }
+
+    /**
+     * 更新进度元素
+     */
+    updateProgressElement(element, eventData) {
+        if (!eventData || !eventData.progress) return;
+
+        const progress = eventData.progress;
+
+        // 如果是进度条
+        if (element.classList.contains('progress-bar') || element.querySelector('.progress-bar')) {
+            const progressBar = element.classList.contains('progress-bar') ?
+                element : element.querySelector('.progress-bar');
+
+            if (progressBar) {
+                progressBar.style.width = `${progress}%`;
+                progressBar.setAttribute('aria-valuenow', progress);
+
+                // 更新文本
+                const progressText = element.querySelector('.progress-text');
+                if (progressText) {
+                    progressText.textContent = `${Math.round(progress)}%`;
+                }
+            }
+        }
+        // 如果是文本显示
+        else if (element.textContent !== undefined) {
+            element.textContent = `故事进度: ${Math.round(progress)}%`;
+        }
+    }
+
+    /**
+     * 降级故事通知显示
+     */
+    showFallbackStoryNotification(description) {
+        // 使用Utils显示简单通知
+        if (typeof Utils !== 'undefined' && Utils.showInfo) {
+            Utils.showInfo(`📖 ${description}`, 4000);
+        } else {
+            // 最后的降级方案
+            console.log(`📖 故事事件: ${description}`);
+
+            // 尝试浏览器通知API
+            if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification('故事事件', {
+                    body: description,
+                    icon: '/static/favicon.ico'
+                });
+            }
+        }
+    }
+
+    /**
+     * 获取事件类型标签
+     */
+    getEventTypeLabel(eventClass) {
+        const labels = {
+            'story-progress': '故事进展',
+            'character-development': '角色发展',
+            'plot-twist': '剧情转折',
+            'location-discovered': '地点发现',
+            'item-acquired': '物品获得',
+            'objective-completed': '目标完成',
+            'relationship-change': '关系变化',
+            'time-passage': '时间流逝',
+            'environment-change': '环境变化',
+            'conflict-escalation': '冲突升级',
+            'mystery-revealed': '谜团揭示'
+        };
+
+        return labels[eventClass] || '故事事件';
+    }
+
+    /**
+     * HTML转义
+     */
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    /**
+     * 获取故事事件历史
+     */
+    getStoryEventHistory(sceneId = null) {
+        try {
+            const targetSceneId = sceneId || this.getSceneIdFromPage();
+            if (!targetSceneId) return [];
+
+            const key = `story_events_${targetSceneId}`;
+            return JSON.parse(localStorage.getItem(key) || '[]');
+        } catch (error) {
+            console.warn('获取故事事件历史失败:', error);
+            return [];
+        }
+    }
+
+    /**
+     * 清除故事事件历史
+     */
+    clearStoryEventHistory(sceneId = null) {
+        try {
+            const targetSceneId = sceneId || this.getSceneIdFromPage();
+            if (!targetSceneId) return;
+
+            const key = `story_events_${targetSceneId}`;
+            localStorage.removeItem(key);
+
+            console.log('📖 故事事件历史已清除');
+        } catch (error) {
+            console.warn('清除故事事件历史失败:', error);
+        }
+    }
+
+    /**
+     * 导出故事事件
+     */
+    exportStoryEvents(sceneId = null, format = 'json') {
+        try {
+            const events = this.getStoryEventHistory(sceneId);
+            const targetSceneId = sceneId || this.getSceneIdFromPage();
+
+            if (events.length === 0) {
+                Utils.showWarning('没有故事事件可导出');
+                return;
+            }
+
+            let content, filename, mimeType;
+
+            switch (format.toLowerCase()) {
+                case 'json':
+                    content = JSON.stringify(events, null, 2);
+                    filename = `story_events_${targetSceneId}.json`;
+                    mimeType = 'application/json';
+                    break;
+
+                case 'txt':
+                    content = events.map(event =>
+                        `[${event.timestamp}] ${event.eventType}: ${event.description}`
+                    ).join('\n');
+                    filename = `story_events_${targetSceneId}.txt`;
+                    mimeType = 'text/plain';
+                    break;
+
+                case 'markdown':
+                    content = `# 故事事件记录 - ${targetSceneId}\n\n` +
+                        events.map(event =>
+                            `## ${this.getEventTypeLabel(event.eventType)}\n` +
+                            `**时间**: ${new Date(event.timestamp).toLocaleString()}\n` +
+                            `**描述**: ${event.description}\n`
+                        ).join('\n');
+                    filename = `story_events_${targetSceneId}.md`;
+                    mimeType = 'text/markdown';
+                    break;
+
+                default:
+                    throw new Error('不支持的导出格式');
+            }
+
+            // 创建并下载文件
+            const blob = new Blob([content], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+
+            Utils.showSuccess(`故事事件已导出为 ${filename}`);
+
+        } catch (error) {
+            console.error('导出故事事件失败:', error);
+            Utils.showError('导出故事事件失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 处理用户在线状态
+     */
+    handleUserPresence(data) {
+        const { userId, username, action } = data;
+
+        console.log('👥 用户在线状态:', data);
+
+        // 更新在线用户列表
+        this.updateOnlineUsersList(data);
+
+        // 显示用户进出通知
+        if (action === 'joined') {
+            Utils.showInfo(`${username} 加入了场景`, 2000);
+        } else if (action === 'left') {
+            Utils.showInfo(`${username} 离开了场景`, 2000);
+        }
+    }
+
+    /**
+     * 处理场景状态更新
+     */
+    handleSceneStateUpdate(data) {
+        const { state, changes } = data;
+
+        console.log('🎭 场景状态更新:', data);
+
+        // 更新场景状态
+        if (this.currentScene) {
+            Object.assign(this.currentScene, state);
+        }
+
+        // 如果有重要变化，通知用户
+        if (changes && changes.length > 0) {
+            const importantChanges = changes.filter(change =>
+                change.type === 'environment_change' ||
+                change.type === 'time_change'
+            );
+
+            if (importantChanges.length > 0) {
+                const descriptions = importantChanges.map(change => change.description);
+                this.showSceneChangeNotification(descriptions.join(', '));
+            }
+        }
+    }
+
+    /**
+     * 更新实时状态显示
+     */
+    updateRealtimeStatus(status, message) {
+        const statusElement = document.getElementById('realtime-status');
+        if (!statusElement) {
+            // 创建状态显示元素
+            this.createRealtimeStatusElement();
+            return this.updateRealtimeStatus(status, message);
+        }
+
+        const statusConfig = {
+            'connected': { class: 'text-success', icon: 'wifi', text: '已连接' },
+            'connecting': { class: 'text-warning', icon: 'hourglass-split', text: '连接中...' },
+            'disconnected': { class: 'text-danger', icon: 'wifi-off', text: '已断开' },
+            'error': { class: 'text-danger', icon: 'exclamation-triangle', text: '连接错误' }
+        };
+
+        const config = statusConfig[status] || statusConfig.disconnected;
+
+        statusElement.innerHTML = `
+        <i class="bi bi-${config.icon} ${config.class}"></i>
+        <span class="${config.class}">${message || config.text}</span>
+    `;
+
+        // 更新全局状态
+        this.realtimeState.connected = status === 'connected';
+    }
+
+    /**
+     * 创建实时状态显示元素
+     */
+    createRealtimeStatusElement() {
+        const statusElement = document.createElement('div');
+        statusElement.id = 'realtime-status';
+        statusElement.className = 'realtime-status position-fixed';
+        statusElement.style.cssText = `
+        top: 20px;
+        right: 20px;
+        background: rgba(255, 255, 255, 0.95);
+        padding: 8px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+        z-index: 1000;
+        transition: all 0.3s ease;
+    `;
+
+        document.body.appendChild(statusElement);
+    }
+
+    /**
+     * 检查实时连接状态
+     */
+    checkRealtimeConnection() {
+        if (!this.realtimeManager) return;
+
+        const status = this.realtimeManager.getConnectionStatus();
+        const sceneId = this.getSceneIdFromPage();
+        const connectionId = `scene_${sceneId}`;
+
+        if (status[connectionId]) {
+            const connStatus = status[connectionId];
+            if (connStatus.readyState !== 1) { // WebSocket.OPEN
+                this.updateRealtimeStatus('disconnected', '连接已断开');
+
+                // 尝试重新连接
+                setTimeout(() => {
+                    this.attemptReconnect(sceneId);
+                }, 2000);
+            }
+        }
+    }
+
+    /**
+     * 尝试重新连接
+     */
+    async attemptReconnect(sceneId) {
+        if (!this.realtimeManager) return;
+
+        console.log('🔄 尝试重新连接实时通信...');
+        this.updateRealtimeStatus('connecting', '正在重新连接...');
+
+        try {
+            const success = await this.realtimeManager.initSceneRealtime(sceneId);
+            if (success) {
+                this.updateRealtimeStatus('connected', '重新连接成功');
+                Utils.showSuccess('实时通信已恢复');
+            } else {
+                this.updateRealtimeStatus('error', '重新连接失败');
+            }
+        } catch (error) {
+            console.error('重新连接失败:', error);
+            this.updateRealtimeStatus('error', '重新连接失败');
+        }
+    }
+
+    /**
+     * 更新用户活动状态
+     */
+    updateUserActivity() {
+        if (!this.realtimeManager || !this.realtimeState.connected) return;
+
+        const now = Date.now();
+        const timeSinceLastActivity = now - this.realtimeState.lastActivity;
+
+        // 如果超过5分钟没有活动，标记为离开
+        let status = 'active';
+        if (timeSinceLastActivity > 5 * 60 * 1000) {
+            status = 'away';
+        } else if (timeSinceLastActivity > 15 * 60 * 1000) {
+            status = 'idle';
+        }
+
+        // 只在状态变化时发送更新
+        if (status !== this.realtimeState.userStatus) {
+            this.realtimeState.userStatus = status;
+            this.realtimeManager.sendUserStatusUpdate(status, 'activity_update', {
+                last_activity: this.realtimeState.lastActivity,
+                scene_id: this.getSceneIdFromPage()
+            });
+        }
+    }
+
+    /**
+     * 显示新消息通知
+     */
+    showNewMessageNotification(conversation) {
+        const speakerName = conversation.speaker_name || conversation.character_name || '未知角色';
+        const content = conversation.content || conversation.message || '';
+        const preview = content.length > 50 ? content.substring(0, 50) + '...' : content;
+
+        // 创建通知元素
+        const notification = document.createElement('div');
+        notification.className = 'new-message-notification toast align-items-center';
+        notification.innerHTML = `
+        <div class="d-flex">
+            <div class="toast-body">
+                <strong>${speakerName}</strong><br>
+                <small>${preview}</small>
+            </div>
+            <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+        </div>
+    `;
+
+        // 添加到页面并显示
+        document.body.appendChild(notification);
+
+        if (typeof bootstrap !== 'undefined') {
+            const toast = new bootstrap.Toast(notification);
+            toast.show();
+
+            // 自动清理
+            setTimeout(() => {
+                if (notification.parentNode) {
+                    notification.remove();
+                }
+            }, 5000);
+        }
+    }
+
+    /**
+     * 播放通知音效
+     */
+    playNotificationSound() {
+        // 使用实时管理器的音效播放功能
+        if (this.realtimeManager && this.realtimeManager.playNotificationSound) {
+            this.realtimeManager.playNotificationSound();
+        }
+    }
+
+    /**
+     * 获取选中的角色
+     */
+    getSelectedCharacter() {
+        return this.realtimeState?.selectedCharacter ||
+            document.querySelector('.character-item.selected')?.dataset.characterId;
+    }
+
+    /**
+     * 清理实时通信资源
+     */
+    cleanupRealtimeConnection() {
+        // 清理定时器
+        if (this.activityTimer) {
+            clearInterval(this.activityTimer);
+            this.activityTimer = null;
+        }
+
+        if (this.connectionCheckTimer) {
+            clearInterval(this.connectionCheckTimer);
+            this.connectionCheckTimer = null;
+        }
+
+        // 清理实时管理器
+        if (this.realtimeManager) {
+            this.realtimeManager.cleanup();
+            this.realtimeManager = null;
+        }
+
+        // 清理状态
+        this.realtimeState = null;
+
+        // 移除状态显示
+        const statusElement = document.getElementById('realtime-status');
+        if (statusElement) {
+            statusElement.remove();
+        }
+
+        console.log('🧹 实时通信资源已清理');
+    }
+
+    /**
+     * 处理实时消息 - 兼容原有接口
+     */
+    handleRealtimeMessage(message) {
+        // 这是原有的方法，现在通过事件系统处理
+        console.log('📨 收到实时消息 (兼容模式):', message);
+
+        switch (message.type) {
+            case 'new_conversation':
+                this.handleNewConversation({ conversation: message.data });
+                break;
+            case 'story_update':
+                this.handleStoryEvent({ eventData: message.data });
+                break;
+            case 'user_joined':
+                this.handleUserPresence({
+                    action: 'joined',
+                    username: message.data.user_name,
+                    userId: message.data.user_id
+                });
+                break;
+            case 'user_left':
+                this.handleUserPresence({
+                    action: 'left',
+                    username: message.data.user_name,
+                    userId: message.data.user_id
+                });
+                break;
+            default:
+                console.log('未处理的消息类型:', message.type);
+        }
+    }
+
+    /**
+     * 处理实时消息 - 预备方法
+     */
+    handleRealtimeMessage(message) {
+        switch (message.type) {
+            case 'new_conversation':
+                this.addMessageToChat(message.data, true);
+                break;
+            case 'story_update':
+                this.updateStoryDisplay(message.data);
+                break;
+            case 'user_joined':
+                Utils.showInfo(`${message.data.user_name} 加入了场景`);
+                break;
+        }
+    }
+
+    /**
+    * 应用清理
+    */
+    cleanup() {
+        // 清理实时通信
+        this.cleanupRealtimeConnection();
+
+        // 清理图表
+        this.destroyCharts();
+
+        // 清理定时器
+        if (this.refreshTimer) {
+            clearInterval(this.refreshTimer);
+        }
+
+        // 清理统计更新定时器
+        if (this.statsUpdateTimer) {
+            clearTimeout(this.statsUpdateTimer);
+            this.statsUpdateTimer = null;
+        }
+
+        // 清理事件监听器
+        if (this.dashboardEventHandler) {
+            document.removeEventListener('click', this.dashboardEventHandler);
+        }
+
+        // 清理发送状态提示
+        if (this.currentSendingStatus && this.currentSendingStatus.parentNode) {
+            this.currentSendingStatus.remove();
+            this.currentSendingStatus = null;
+        }
+
+        // 清理滚动按钮
+        const scrollBtn = document.getElementById('scroll-to-bottom-btn');
+        if (scrollBtn) {
+            scrollBtn.remove();
+        }
+
+        // 清理提示元素
+        document.querySelectorAll('.scroll-to-bottom-prompt, .message-sending-status').forEach(el => {
+            el.remove();
+        });
+
+        console.log('🧹 应用资源已清理');
     }
 }
 
@@ -1686,119 +8505,8 @@ window.addEventListener('unhandledrejection', function (event) {
 });
 
 // 页面卸载时清理资源
-window.addEventListener('beforeunload', function() {
-    if (window.app) {
-        window.app.destroyCharts();
+window.addEventListener('beforeunload', () => {
+    if (window.app && window.app.cleanup) {
+        window.app.cleanup();
     }
 });
-
-// ========================================
-// CSS样式增强
-// ========================================
-
-// 添加仪表板样式
-if (typeof document !== 'undefined') {
-    const addDashboardStyles = () => {
-        if (document.getElementById('dashboard-styles')) return;
-
-        const style = document.createElement('style');
-        style.id = 'dashboard-styles';
-        style.textContent = `
-            /* 仪表板容器样式 */
-            .scene-dashboard {
-                background: #f8f9fa;
-                border-radius: 12px;
-                padding: 24px;
-                margin: 20px 0;
-                border: 1px solid #e9ecef;
-            }
-            
-            .dashboard-header {
-                border-bottom: 2px solid #e9ecef;
-                padding-bottom: 16px;
-                margin-bottom: 24px;
-            }
-            
-            /* 统计卡片样式 */
-            .stat-card {
-                transition: all 0.3s ease;
-                border: 1px solid #e9ecef;
-                border-radius: 12px;
-            }
-            
-            .stat-card:hover {
-                transform: translateY(-4px);
-                box-shadow: 0 8px 25px rgba(0,0,0,0.1);
-            }
-            
-            .stat-icon {
-                opacity: 0.8;
-            }
-            
-            .stat-value {
-                font-weight: 700;
-                color: #2c3e50;
-                margin: 8px 0;
-            }
-            
-            .stat-label {
-                font-size: 0.9rem;
-                font-weight: 500;
-            }
-            
-            /* 图表卡片样式 */
-            .chart-card {
-                border: 1px solid #e9ecef;
-                border-radius: 12px;
-                transition: all 0.3s ease;
-            }
-            
-            .chart-card:hover {
-                box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-            }
-            
-            .chart-card .card-header {
-                background: #ffffff;
-                border-bottom: 1px solid #e9ecef;
-                border-radius: 12px 12px 0 0;
-            }
-            
-            /* 关系图样式 */
-            #character-relationship-graph {
-                background: #fafafa;
-                border-radius: 8px;
-                border: 1px solid #e9ecef;
-            }
-            
-            /* 响应式设计 */
-            @media (max-width: 768px) {
-                .scene-dashboard {
-                    padding: 16px;
-                    margin: 10px 0;
-                }
-                
-                .dashboard-header {
-                    flex-direction: column;
-                    gap: 12px;
-                }
-                
-                .chart-card canvas {
-                    height: 250px !important;
-                }
-                
-                #character-relationship-graph {
-                    height: 300px !important;
-                }
-            }
-        `;
-        
-        document.head.appendChild(style);
-        console.log('✅ Dashboard 样式已加载');
-    };
-    
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', addDashboardStyles);
-    } else {
-        addDashboardStyles();
-    }
-}
