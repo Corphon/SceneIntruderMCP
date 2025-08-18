@@ -9164,6 +9164,64 @@ document.addEventListener('visibilitychange', function () {
     }
 });
 
+// 场景状态调试工具
+if (typeof window !== 'undefined' && 
+    (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
+
+    window.SCENE_STATE_DEBUG = {
+        // 获取当前场景状态
+        getCurrentState: () => {
+            return window.app ? window.app.getSceneStateSummary() : null;
+        },
+
+        // 模拟场景状态更新
+        simulateStateUpdate: (newState) => {
+            if (window.app && window.app.updateSceneState) {
+                window.app.updateSceneState(newState);
+                return true;
+            }
+            return false;
+        },
+
+        // 重新同步场景状态
+        resyncState: async () => {
+            if (window.app && window.app.resyncSceneState) {
+                await window.app.resyncSceneState();
+                return true;
+            }
+            return false;
+        },
+
+        // 测试状态变化
+        testStateChanges: () => {
+            const testStates = [
+                { status: 'active', title: '测试场景 - 活跃' },
+                { status: 'paused', title: '测试场景 - 暂停' },
+                { status: 'completed', title: '测试场景 - 完成' }
+            ];
+
+            testStates.forEach((state, index) => {
+                setTimeout(() => {
+                    window.SCENE_STATE_DEBUG.simulateStateUpdate(state);
+                }, index * 2000);
+            });
+        },
+
+        // 监听状态变化
+        watchStateChanges: () => {
+            if (window.app && window.app.onSceneStateChange) {
+                return window.app.onSceneStateChange((data) => {
+                    console.log('🎭 场景状态变化:', data);
+                });
+            }
+            return null;
+        }
+    };
+
+    console.log('🎭 场景状态调试工具已加载');
+    console.log('使用 window.SCENE_STATE_DEBUG 进行调试');
+}
+
 // 错误处理
 window.addEventListener('error', function (event) {
     console.error('全局错误:', event.error);
