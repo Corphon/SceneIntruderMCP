@@ -8112,6 +8112,681 @@ class SceneApp {
     }
 
     /**
+     * 更新场景状态
+     */
+    updateSceneState(newState) {
+        if (!newState || typeof newState !== 'object') {
+            console.warn('无效的场景状态数据:', newState);
+            return;
+        }
+
+        try {
+            console.log('🎭 更新场景状态:', newState);
+
+            // 备份当前状态
+            const previousState = this.currentScene ? { ...this.currentScene } : null;
+
+            // 更新当前场景状态
+            if (this.currentScene) {
+                // 深度合并状态更新
+                this.currentScene = {
+                    ...this.currentScene,
+                    ...newState,
+                    last_updated: new Date().toISOString()
+                };
+            } else {
+                // 如果当前场景不存在，创建新的场景状态
+                this.currentScene = {
+                    ...newState,
+                    last_updated: new Date().toISOString()
+                };
+            }
+
+            // 更新聚合数据中的场景状态
+            if (this.aggregateData) {
+                if (this.aggregateData.data) {
+                    this.aggregateData.data.scene = this.currentScene;
+                } else {
+                    this.aggregateData.scene = this.currentScene;
+                }
+            }
+
+            // 检测具体的状态变化
+            const changes = this.detectSceneStateChanges(previousState, this.currentScene);
+
+            // 处理状态变化
+            this.handleSceneStateChanges(changes);
+
+            // 更新UI显示
+            this.updateSceneStateUI(changes);
+
+            // 触发场景状态更新事件
+            this.triggerSceneStateEvent('scene_state_updated', {
+                previous_state: previousState,
+                current_state: this.currentScene,
+                changes: changes,
+                timestamp: new Date().toISOString()
+            });
+
+            console.log('✅ 场景状态更新完成');
+
+        } catch (error) {
+            console.error('❌ 更新场景状态失败:', error);
+            this.showError('场景状态更新失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 检测场景状态变化
+     */
+    detectSceneStateChanges(previousState, currentState) {
+        const changes = [];
+
+        if (!previousState) {
+            changes.push({
+                type: 'scene_initialized',
+                description: '场景已初始化',
+                data: currentState
+            });
+            return changes;
+        }
+
+        // 检测场景基本信息变化
+        if (previousState.title !== currentState.title) {
+            changes.push({
+                type: 'title_changed',
+                description: `场景标题从 "${previousState.title}" 更改为 "${currentState.title}"`,
+                previous: previousState.title,
+                current: currentState.title
+            });
+        }
+
+        if (previousState.description !== currentState.description) {
+            changes.push({
+                type: 'description_changed',
+                description: '场景描述已更新',
+                previous: previousState.description,
+                current: currentState.description
+            });
+        }
+
+        // 检测状态字段变化
+        if (previousState.status !== currentState.status) {
+            changes.push({
+                type: 'status_changed',
+                description: `场景状态从 "${previousState.status}" 更改为 "${currentState.status}"`,
+                previous: previousState.status,
+                current: currentState.status
+            });
+        }
+
+        // 检测角色数量变化
+        const prevCharacterCount = previousState.characters ? previousState.characters.length : 0;
+        const currCharacterCount = currentState.characters ? currentState.characters.length : 0;
+
+        if (prevCharacterCount !== currCharacterCount) {
+            changes.push({
+                type: 'character_count_changed',
+                description: `角色数量从 ${prevCharacterCount} 个变为 ${currCharacterCount} 个`,
+                previous: prevCharacterCount,
+                current: currCharacterCount
+            });
+        }
+
+        // 检测设置变化
+        if (JSON.stringify(previousState.settings) !== JSON.stringify(currentState.settings)) {
+            changes.push({
+                type: 'settings_changed',
+                description: '场景设置已更新',
+                previous: previousState.settings,
+                current: currentState.settings
+            });
+        }
+
+        // 检测上下文变化
+        if (JSON.stringify(previousState.context) !== JSON.stringify(currentState.context)) {
+            changes.push({
+                type: 'context_changed',
+                description: '场景上下文已更新',
+                previous: previousState.context,
+                current: currentState.context
+            });
+        }
+
+        return changes;
+    }
+
+    /**
+     * 处理场景状态变化
+     */
+    handleSceneStateChanges(changes) {
+        if (!changes || changes.length === 0) {
+            return;
+        }
+
+        changes.forEach(change => {
+            switch (change.type) {
+                case 'scene_initialized':
+                    this.handleSceneInitialized(change.data);
+                    break;
+
+                case 'title_changed':
+                    this.handleSceneTitleChanged(change.previous, change.current);
+                    break;
+
+                case 'description_changed':
+                    this.handleSceneDescriptionChanged(change.previous, change.current);
+                    break;
+
+                case 'status_changed':
+                    this.handleSceneStatusChanged(change.previous, change.current);
+                    break;
+
+                case 'character_count_changed':
+                    this.handleCharacterCountChanged(change.previous, change.current);
+                    break;
+
+                case 'settings_changed':
+                    this.handleSceneSettingsChanged(change.previous, change.current);
+                    break;
+
+                case 'context_changed':
+                    this.handleSceneContextChanged(change.previous, change.current);
+                    break;
+
+                default:
+                    console.log('未知的场景状态变化类型:', change.type);
+            }
+        });
+    }
+
+    /**
+     * 处理场景初始化
+     */
+    handleSceneInitialized(sceneData) {
+        console.log('🎭 场景已初始化:', sceneData);
+
+        // 更新页面标题
+        if (sceneData.title) {
+            document.title = `${sceneData.title} - SceneIntruderMCP`;
+        }
+
+        // 显示初始化通知
+        this.showSuccess('场景已成功加载');
+    }
+
+    /**
+     * 处理场景标题变化
+     */
+    handleSceneTitleChanged(previousTitle, currentTitle) {
+        console.log('📝 场景标题已更新:', previousTitle, '->', currentTitle);
+
+        // 更新页面标题
+        document.title = `${currentTitle} - SceneIntruderMCP`;
+
+        // 更新标题显示元素
+        const titleElements = document.querySelectorAll('.scene-title, .current-scene-title, #scene-title');
+        titleElements.forEach(element => {
+            element.textContent = currentTitle;
+        });
+
+        // 显示更新通知
+        this.showInfo(`场景标题已更新为: ${currentTitle}`);
+    }
+
+    /**
+     * 处理场景描述变化
+     */
+    handleSceneDescriptionChanged(previousDescription, currentDescription) {
+        console.log('📄 场景描述已更新');
+
+        // 更新描述显示元素
+        const descriptionElements = document.querySelectorAll('.scene-description, .current-scene-description, #scene-description');
+        descriptionElements.forEach(element => {
+            element.textContent = currentDescription;
+        });
+
+        // 显示更新通知
+        this.showInfo('场景描述已更新');
+    }
+
+    /**
+     * 处理场景状态变化
+     */
+    handleSceneStatusChanged(previousStatus, currentStatus) {
+        console.log('📊 场景状态已更新:', previousStatus, '->', currentStatus);
+
+        // 更新状态显示元素
+        const statusElements = document.querySelectorAll('.scene-status, .current-scene-status, #scene-status');
+        statusElements.forEach(element => {
+            element.textContent = this.formatSceneStatus(currentStatus);
+            element.className = `scene-status status-${currentStatus}`;
+        });
+
+        // 根据状态显示不同的通知
+        switch (currentStatus) {
+            case 'active':
+                this.showSuccess('场景已激活，可以开始互动');
+                break;
+            case 'paused':
+                this.showWarning('场景已暂停');
+                break;
+            case 'completed':
+                this.showSuccess('场景已完成');
+                break;
+            case 'error':
+                this.showError('场景出现错误');
+                break;
+            default:
+                this.showInfo(`场景状态: ${this.formatSceneStatus(currentStatus)}`);
+        }
+    }
+
+    /**
+     * 处理角色数量变化
+     */
+    handleCharacterCountChanged(previousCount, currentCount) {
+        console.log('👥 角色数量已更新:', previousCount, '->', currentCount);
+
+        // 重新渲染角色列表
+        if (this.renderCharacterList) {
+            this.renderCharacterList();
+        }
+
+        // 更新角色计数显示
+        const countElements = document.querySelectorAll('.character-count, .characters-count, #character-count');
+        countElements.forEach(element => {
+            element.textContent = currentCount;
+        });
+
+        // 显示通知
+        if (currentCount > previousCount) {
+            const addedCount = currentCount - previousCount;
+            this.showInfo(`新增了 ${addedCount} 个角色`);
+        } else if (currentCount < previousCount) {
+            const removedCount = previousCount - currentCount;
+            this.showInfo(`移除了 ${removedCount} 个角色`);
+        }
+    }
+
+    /**
+     * 处理场景设置变化
+     */
+    handleSceneSettingsChanged(previousSettings, currentSettings) {
+        console.log('⚙️ 场景设置已更新');
+
+        // 检查具体的设置变化
+        if (previousSettings && currentSettings) {
+            // 检查创意等级变化
+            if (previousSettings.creativity_level !== currentSettings.creativity_level) {
+                this.showInfo(`创意等级已更新为: ${this.formatCreativityLevel(currentSettings.creativity_level)}`);
+            }
+
+            // 检查响应长度变化
+            if (previousSettings.response_length !== currentSettings.response_length) {
+                this.showInfo(`响应长度已更新为: ${this.formatResponseLength(currentSettings.response_length)}`);
+            }
+
+            // 检查语言风格变化
+            if (previousSettings.language_style !== currentSettings.language_style) {
+                this.showInfo(`语言风格已更新为: ${this.formatLanguageStyle(currentSettings.language_style)}`);
+            }
+        }
+
+        // 应用新设置
+        this.applySceneSettings(currentSettings);
+    }
+
+    /**
+     * 处理场景上下文变化
+     */
+    handleSceneContextChanged(previousContext, currentContext) {
+        console.log('📝 场景上下文已更新');
+
+        // 检查上下文的具体变化
+        if (previousContext && currentContext) {
+            // 检查时间设定变化
+            if (previousContext.time_setting !== currentContext.time_setting) {
+                this.showInfo('时间设定已更新');
+            }
+
+            // 检查地点变化
+            if (previousContext.location !== currentContext.location) {
+                this.showInfo(`当前地点: ${currentContext.location}`);
+            }
+
+            // 检查氛围变化
+            if (previousContext.mood !== currentContext.mood) {
+                this.showInfo(`场景氛围: ${currentContext.mood}`);
+            }
+        }
+
+        // 更新上下文显示
+        this.updateSceneContextDisplay(currentContext);
+    }
+
+    /**
+     * 更新场景状态UI
+     */
+    updateSceneStateUI(changes) {
+        if (!changes || changes.length === 0) {
+            return;
+        }
+
+        // 更新场景信息显示
+        this.updateSceneInfoDisplay();
+
+        // 更新状态指示器
+        this.updateSceneStatusIndicator();
+
+        // 更新场景头部信息
+        this.updateSceneHeaderInfo();
+
+        // 如果有重要变化，刷新仪表板
+        const importantChanges = ['character_count_changed', 'status_changed', 'settings_changed'];
+        const hasImportantChanges = changes.some(change => importantChanges.includes(change.type));
+
+        if (hasImportantChanges && this.state.dashboardVisible) {
+            setTimeout(() => {
+                this.refreshDashboard();
+            }, 1000);
+        }
+    }
+
+    /**
+     * 更新场景信息显示
+     */
+    updateSceneInfoDisplay() {
+        if (!this.currentScene) return;
+
+        // 更新场景标题
+        const titleElements = document.querySelectorAll('.scene-title, .current-scene-title, #scene-title');
+        titleElements.forEach(element => {
+            element.textContent = this.currentScene.title || this.currentScene.name || '未命名场景';
+        });
+
+        // 更新场景描述
+        const descriptionElements = document.querySelectorAll('.scene-description, .current-scene-description, #scene-description');
+        descriptionElements.forEach(element => {
+            element.textContent = this.currentScene.description || '无描述';
+        });
+
+        // 更新最后更新时间
+        const updateTimeElements = document.querySelectorAll('.scene-last-updated, #scene-last-updated');
+        updateTimeElements.forEach(element => {
+            const updateTime = this.currentScene.last_updated || this.currentScene.lastUpdated;
+            if (updateTime) {
+                element.textContent = this.formatTime(updateTime);
+                element.title = `最后更新: ${new Date(updateTime).toLocaleString()}`;
+            }
+        });
+    }
+
+    /**
+     * 更新场景状态指示器
+     */
+    updateSceneStatusIndicator() {
+        const indicators = document.querySelectorAll('.scene-status-indicator, .status-indicator');
+        indicators.forEach(indicator => {
+            if (this.currentScene && this.currentScene.status) {
+                const status = this.currentScene.status;
+                const statusConfig = this.getSceneStatusConfig(status);
+
+                indicator.className = `scene-status-indicator status-${status}`;
+                indicator.innerHTML = `
+                <span class="status-icon">${statusConfig.icon}</span>
+                <span class="status-text">${statusConfig.label}</span>
+            `;
+                indicator.title = statusConfig.description;
+            }
+        });
+    }
+
+    /**
+     * 更新场景头部信息
+     */
+    updateSceneHeaderInfo() {
+        const headerInfo = document.querySelector('.scene-header-info, #scene-header-info');
+        if (!headerInfo || !this.currentScene) return;
+
+        const characterCount = this.currentScene.characters ? this.currentScene.characters.length : 0;
+        const conversationCount = this.conversations ? this.conversations.length : 0;
+
+        headerInfo.innerHTML = `
+        <div class="scene-stats">
+            <span class="stat-item">
+                <i class="bi bi-people"></i>
+                <span class="stat-value">${characterCount}</span>
+                <span class="stat-label">角色</span>
+            </span>
+            <span class="stat-item">
+                <i class="bi bi-chat-dots"></i>
+                <span class="stat-value">${conversationCount}</span>
+                <span class="stat-label">对话</span>
+            </span>
+            <span class="stat-item">
+                <i class="bi bi-clock"></i>
+                <span class="stat-value">${this.formatTime(this.currentScene.last_updated)}</span>
+                <span class="stat-label">更新</span>
+            </span>
+        </div>
+    `;
+    }
+
+    /**
+     * 更新场景上下文显示
+     */
+    updateSceneContextDisplay(context) {
+        if (!context) return;
+
+        const contextDisplay = document.querySelector('.scene-context-display, #scene-context-display');
+        if (!contextDisplay) return;
+
+        contextDisplay.innerHTML = `
+        <div class="context-info">
+            ${context.time_setting ? `
+                <div class="context-item">
+                    <i class="bi bi-clock"></i>
+                    <span>${context.time_setting}</span>
+                </div>
+            ` : ''}
+            ${context.location ? `
+                <div class="context-item">
+                    <i class="bi bi-geo-alt"></i>
+                    <span>${context.location}</span>
+                </div>
+            ` : ''}
+            ${context.mood ? `
+                <div class="context-item">
+                    <i class="bi bi-emoji-neutral"></i>
+                    <span>${context.mood}</span>
+                </div>
+            ` : ''}
+        </div>
+    `;
+    }
+
+    /**
+     * 应用场景设置
+     */
+    applySceneSettings(settings) {
+        if (!settings) return;
+
+        // 应用界面设置
+        if (settings.dark_mode !== undefined) {
+            document.body.classList.toggle('dark-mode', settings.dark_mode);
+        }
+
+        // 保存设置到本地存储
+        try {
+            localStorage.setItem('scene_settings', JSON.stringify(settings));
+        } catch (error) {
+            console.warn('保存场景设置到本地存储失败:', error);
+        }
+    }
+
+    /**
+     * 触发场景状态事件
+     */
+    triggerSceneStateEvent(eventType, eventData) {
+        // 触发自定义事件
+        const event = new CustomEvent(eventType, {
+            detail: eventData
+        });
+        document.dispatchEvent(event);
+
+        // 如果有实时管理器，也通过它触发事件
+        if (this.realtimeManager && this.realtimeManager.emit) {
+            this.realtimeManager.emit(eventType, eventData);
+        }
+    }
+
+    /**
+     * 获取场景状态配置
+     */
+    getSceneStatusConfig(status) {
+        const configs = {
+            'active': {
+                icon: '🟢',
+                label: '活跃',
+                description: '场景正在运行中'
+            },
+            'paused': {
+                icon: '🟡',
+                label: '暂停',
+                description: '场景已暂停'
+            },
+            'completed': {
+                icon: '✅',
+                label: '完成',
+                description: '场景已完成'
+            },
+            'error': {
+                icon: '🔴',
+                label: '错误',
+                description: '场景出现错误'
+            },
+            'initializing': {
+                icon: '🔄',
+                label: '初始化',
+                description: '场景正在初始化'
+            }
+        };
+
+        return configs[status] || {
+            icon: '⚪',
+            label: status || '未知',
+            description: '未知状态'
+        };
+    }
+
+    /**
+     * 格式化场景状态
+     */
+    formatSceneStatus(status) {
+        const statusMap = {
+            'active': '活跃',
+            'paused': '暂停',
+            'completed': '完成',
+            'error': '错误',
+            'initializing': '初始化中'
+        };
+
+        return statusMap[status] || status || '未知';
+    }
+
+    /**
+     * 重新同步场景状态
+     */
+    async resyncSceneState() {
+        const sceneId = this.getSceneIdFromPage();
+        if (!sceneId) {
+            console.warn('无法获取场景ID，跳过状态同步');
+            return;
+        }
+
+        try {
+            console.log('🔄 重新同步场景状态...');
+
+            // 重新获取场景聚合数据
+            const aggregateData = await API.getSceneAggregate(sceneId, {
+                includeConversations: true,
+                includeStory: true,
+                includeUIState: true,
+                includeProgress: true
+            });
+
+            // 更新本地数据
+            this.aggregateData = aggregateData;
+
+            if (aggregateData.data) {
+                this.currentScene = aggregateData.data.scene;
+            } else {
+                this.currentScene = aggregateData.scene;
+            }
+
+            // 触发状态更新
+            this.updateSceneState(this.currentScene);
+
+            console.log('✅ 场景状态同步完成');
+            this.showSuccess('场景状态已同步');
+
+        } catch (error) {
+            console.error('❌ 场景状态同步失败:', error);
+            this.showError('场景状态同步失败: ' + error.message);
+        }
+    }
+
+    /**
+     * 获取场景状态摘要
+     */
+    getSceneStateSummary() {
+        if (!this.currentScene) {
+            return {
+                status: 'no_scene',
+                message: '没有加载场景'
+            };
+        }
+
+        const characterCount = this.currentScene.characters ? this.currentScene.characters.length : 0;
+        const conversationCount = this.conversations ? this.conversations.length : 0;
+        const lastUpdated = this.currentScene.last_updated || this.currentScene.lastUpdated;
+
+        return {
+            status: this.currentScene.status || 'unknown',
+            scene_id: this.currentScene.id,
+            title: this.currentScene.title || this.currentScene.name,
+            character_count: characterCount,
+            conversation_count: conversationCount,
+            last_updated: lastUpdated,
+            has_story_data: !!this.storyData,
+            dashboard_visible: this.state.dashboardVisible
+        };
+    }
+
+    /**
+     * 监听场景状态变化事件（用于外部监听）
+     */
+    onSceneStateChange(callback) {
+        if (typeof callback !== 'function') {
+            console.error('场景状态变化回调必须是函数');
+            return;
+        }
+
+        // 添加事件监听器
+        const eventHandler = (event) => {
+            callback(event.detail);
+        };
+
+        document.addEventListener('scene_state_updated', eventHandler);
+
+        // 返回取消监听的函数
+        return () => {
+            document.removeEventListener('scene_state_updated', eventHandler);
+        };
+    }
+
+    /**
      * 更新实时状态显示
      */
     updateRealtimeStatus(status, message) {
