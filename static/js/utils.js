@@ -40,8 +40,8 @@ class Utils {
             success: missing.length === 0,
             missing,
             available,
-            message: missing.length > 0 ? 
-                `${context}缺少必要的依赖: ${missing.join(', ')}` : 
+            message: missing.length > 0 ?
+                `${context}缺少必要的依赖: ${missing.join(', ')}` :
                 `${context}所有依赖已正确加载`
         };
 
@@ -85,10 +85,10 @@ class Utils {
 
         return new Promise((resolve, reject) => {
             const checkLoop = () => {
-                const result = this.checkDependencies(deps, { 
-                    throwOnMissing: false, 
+                const result = this.checkDependencies(deps, {
+                    throwOnMissing: false,
                     showAlert: false,
-                    context 
+                    context
                 });
 
                 if (result.success) {
@@ -121,10 +121,10 @@ class Utils {
      * @param {string} context - 上下文名称
      */
     static safeExecute(dependencies, callback, fallback = null, context = '函数') {
-        const result = this.checkDependencies(dependencies, { 
-            throwOnMissing: false, 
+        const result = this.checkDependencies(dependencies, {
+            throwOnMissing: false,
             showAlert: false,
-            context 
+            context
         });
 
         if (result.success) {
@@ -154,12 +154,12 @@ class Utils {
             'chat': () => typeof window.API !== 'undefined' && typeof window.API.sendMessage === 'function',
             'story': () => typeof window.StoryManager !== 'undefined',
             'export': () => typeof window.API !== 'undefined' && typeof window.API.exportSceneData === 'function',
-            
+
             // UI功能  
             'toast': () => typeof bootstrap !== 'undefined' || typeof this.showToast === 'function',
             'modal': () => typeof bootstrap !== 'undefined',
             'utils': () => typeof window.Utils !== 'undefined',
-            
+
             // 浏览器功能
             'fetch': () => typeof fetch !== 'undefined',
             'websocket': () => typeof WebSocket !== 'undefined',
@@ -233,7 +233,7 @@ class Utils {
      */
     static showBootstrapToast(message, type, duration) {
         const toastContainer = this.getOrCreateToastContainer();
-        
+
         const toastId = 'toast-' + Date.now();
         const toastHtml = `
             <div id="${toastId}" class="toast align-items-center text-white bg-${this.getBootstrapColor(type)} border-0" role="alert" aria-live="assertive" aria-atomic="true">
@@ -248,12 +248,12 @@ class Utils {
         `;
 
         toastContainer.insertAdjacentHTML('beforeend', toastHtml);
-        
+
         const toastElement = document.getElementById(toastId);
         const toast = new bootstrap.Toast(toastElement, {
             delay: duration
         });
-        
+
         toast.show();
 
         // 清理已隐藏的toast
@@ -267,7 +267,7 @@ class Utils {
      */
     static showCustomToast(message, type, duration) {
         const toastContainer = this.getOrCreateToastContainer();
-        
+
         const toastId = 'toast-' + Date.now();
         const toast = document.createElement('div');
         toast.id = toastId;
@@ -350,10 +350,10 @@ class Utils {
         `;
 
         document.body.insertAdjacentHTML('beforeend', modalHtml);
-        
+
         const modalElement = document.getElementById(modalId);
         const modal = new bootstrap.Modal(modalElement);
-        
+
         // 绑定事件
         document.getElementById(`${modalId}-confirm`).addEventListener('click', () => {
             modal.hide();
@@ -387,9 +387,9 @@ class Utils {
      * 检查Bootstrap是否可用
      */
     static isBootstrapAvailable() {
-        return typeof bootstrap !== 'undefined' && 
-               bootstrap.Toast && 
-               bootstrap.Modal;
+        return typeof bootstrap !== 'undefined' &&
+            bootstrap.Toast &&
+            bootstrap.Modal;
     }
 
     /**
@@ -515,7 +515,7 @@ class Utils {
             }
 
             const reader = new FileReader();
-            
+
             reader.onload = (e) => resolve(e.target.result);
             reader.onerror = (e) => reject(new Error('文件读取失败'));
 
@@ -582,11 +582,11 @@ class Utils {
      */
     static formatFileSize(bytes) {
         if (bytes === 0) return '0 Bytes';
-        
+
         const k = 1024;
         const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
-        
+
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
@@ -622,7 +622,7 @@ class Utils {
         }
 
         const eventSource = new EventSource(url);
-        
+
         // 绑定事件处理器
         Object.entries(handlers).forEach(([event, handler]) => {
             if (typeof handler === 'function') {
@@ -680,7 +680,7 @@ class Utils {
      */
     static escapeHtml(text) {
         if (typeof text !== 'string') return '';
-        
+
         const div = document.createElement('div');
         div.textContent = text;
         return div.innerHTML;
@@ -803,7 +803,7 @@ class Utils {
      */
     static formatTime(timestamp, format = 'HH:mm:ss') {
         const date = new Date(timestamp);
-        
+
         if (format === 'HH:mm:ss') {
             return date.toLocaleTimeString('zh-CN', {
                 hour12: false,
@@ -812,7 +812,7 @@ class Utils {
                 second: '2-digit'
             });
         }
-        
+
         if (format === 'YYYY-MM-DD HH:mm:ss') {
             return date.toLocaleString('zh-CN', {
                 year: 'numeric',
@@ -845,7 +845,7 @@ class Utils {
         if (minutes < 60) return `${minutes}分钟前`;
         if (hours < 24) return `${hours}小时前`;
         if (days < 7) return `${days}天前`;
-        
+
         return this.formatTime(timestamp, 'YYYY-MM-DD');
     }
 
@@ -857,6 +857,118 @@ class Utils {
             minimumFractionDigits: decimals,
             maximumFractionDigits: decimals
         });
+    }
+
+    /**
+     * 转义正则表达式特殊字符
+     * @param {string} string - 要转义的字符串  
+     * @returns {string} 转义后的字符串，可以安全地用于正则表达式
+     */
+    static escapeRegex(string) {
+        if (string === null || string === undefined) {
+            return '';
+        }
+
+        // 确保输入是字符串
+        const str = String(string);
+
+        // 转义所有正则表达式特殊字符
+        // . * + ? ^ $ { } ( ) | [ ] \
+        return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    /**
+     * 转义HTML特殊字符并处理正则表达式 - 组合方法
+     * @param {string} text - 要处理的文本
+     * @returns {string} 转义后的文本
+     */
+    static escapeHtmlAndRegex(text) {
+        return this.escapeRegex(this.escapeHtml(text));
+    }
+
+    /**
+     * 安全创建正则表达式
+     * @param {string} pattern - 正则表达式模式
+     * @param {string} flags - 正则表达式标志（如 'gi'）
+     * @returns {RegExp|null} 正则表达式对象，创建失败返回null
+     */
+    static createSafeRegex(pattern, flags = '') {
+        try {
+            const escapedPattern = this.escapeRegex(pattern);
+            return new RegExp(escapedPattern, flags);
+        } catch (error) {
+            console.warn('创建正则表达式失败:', error);
+            return null;
+        }
+    }
+
+    /**
+     * 高亮文本中的关键词 - 通用版本
+     * @param {string} text - 要处理的文本
+     * @param {string|string[]} keywords - 关键词（字符串或数组）
+     * @param {string} highlightClass - 高亮样式类名（默认使用mark标签）
+     * @returns {string} 处理后的HTML文本
+     */
+    static highlightKeywords(text, keywords, highlightClass = null) {
+        if (!text || !keywords) return text;
+
+        // 确保关键词是数组
+        const keywordArray = Array.isArray(keywords) ? keywords : [keywords];
+
+        let highlightedText = text;
+
+        keywordArray.forEach(keyword => {
+            if (!keyword || typeof keyword !== 'string') return;
+
+            const regex = new RegExp(`(${this.escapeRegex(keyword)})`, 'gi');
+
+            if (highlightClass) {
+                highlightedText = highlightedText.replace(
+                    regex,
+                    `<span class="${highlightClass}">$1</span>`
+                );
+            } else {
+                highlightedText = highlightedText.replace(regex, '<mark>$1</mark>');
+            }
+        });
+
+        return highlightedText;
+    }
+
+    /**
+     * 搜索文本并返回匹配信息
+     * @param {string} text - 要搜索的文本
+     * @param {string} searchTerm - 搜索词
+     * @param {boolean} caseSensitive - 是否区分大小写
+     * @returns {object} 搜索结果信息
+     */
+    static searchText(text, searchTerm, caseSensitive = false) {
+        if (!text || !searchTerm) {
+            return { matches: [], count: 0, positions: [] };
+        }
+
+        const flags = caseSensitive ? 'g' : 'gi';
+        const regex = new RegExp(this.escapeRegex(searchTerm), flags);
+
+        const matches = [];
+        const positions = [];
+        let match;
+
+        while ((match = regex.exec(text)) !== null) {
+            matches.push(match[0]);
+            positions.push({
+                start: match.index,
+                end: match.index + match[0].length,
+                text: match[0]
+            });
+        }
+
+        return {
+            matches: matches,
+            count: matches.length,
+            positions: positions,
+            hasMatches: matches.length > 0
+        };
     }
 
     // ========================================
@@ -885,7 +997,7 @@ class Utils {
      */
     static throttle(func, limit) {
         let inThrottle;
-        return function(...args) {
+        return function (...args) {
             if (!inThrottle) {
                 func.apply(this, args);
                 inThrottle = true;
@@ -975,7 +1087,7 @@ class Utils {
      * 生成UUID
      */
     static generateUUID() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
             const r = Math.random() * 16 | 0;
             const v = c === 'x' ? r : (r & 0x3 | 0x8);
             return v.toString(16);
@@ -986,7 +1098,7 @@ class Utils {
      * 生成随机ID
      */
     static generateId(prefix = 'id') {
-        return `${prefix}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     }
 
     /**
@@ -1024,7 +1136,7 @@ class Utils {
         if (typeof element === 'string') {
             element = document.querySelector(element);
         }
-        
+
         if (element) {
             element.scrollIntoView({ behavior, block: 'start' });
         }
@@ -1037,9 +1149,9 @@ class Utils {
         if (typeof element === 'string') {
             element = document.querySelector(element);
         }
-        
+
         if (!element) return false;
-        
+
         const rect = element.getBoundingClientRect();
         return (
             rect.top >= 0 &&
@@ -1063,7 +1175,7 @@ class Utils {
                 resolve();
                 return;
             }
-            
+
             const script = document.createElement('script');
             script.src = src;
             script.onload = resolve;
@@ -1082,7 +1194,7 @@ class Utils {
                 resolve();
                 return;
             }
-            
+
             const link = document.createElement('link');
             link.rel = 'stylesheet';
             link.href = href;
@@ -1102,7 +1214,7 @@ class Utils {
     static getDependencyReport() {
         const coreFeatures = ['api', 'utils', 'fetch', 'localStorage'];
         const optionalFeatures = ['toast', 'modal', 'story', 'export', 'websocket', 'clipboard'];
-        
+
         const report = {
             timestamp: new Date().toISOString(),
             core: {},
@@ -1118,7 +1230,7 @@ class Utils {
         coreFeatures.forEach(feature => {
             const available = this.isFeatureAvailable(feature);
             report.core[feature] = available;
-            
+
             if (!available) {
                 report.summary.coreReady = false;
                 report.summary.issues.push(`核心功能缺失: ${feature}`);
@@ -1129,7 +1241,7 @@ class Utils {
         optionalFeatures.forEach(feature => {
             const available = this.isFeatureAvailable(feature);
             report.optional[feature] = available;
-            
+
             if (available) {
                 report.summary.optionalCount++;
             }
@@ -1169,9 +1281,9 @@ if (typeof module !== 'undefined' && module.exports) {
 }
 
 // 开发环境调试工具
-if (typeof window !== 'undefined' && 
+if (typeof window !== 'undefined' &&
     (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
-    
+
     window.UTILS_DEBUG = {
         // 列出所有可用方法
         listMethods: () => {
@@ -1183,13 +1295,13 @@ if (typeof window !== 'undefined' &&
             }
             return methods.sort();
         },
-        
+
         // 功能检查
         checkFeatures: () => Utils.getDependencyReport(),
-        
+
         // 系统信息
         systemInfo: () => Utils.printSystemInfo(),
-        
+
         // 测试工具
         test: {
             toast: () => {
@@ -1198,12 +1310,12 @@ if (typeof window !== 'undefined' &&
                 Utils.showWarning('警告消息测试');
                 Utils.showInfo('信息消息测试');
             },
-            
+
             confirm: async () => {
                 const result = await Utils.showConfirm('这是一个确认对话框测试');
                 Utils.showInfo(`确认结果: ${result}`);
             },
-            
+
             fileSize: () => {
                 console.log('文件大小格式化测试:');
                 console.log('1024 bytes =', Utils.formatFileSize(1024));
