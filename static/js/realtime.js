@@ -10,6 +10,8 @@ class RealtimeManager {
         this.reconnectAttempts = new Map(); // 重连尝试计数
         this.heartbeatTimers = new Map(); // 心跳定时器
         this.subscriptions = new Map(); // 订阅管理
+        this.connectionErrors = new Map(); // 连接错误记录
+        this.onlineUsers = new Map(); // 在线用户列表
 
         // 配置选项
         this.options = {
@@ -103,6 +105,583 @@ class RealtimeManager {
             console.error(`❌ 场景连接失败: ${error.message}`);
             Utils.showError(`场景连接失败: ${error.message}`);
             throw error;
+        }
+    }
+
+    // 在 realtime.js 的场景实时功能部分添加这些方法
+
+    /**
+     * 处理场景断开连接
+     */
+    handleSceneDisconnect(sceneId) {
+        console.log(`🚫 场景 ${sceneId} 连接已断开`);
+
+        // 更新连接状态
+        this.updateConnectionStatus(sceneId, 'disconnected');
+
+        // 触发断开事件
+        this.emit('scene:disconnected', { sceneId, timestamp: Date.now() });
+
+        // 显示断开通知
+        if (typeof Utils !== 'undefined' && Utils.showWarning) {
+            Utils.showWarning('场景连接已断开，正在尝试重连...');
+        }
+
+        // 更新UI状态
+        this.updateSceneConnectionUI(sceneId, false);
+
+        // 尝试重连
+        const connectionId = `scene_${sceneId}`;
+        if (this.isOnline && this.connections.has(connectionId)) {
+            this.attemptReconnect(connectionId);
+        }
+    }
+
+    /**
+     * 处理场景连接错误
+     */
+    handleSceneError(sceneId, error) {
+        console.error(`❌ 场景 ${sceneId} 连接错误:`, error);
+
+        // 记录错误信息
+        this.recordConnectionError(sceneId, error);
+
+        // 触发错误事件
+        this.emit('scene:error', {
+            sceneId,
+            error: error.message || error,
+            timestamp: Date.now()
+        });
+
+        // 根据错误类型显示不同的提示
+        const errorMessage = this.getErrorMessage(error);
+        if (typeof Utils !== 'undefined' && Utils.showError) {
+            Utils.showError(`场景连接错误: ${errorMessage}`);
+        }
+
+        // 更新UI错误状态
+        this.updateSceneErrorUI(sceneId, error);
+
+        // 如果不是网络错误，延迟重连
+        if (!this.isNetworkError(error)) {
+            const connectionId = `scene_${sceneId}`;
+            setTimeout(() => {
+                this.attemptReconnect(connectionId);
+            }, 5000);
+        }
+    }
+
+    /**
+     * 订阅场景事件
+     */
+    subscribeToSceneEvents(sceneId) {
+        console.log(`📺 订阅场景 ${sceneId} 的事件`);
+
+        // 发送订阅消息到服务器
+        const connectionId = `scene_${sceneId}`;
+        this.sendMessage(connectionId, {
+            type: 'subscribe_events',
+            events: [
+                'character_status_update',
+                'new_conversation',
+                'story_event',
+                'scene_state_update',
+                'user_presence'
+            ],
+            sceneId: sceneId
+        });
+
+        // 记录订阅状态
+        if (!this.subscriptions.has(sceneId)) {
+            this.subscriptions.set(sceneId, new Set());
+        }
+
+        const sceneSubscriptions = this.subscriptions.get(sceneId);
+        sceneSubscriptions.add('character_status_update');
+        sceneSubscriptions.add('new_conversation');
+        sceneSubscriptions.add('story_event');
+        sceneSubscriptions.add('scene_state_update');
+        sceneSubscriptions.add('user_presence');
+
+        console.log(`✅ 场景 ${sceneId} 事件订阅完成`);
+    }
+
+    /**
+     * 取消订阅场景事件
+     */
+    unsubscribeFromSceneEvents(sceneId) {
+        console.log(`📺 取消订阅场景 ${sceneId} 的事件`);
+
+        // 发送取消订阅消息
+        const connectionId = `scene_${sceneId}`;
+        this.sendMessage(connectionId, {
+            type: 'unsubscribe_events',
+            sceneId: sceneId
+        });
+
+        // 清理订阅状态
+        this.subscriptions.delete(sceneId);
+
+        console.log(`✅ 场景 ${sceneId} 事件订阅已取消`);
+    }
+
+    /**
+     * 更新连接状态
+     */
+    updateConnectionStatus(sceneId, status) {
+        const statusMap = {
+            'connecting': '连接中',
+            'connected': '已连接',
+            'disconnected': '已断开',
+            'error': '连接错误'
+        };
+
+        const statusText = statusMap[status] || status;
+        console.log(`🔗 场景 ${sceneId} 状态: ${statusText}`);
+
+        // 触发状态变化事件
+        this.emit('connection:status_changed', {
+            sceneId,
+            status,
+            statusText,
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * 更新场景连接UI状态
+     */
+    updateSceneConnectionUI(sceneId, isConnected) {
+        // 查找连接状态指示器
+        let statusIndicator = document.querySelector('.scene-connection-status');
+
+        if (!statusIndicator) {
+            // 创建连接状态指示器
+            statusIndicator = this.createConnectionStatusIndicator();
+        }
+
+        // 更新状态显示
+        const statusClass = isConnected ? 'connected' : 'disconnected';
+        const statusText = isConnected ? '实时连接已建立' : '连接已断开';
+        const statusIcon = isConnected ? '🟢' : '🔴';
+
+        statusIndicator.className = `scene-connection-status ${statusClass}`;
+        statusIndicator.innerHTML = `
+        <span class="status-icon">${statusIcon}</span>
+        <span class="status-text">${statusText}</span>
+        ${!isConnected ? '<span class="reconnect-text">正在重连...</span>' : ''}
+    `;
+
+        // 如果连接断开，添加脉动效果
+        if (!isConnected) {
+            statusIndicator.classList.add('pulse');
+        } else {
+            statusIndicator.classList.remove('pulse');
+        }
+    }
+
+    /**
+     * 更新场景错误UI状态
+     */
+    updateSceneErrorUI(sceneId, error) {
+        // 查找或创建错误显示区域
+        let errorContainer = document.querySelector('.scene-error-container');
+
+        if (!errorContainer) {
+            errorContainer = document.createElement('div');
+            errorContainer.className = 'scene-error-container';
+            document.body.appendChild(errorContainer);
+        }
+
+        // 创建错误通知
+        const errorNotification = document.createElement('div');
+        errorNotification.className = 'scene-error-notification';
+        errorNotification.innerHTML = `
+        <div class="error-header">
+            <span class="error-icon">⚠️</span>
+            <span class="error-title">场景连接错误</span>
+            <button class="error-close" onclick="this.parentNode.parentNode.remove()">×</button>
+        </div>
+        <div class="error-body">
+            <p class="error-message">${this.getErrorMessage(error)}</p>
+            <small class="error-time">${new Date().toLocaleTimeString()}</small>
+        </div>
+        <div class="error-actions">
+            <button class="btn-retry" onclick="window.realtimeManager?.reconnectToScene('${sceneId}')">
+                重新连接
+            </button>
+        </div>
+    `;
+
+        errorContainer.appendChild(errorNotification);
+
+        // 自动移除旧的错误通知（保留最近3个）
+        const notifications = errorContainer.querySelectorAll('.scene-error-notification');
+        if (notifications.length > 3) {
+            notifications[0].remove();
+        }
+
+        // 5秒后自动隐藏
+        setTimeout(() => {
+            if (errorNotification.parentNode) {
+                errorNotification.style.opacity = '0.5';
+            }
+        }, 5000);
+    }
+
+    /**
+     * 创建连接状态指示器
+     */
+    createConnectionStatusIndicator() {
+        const indicator = document.createElement('div');
+        indicator.className = 'scene-connection-status';
+        indicator.style.cssText = `
+        position: fixed;
+        top: 10px;
+        right: 10px;
+        background: rgba(0, 0, 0, 0.8);
+        color: white;
+        padding: 8px 12px;
+        border-radius: 20px;
+        font-size: 12px;
+        z-index: 1000;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        transition: all 0.3s ease;
+    `;
+
+        // 添加到页面
+        document.body.appendChild(indicator);
+
+        // 添加点击事件显示详细信息
+        indicator.addEventListener('click', () => {
+            this.showConnectionDetails();
+        });
+
+        return indicator;
+    }
+
+    /**
+     * 显示连接详细信息
+     */
+    showConnectionDetails() {
+        const status = this.getConnectionStatus();
+        const details = Object.entries(status).map(([id, info]) => {
+            return `${id}: ${info.readyStateText} (重连次数: ${info.reconnectAttempts})`;
+        }).join('\n');
+
+        if (typeof Utils !== 'undefined' && Utils.showInfo) {
+            Utils.showInfo(`连接状态详情:\n${details}`);
+        } else {
+            alert(`连接状态详情:\n${details}`);
+        }
+    }
+
+    /**
+     * 记录连接错误
+     */
+    recordConnectionError(sceneId, error) {
+        // 初始化错误记录
+        if (!this.connectionErrors) {
+            this.connectionErrors = new Map();
+        }
+
+        if (!this.connectionErrors.has(sceneId)) {
+            this.connectionErrors.set(sceneId, []);
+        }
+
+        // 记录错误
+        const errorRecord = {
+            timestamp: Date.now(),
+            error: error.message || error.toString(),
+            type: this.getErrorType(error)
+        };
+
+        const sceneErrors = this.connectionErrors.get(sceneId);
+        sceneErrors.push(errorRecord);
+
+        // 只保留最近10个错误
+        if (sceneErrors.length > 10) {
+            sceneErrors.shift();
+        }
+
+        this.debugLog(`记录场景 ${sceneId} 错误:`, errorRecord);
+    }
+
+    /**
+     * 获取用户友好的错误消息
+     */
+    getErrorMessage(error) {
+        if (!error) return '未知错误';
+
+        const errorString = error.message || error.toString();
+
+        // 网络相关错误
+        if (errorString.includes('NetworkError') || errorString.includes('network')) {
+            return '网络连接问题，请检查网络状态';
+        }
+
+        // WebSocket相关错误
+        if (errorString.includes('WebSocket')) {
+            return 'WebSocket连接失败，请刷新页面重试';
+        }
+
+        // 服务器错误
+        if (errorString.includes('500') || errorString.includes('Internal Server Error')) {
+            return '服务器内部错误，请稍后重试';
+        }
+
+        // 权限错误
+        if (errorString.includes('403') || errorString.includes('Forbidden')) {
+            return '访问权限不足';
+        }
+
+        // 超时错误
+        if (errorString.includes('timeout')) {
+            return '连接超时，请检查网络状态';
+        }
+
+        // 默认返回原始错误信息（截取前100个字符）
+        return errorString.length > 100 ?
+            errorString.substring(0, 100) + '...' :
+            errorString;
+    }
+
+    /**
+     * 获取错误类型
+     */
+    getErrorType(error) {
+        const errorString = (error.message || error.toString()).toLowerCase();
+
+        if (errorString.includes('network')) return 'network';
+        if (errorString.includes('websocket')) return 'websocket';
+        if (errorString.includes('timeout')) return 'timeout';
+        if (errorString.includes('403') || errorString.includes('forbidden')) return 'permission';
+        if (errorString.includes('500')) return 'server';
+
+        return 'unknown';
+    }
+
+    /**
+     * 判断是否为网络错误
+     */
+    isNetworkError(error) {
+        const networkErrors = ['NetworkError', 'network', 'offline', 'timeout'];
+        const errorString = (error.message || error.toString()).toLowerCase();
+
+        return networkErrors.some(keyword => errorString.includes(keyword));
+    }
+
+    /**
+     * 重新连接到场景（公共方法）
+     */
+    async reconnectToScene(sceneId) {
+        try {
+            console.log(`🔄 手动重连场景 ${sceneId}`);
+
+            // 先断开现有连接
+            const connectionId = `scene_${sceneId}`;
+            if (this.connections.has(connectionId)) {
+                const connection = this.connections.get(connectionId);
+                connection.close();
+                this.connections.delete(connectionId);
+            }
+
+            // 重置重连计数
+            this.reconnectAttempts.set(connectionId, 0);
+
+            // 重新连接
+            await this.connectToScene(sceneId);
+
+            if (typeof Utils !== 'undefined' && Utils.showSuccess) {
+                Utils.showSuccess('场景重连成功');
+            }
+
+        } catch (error) {
+            console.error(`场景重连失败:`, error);
+            if (typeof Utils !== 'undefined' && Utils.showError) {
+                Utils.showError('场景重连失败: ' + error.message);
+            }
+        }
+    }
+
+    /**
+     * 处理用户状态连接
+     */
+    handleUserStatusConnect() {
+        console.log('👤 用户状态连接已建立');
+
+        // 触发用户状态连接事件
+        this.emit('user_status:connected', { timestamp: Date.now() });
+
+        // 发送初始状态请求
+        this.sendMessage('user_status', {
+            type: 'request_status',
+            userId: this.getCurrentUserId()
+        });
+    }
+
+    /**
+     * 处理用户状态消息
+     */
+    handleUserStatusMessage(event) {
+        try {
+            const data = JSON.parse(event.data);
+            this.debugLog('收到用户状态消息:', data);
+
+            switch (data.type) {
+                case 'status_update':
+                    this.handleUserStatusUpdate(data);
+                    break;
+
+                case 'user_list_update':
+                    this.handleUserListUpdate(data);
+                    break;
+
+                case 'heartbeat_response':
+                    this.handleHeartbeatResponse('user_status', data);
+                    break;
+
+                default:
+                    console.warn(`未知用户状态消息类型: ${data.type}`);
+            }
+
+        } catch (error) {
+            console.error('解析用户状态消息失败:', error);
+        }
+    }
+
+    /**
+     * 处理用户状态断开
+     */
+    handleUserStatusDisconnect() {
+        console.log('👤 用户状态连接已断开');
+
+        // 触发用户状态断开事件
+        this.emit('user_status:disconnected', { timestamp: Date.now() });
+
+        // 尝试重连
+        if (this.isOnline) {
+            this.attemptReconnect('user_status');
+        }
+    }
+
+    /**
+     * 处理用户状态错误
+     */
+    handleUserStatusError(error) {
+        console.error('👤 用户状态连接错误:', error);
+
+        // 触发用户状态错误事件
+        this.emit('user_status:error', {
+            error: error.message || error,
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * 处理用户状态更新
+     */
+    handleUserStatusUpdate(data) {
+        const { userId, status, lastSeen } = data;
+
+        // 更新在线用户状态
+        if (this.onlineUsers.has(userId)) {
+            const userInfo = this.onlineUsers.get(userId);
+            userInfo.status = status;
+            userInfo.lastSeen = lastSeen;
+        }
+
+        // 触发用户状态更新事件
+        this.emit('user:status_updated', {
+            userId,
+            status,
+            lastSeen,
+            timestamp: data.timestamp
+        });
+    }
+
+    /**
+     * 处理用户列表更新
+     */
+    handleUserListUpdate(data) {
+        const { users } = data;
+
+        // 更新在线用户列表
+        this.onlineUsers.clear();
+        users.forEach(user => {
+            this.onlineUsers.set(user.userId, {
+                username: user.username,
+                status: user.status,
+                joinTime: user.joinTime,
+                lastSeen: user.lastSeen
+            });
+        });
+
+        // 触发用户列表更新事件
+        this.emit('user:list_updated', {
+            users,
+            timestamp: data.timestamp
+        });
+    }
+
+    /**
+     * 获取连接错误历史
+     */
+    getConnectionErrors(sceneId = null) {
+        if (!this.connectionErrors) return [];
+
+        if (sceneId) {
+            return this.connectionErrors.get(sceneId) || [];
+        }
+
+        // 返回所有错误
+        const allErrors = [];
+        this.connectionErrors.forEach((errors, sceneId) => {
+            errors.forEach(error => {
+                allErrors.push({ ...error, sceneId });
+            });
+        });
+
+        return allErrors.sort((a, b) => b.timestamp - a.timestamp);
+    }
+
+    /**
+     * 清除连接错误历史
+     */
+    clearConnectionErrors(sceneId = null) {
+        if (!this.connectionErrors) return;
+
+        if (sceneId) {
+            this.connectionErrors.delete(sceneId);
+        } else {
+            this.connectionErrors.clear();
+        }
+
+        console.log(`🧹 连接错误历史已清除 ${sceneId ? `(场景: ${sceneId})` : '(全部)'}`);
+    }
+
+    /**
+     * 添加连接状态监控
+     */
+    startConnectionMonitoring() {
+        // 每30秒检查一次连接状态
+        this.connectionMonitor = setInterval(() => {
+            this.checkAllConnections();
+        }, 30000);
+
+        console.log('📊 连接状态监控已启动');
+    }
+
+    /**
+     * 停止连接状态监控
+     */
+    stopConnectionMonitoring() {
+        if (this.connectionMonitor) {
+            clearInterval(this.connectionMonitor);
+            this.connectionMonitor = null;
+            console.log('📊 连接状态监控已停止');
         }
     }
 
@@ -360,6 +939,390 @@ class RealtimeManager {
         });
     }
 
+    /**
+     * 更新在线用户列表
+     */
+    updateOnlineUsersList(sceneId, data) {
+        const { userId, username, action } = data;
+
+        console.log(`👥 更新在线用户列表: ${username} ${action}`);
+
+        // 更新内部在线用户数据
+        if (action === 'joined') {
+            this.onlineUsers.set(userId, {
+                username: username,
+                joinTime: Date.now(),
+                status: 'online',
+                sceneId: sceneId
+            });
+        } else if (action === 'left') {
+            this.onlineUsers.delete(userId);
+        }
+
+        // 更新UI中的在线用户列表
+        this.updateOnlineUsersUI(sceneId);
+
+        // 显示用户状态通知
+        if (action === 'joined') {
+            this.showRealtimeNotification(`${username} 加入了场景`, 'info');
+        } else if (action === 'left') {
+            this.showRealtimeNotification(`${username} 离开了场景`, 'info');
+        }
+
+        // 触发在线用户列表更新事件
+        this.emit('online_users:updated', {
+            sceneId,
+            userId,
+            username,
+            action,
+            totalUsers: this.onlineUsers.size,
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * 更新在线用户列表UI
+     */
+    updateOnlineUsersUI(sceneId) {
+        // 查找或创建在线用户列表容器
+        let onlineUsersList = document.getElementById('online-users-list');
+
+        if (!onlineUsersList) {
+            onlineUsersList = this.createOnlineUsersListContainer();
+        }
+
+        // 更新在线用户数量
+        const userCount = this.onlineUsers.size;
+        const countElement = onlineUsersList.querySelector('.user-count');
+        if (countElement) {
+            countElement.textContent = userCount;
+        }
+
+        // 更新用户列表
+        const userListContainer = onlineUsersList.querySelector('.users-container');
+        if (userListContainer) {
+            userListContainer.innerHTML = '';
+
+            // 渲染所有在线用户
+            this.onlineUsers.forEach((userInfo, userId) => {
+                const userElement = this.createUserElement(userId, userInfo);
+                userListContainer.appendChild(userElement);
+            });
+        }
+
+        // 更新页面头部的用户计数（如果存在）
+        this.updatePageUserCount(userCount);
+    }
+
+    /**
+     * 创建在线用户列表容器
+     */
+    createOnlineUsersListContainer() {
+        const onlineUsersList = document.createElement('div');
+        onlineUsersList.id = 'online-users-list';
+        onlineUsersList.className = 'online-users-list';
+        onlineUsersList.innerHTML = `
+        <div class="online-users-header">
+            <h6 class="mb-2">
+                <i class="bi bi-people"></i>
+                在线用户 
+                <span class="badge bg-primary user-count">0</span>
+            </h6>
+        </div>
+        <div class="users-container">
+            <!-- 用户列表将在这里动态生成 -->
+        </div>
+    `;
+
+        // 找到合适的位置插入用户列表
+        const targetContainer = this.findUserListInsertionPoint();
+        if (targetContainer) {
+            targetContainer.appendChild(onlineUsersList);
+        } else {
+            // 如果找不到合适位置，添加到页面右上角
+            onlineUsersList.style.cssText = `
+            position: fixed;
+            top: 60px;
+            right: 20px;
+            width: 250px;
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+            z-index: 1000;
+        `;
+            document.body.appendChild(onlineUsersList);
+        }
+
+        return onlineUsersList;
+    }
+
+    /**
+     * 查找用户列表的合适插入位置
+     */
+    findUserListInsertionPoint() {
+        // 优先查找角色列表卡片
+        const characterCard = document.querySelector('.characters-section, .character-list, .col-md-3 .card');
+        if (characterCard) {
+            return characterCard.querySelector('.card-body') || characterCard;
+        }
+
+        // 查找侧边栏
+        const sidebar = document.querySelector('.sidebar, .side-panel, .col-md-3');
+        if (sidebar) {
+            return sidebar;
+        }
+
+        // 查找主容器
+        const mainContainer = document.querySelector('.container, .main-content, main');
+        return mainContainer;
+    }
+
+    /**
+     * 创建单个用户元素
+     */
+    createUserElement(userId, userInfo) {
+        const userElement = document.createElement('div');
+        userElement.className = 'user-item d-flex align-items-center mb-2';
+        userElement.id = `online-user-${userId}`;
+
+        // 计算在线时长
+        const onlineTime = userInfo.joinTime ? Date.now() - userInfo.joinTime : 0;
+        const onlineTimeText = this.formatOnlineTime(onlineTime);
+
+        userElement.innerHTML = `
+        <div class="user-avatar me-2">
+            <div class="avatar-circle ${this.getUserStatusClass(userInfo.status)}">
+                ${this.getUserInitials(userInfo.username)}
+            </div>
+        </div>
+        <div class="user-info flex-grow-1">
+            <div class="user-name fw-bold">${this.escapeHtml(userInfo.username)}</div>
+            <div class="user-status small text-muted">${onlineTimeText}</div>
+        </div>
+        <div class="user-status-indicator">
+            <span class="status-dot ${userInfo.status}"></span>
+        </div>
+    `;
+
+        // 添加点击事件（可选）
+        userElement.addEventListener('click', () => {
+            this.handleUserClick(userId, userInfo);
+        });
+
+        return userElement;
+    }
+
+    /**
+     * 获取用户状态样式类
+     */
+    getUserStatusClass(status) {
+        const statusClasses = {
+            'online': 'status-online',
+            'busy': 'status-busy',
+            'away': 'status-away',
+            'offline': 'status-offline'
+        };
+        return statusClasses[status] || 'status-offline';
+    }
+
+    /**
+     * 获取用户名首字母
+     */
+    getUserInitials(username) {
+        if (!username) return '?';
+
+        const words = username.trim().split(/\s+/);
+        if (words.length >= 2) {
+            return (words[0][0] + words[1][0]).toUpperCase();
+        } else {
+            return username.substring(0, 2).toUpperCase();
+        }
+    }
+
+    /**
+     * 格式化在线时长
+     */
+    formatOnlineTime(milliseconds) {
+        const seconds = Math.floor(milliseconds / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+
+        if (hours > 0) {
+            return `在线 ${hours} 小时`;
+        } else if (minutes > 0) {
+            return `在线 ${minutes} 分钟`;
+        } else {
+            return '刚刚上线';
+        }
+    }
+
+    /**
+     * 更新页面用户计数
+     */
+    updatePageUserCount(count) {
+        // 更新导航栏或头部的用户计数
+        const countElements = document.querySelectorAll('.online-user-count, #online-user-count');
+        countElements.forEach(element => {
+            element.textContent = count;
+        });
+
+        // 更新页面标题（可选）
+        if (count > 0) {
+            const originalTitle = document.title.replace(/ \(\d+\)$/, '');
+            document.title = `${originalTitle} (${count})`;
+        }
+    }
+
+    /**
+     * 处理用户点击事件
+     */
+    handleUserClick(userId, userInfo) {
+        console.log('用户点击:', userId, userInfo);
+
+        // 可以添加用户交互功能，如：
+        // - 发送私信
+        // - 查看用户资料
+        // - 邀请协作等
+
+        // 简单的示例：显示用户信息
+        this.showUserInfo(userId, userInfo);
+    }
+
+    /**
+     * 显示用户信息
+     */
+    showUserInfo(userId, userInfo) {
+        const message = `
+        用户: ${userInfo.username}
+        状态: ${userInfo.status}
+        加入时间: ${new Date(userInfo.joinTime).toLocaleString()}
+        在线时长: ${this.formatOnlineTime(Date.now() - userInfo.joinTime)}
+    `;
+
+        if (typeof Utils !== 'undefined' && Utils.showInfo) {
+            Utils.showInfo(message);
+        } else {
+            alert(message);
+        }
+    }
+
+    /**
+     * 清空在线用户列表
+     */
+    clearOnlineUsersList() {
+        this.onlineUsers.clear();
+        this.updateOnlineUsersUI();
+
+        console.log('🧹 在线用户列表已清空');
+    }
+
+    /**
+     * 获取在线用户数量
+     */
+    getOnlineUserCount() {
+        return this.onlineUsers.size;
+    }
+
+    /**
+     * 获取在线用户列表
+     */
+    getOnlineUsers() {
+        const users = [];
+        this.onlineUsers.forEach((userInfo, userId) => {
+            users.push({
+                userId,
+                ...userInfo
+            });
+        });
+        return users;
+    }
+
+    /**
+     * 检查用户是否在线
+     */
+    isUserOnline(userId) {
+        return this.onlineUsers.has(userId);
+    }
+
+    /**
+     * 移除用户从在线列表
+     */
+    removeUserFromOnlineList(userId) {
+        if (this.onlineUsers.has(userId)) {
+            const userInfo = this.onlineUsers.get(userId);
+            this.onlineUsers.delete(userId);
+
+            // 更新UI
+            this.updateOnlineUsersUI();
+
+            // 触发事件
+            this.emit('online_users:user_removed', {
+                userId,
+                username: userInfo.username,
+                timestamp: Date.now()
+            });
+
+            console.log(`👤 用户 ${userInfo.username} 已从在线列表移除`);
+        }
+    }
+
+    /**
+     * 添加用户到在线列表
+     */
+    addUserToOnlineList(userId, userInfo) {
+        this.onlineUsers.set(userId, {
+            ...userInfo,
+            joinTime: userInfo.joinTime || Date.now(),
+            status: userInfo.status || 'online'
+        });
+
+        // 更新UI
+        this.updateOnlineUsersUI();
+
+        // 触发事件
+        this.emit('online_users:user_added', {
+            userId,
+            userInfo,
+            timestamp: Date.now()
+        });
+
+        console.log(`👤 用户 ${userInfo.username} 已添加到在线列表`);
+    }
+
+    /**
+     * 设置用户状态
+     */
+    setUserStatus(userId, status) {
+        if (this.onlineUsers.has(userId)) {
+            const userInfo = this.onlineUsers.get(userId);
+            userInfo.status = status;
+
+            // 更新UI
+            this.updateOnlineUsersUI();
+
+            // 触发事件
+            this.emit('online_users:status_changed', {
+                userId,
+                status,
+                username: userInfo.username,
+                timestamp: Date.now()
+            });
+
+            console.log(`👤 用户 ${userInfo.username} 状态更新为: ${status}`);
+        }
+    }
+
+    /**
+     * HTML转义（安全处理）
+     */
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
     // ========================================
     // 消息发送
     // ========================================
@@ -432,7 +1395,7 @@ class RealtimeManager {
      */
     sendStoryChoice(sceneId, nodeId, choiceId, preferences = null) {
         const connectionId = `scene_${sceneId}`;
-        
+
         const message = {
             type: 'story_choice',
             node_id: nodeId,
@@ -975,7 +1938,7 @@ class RealtimeManager {
         if (window.SceneApp && window.SceneApp.addConversationToUI) {
             // 使用已有的方法添加对话
             window.SceneApp.addConversationToUI(conversation);
-            
+
             // 添加新消息高亮效果
             setTimeout(() => {
                 const lastMessage = document.querySelector('#chat-container .conversation-item:last-child');
@@ -994,14 +1957,14 @@ class RealtimeManager {
      */
     handleStoryEventUI(data) {
         const { eventType, eventData, description } = data;
-        
+
         console.log('📖 故事事件:', eventType, eventData);
-        
+
         // 显示故事事件通知
         if (description) {
             this.showRealtimeNotification(description, 'story');
         }
-        
+
         // 更新故事相关UI
         if (eventType === 'progress_update' && window.StoryManager) {
             window.StoryManager.updateProgress(eventData);
@@ -1013,14 +1976,14 @@ class RealtimeManager {
      */
     updateUserPresenceUI(data) {
         const { userId, username, action } = data;
-        
+
         // 更新在线用户列表（如果存在）
         let onlineUsersList = document.getElementById('online-users-list');
         if (!onlineUsersList) {
             // 创建在线用户列表
             onlineUsersList = this.createOnlineUsersList();
         }
-        
+
         if (action === 'joined') {
             const userElement = document.createElement('span');
             userElement.className = 'badge bg-success me-1 mb-1';
@@ -1040,14 +2003,14 @@ class RealtimeManager {
      */
     updateSceneStateUI(state, changes) {
         console.log('🎭 场景状态更新:', changes);
-        
+
         // 如果有重要的场景变化，通知用户
         if (changes && changes.length > 0) {
-            const importantChanges = changes.filter(change => 
-                change.type === 'environment_change' || 
+            const importantChanges = changes.filter(change =>
+                change.type === 'environment_change' ||
                 change.type === 'time_change'
             );
-            
+
             if (importantChanges.length > 0) {
                 const descriptions = importantChanges.map(change => change.description);
                 this.showRealtimeNotification(descriptions.join(', '), 'scene');
@@ -1063,15 +2026,15 @@ class RealtimeManager {
         const notification = document.createElement('div');
         const alertClass = type === 'story' ? 'warning' : type === 'scene' ? 'info' : 'primary';
         const icon = type === 'story' ? '📖' : type === 'scene' ? '🎭' : '💬';
-        
+
         notification.className = `alert alert-${alertClass} alert-dismissible fade show realtime-notification`;
         notification.innerHTML = `
             <strong>${icon}</strong> ${message}
             <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         `;
-        
+
         document.body.appendChild(notification);
-        
+
         // 自动隐藏
         setTimeout(() => {
             if (notification.parentNode) {
@@ -1083,7 +2046,7 @@ class RealtimeManager {
     // ========================================
     // 辅助方法
     // ========================================
-    
+
     /**
      * 创建在线用户列表
      */
@@ -1092,12 +2055,12 @@ class RealtimeManager {
         onlineUsersList.id = 'online-users-list';
         onlineUsersList.className = 'online-users-list mt-2 p-2';
         onlineUsersList.innerHTML = '<small class="text-muted d-block mb-1">在线用户:</small>';
-        
+
         const charactersCard = document.querySelector('.col-md-3 .card .card-body');
         if (charactersCard) {
             charactersCard.appendChild(onlineUsersList);
         }
-        
+
         return onlineUsersList;
     }
 
@@ -1106,7 +2069,7 @@ class RealtimeManager {
      */
     ensureStatusStyles() {
         if (document.getElementById('realtime-status-styles')) return;
-        
+
         const style = document.createElement('style');
         style.id = 'realtime-status-styles';
         style.textContent = `
@@ -1151,7 +2114,7 @@ class RealtimeManager {
                 }
             }
         `;
-        
+
         document.head.appendChild(style);
     }
 
@@ -1161,7 +2124,7 @@ class RealtimeManager {
     addConversationToChatContainer(conversation) {
         const chatContainer = document.getElementById('chat-container');
         if (!chatContainer) return;
-        
+
         const messageElement = document.createElement('div');
         messageElement.className = 'conversation-item mb-2 p-2 rounded new-message';
         messageElement.innerHTML = `
@@ -1175,7 +2138,7 @@ class RealtimeManager {
                 </div>
             </div>
         `;
-        
+
         chatContainer.appendChild(messageElement);
         chatContainer.scrollTop = chatContainer.scrollHeight;
     }
@@ -1183,7 +2146,7 @@ class RealtimeManager {
     // ========================================
     // 场景交互增强
     // ========================================
-    
+
     /**
      * 增强角色选择功能
      */
@@ -1193,10 +2156,10 @@ class RealtimeManager {
                 const characterItem = e.target.closest('.character-item');
                 const characterId = characterItem.dataset.characterId;
                 const sceneId = this.getCurrentSceneId();
-                
+
                 // 现有的角色选择逻辑
                 this.selectCharacter(characterId);
-                
+
                 // 发送角色状态更新（如果实时管理器可用）
                 if (sceneId) {
                     this.sendCharacterStatusUpdate(sceneId, characterId, 'selected');
@@ -1211,22 +2174,22 @@ class RealtimeManager {
     enhanceMessageSending() {
         const sendBtn = document.getElementById('send-btn');
         const messageInput = document.getElementById('message-input');
-        
+
         if (!sendBtn || !messageInput) return;
-        
+
         const handleSendMessage = () => {
             const message = messageInput.value.trim();
             const selectedCharacter = this.getSelectedCharacter();
             const sceneId = this.getCurrentSceneId();
-            
+
             if (message && selectedCharacter && sceneId) {
                 // 通过实时连接发送消息
                 const success = this.sendCharacterInteraction(sceneId, selectedCharacter, message);
-                
+
                 if (success) {
                     // 清空输入框
                     messageInput.value = '';
-                    
+
                     // 临时禁用按钮防止重复发送
                     sendBtn.disabled = true;
                     setTimeout(() => {
@@ -1237,7 +2200,7 @@ class RealtimeManager {
         };
         // 绑定发送按钮
         sendBtn.addEventListener('click', handleSendMessage);
-        
+
         // 绑定回车键
         messageInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -1255,19 +2218,19 @@ class RealtimeManager {
         document.querySelectorAll('.character-item').forEach(item => {
             item.classList.remove('selected', 'border-primary');
         });
-        
+
         // 选中新角色
         const characterElement = document.querySelector(`[data-character-id="${characterId}"]`);
         if (characterElement) {
             characterElement.classList.add('selected', 'border-primary');
-            
+
             // 更新UI状态
             const characterName = characterElement.querySelector('.fw-bold').textContent;
             const selectedCharacterDiv = document.getElementById('selected-character');
             if (selectedCharacterDiv) {
                 selectedCharacterDiv.textContent = `已选择: ${characterName}`;
             }
-            
+
             // 启用输入
             const messageInput = document.getElementById('message-input');
             const sendBtn = document.getElementById('send-btn');
@@ -1283,7 +2246,7 @@ class RealtimeManager {
         const selectedElement = document.querySelector('.character-item.selected');
         return selectedElement ? selectedElement.dataset.characterId : null;
     }
-    
+
     /**
      * 获取当前场景ID
      */
@@ -1293,18 +2256,18 @@ class RealtimeManager {
         if (sceneIdInput) {
             return sceneIdInput.value;
         }
-        
+
         // 从URL路径获取
         const pathMatch = window.location.pathname.match(/\/scenes\/([^\/]+)/);
         if (pathMatch) {
             return pathMatch[1];
         }
-        
+
         // 从URL参数获取
         const urlParams = new URLSearchParams(window.location.search);
         return urlParams.get('scene') || urlParams.get('sceneId') || urlParams.get('scene_id');
     }
-    
+
     /**
      * 初始化场景页面增强功能
      */
@@ -1322,7 +2285,7 @@ class RealtimeManager {
 /**
  * 初始化场景实时功能（供 HTML 调用）
  */
-window.initSceneRealtime = async function(sceneId) {
+window.initSceneRealtime = async function (sceneId) {
     if (window.realtimeManager) {
         const success = await window.realtimeManager.initSceneRealtime(sceneId);
         if (success) {
@@ -1338,7 +2301,7 @@ window.initSceneRealtime = async function(sceneId) {
 /**
  * 刷新场景实时连接
  */
-window.refreshSceneRealtime = function() {
+window.refreshSceneRealtime = function () {
     const sceneId = window.realtimeManager?.getCurrentSceneId();
     if (sceneId && window.realtimeManager) {
         return window.initSceneRealtime(sceneId);
@@ -1364,4 +2327,90 @@ if (typeof window !== 'undefined') {
 // 模块导出（如果支持）
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = RealtimeManager;
+}
+
+//在线用户管理调试工具
+if (typeof window !== 'undefined' && 
+    (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
+
+    window.ONLINE_USERS_DEBUG = {
+        // 获取在线用户列表
+        getOnlineUsers: () => {
+            return window.realtimeManager ? window.realtimeManager.getOnlineUsers() : [];
+        },
+
+        // 获取在线用户数量
+        getUserCount: () => {
+            return window.realtimeManager ? window.realtimeManager.getOnlineUserCount() : 0;
+        },
+
+        // 模拟用户加入
+        simulateUserJoin: (username = '测试用户') => {
+            if (window.realtimeManager) {
+                const userId = 'test_user_' + Date.now();
+                window.realtimeManager.updateOnlineUsersList('test_scene', {
+                    userId,
+                    username,
+                    action: 'joined'
+                });
+                return userId;
+            }
+            return null;
+        },
+
+        // 模拟用户离开
+        simulateUserLeave: (userId = null) => {
+            if (window.realtimeManager) {
+                const users = window.realtimeManager.getOnlineUsers();
+                const targetUserId = userId || (users.length > 0 ? users[0].userId : null);
+                
+                if (targetUserId) {
+                    const user = users.find(u => u.userId === targetUserId);
+                    window.realtimeManager.updateOnlineUsersList('test_scene', {
+                        userId: targetUserId,
+                        username: user ? user.username : '未知用户',
+                        action: 'left'
+                    });
+                    return targetUserId;
+                }
+            }
+            return null;
+        },
+
+        // 清空在线用户列表
+        clearUsers: () => {
+            if (window.realtimeManager) {
+                window.realtimeManager.clearOnlineUsersList();
+                return true;
+            }
+            return false;
+        },
+
+        // 添加多个测试用户
+        addTestUsers: (count = 3) => {
+            const userIds = [];
+            for (let i = 1; i <= count; i++) {
+                const userId = window.ONLINE_USERS_DEBUG.simulateUserJoin(`用户${i}`);
+                if (userId) userIds.push(userId);
+            }
+            return userIds;
+        },
+
+        // 检查用户是否在线
+        isUserOnline: (userId) => {
+            return window.realtimeManager ? window.realtimeManager.isUserOnline(userId) : false;
+        },
+
+        // 设置用户状态
+        setUserStatus: (userId, status) => {
+            if (window.realtimeManager) {
+                window.realtimeManager.setUserStatus(userId, status);
+                return true;
+            }
+            return false;
+        }
+    };
+
+    console.log('👥 在线用户调试工具已加载');
+    console.log('使用 window.ONLINE_USERS_DEBUG 进行调试');
 }
