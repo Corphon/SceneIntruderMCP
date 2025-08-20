@@ -116,6 +116,11 @@ class SceneApp {
                 this.storyData = aggregateData.story_data;
             }
 
+            // 验证必要数据
+            if (!this.currentScene) {
+                throw new Error('场景数据无效');
+            }
+
             // 渲染界面
             this.renderSceneInterface();
             this.renderConversations();
@@ -135,14 +140,19 @@ class SceneApp {
                 }
             }
 
-            // 初始化角色状态
-            this.initCharacterStatus();
+            // 初始化核心功能（按依赖顺序）
+            this.initSessionTimeManagement();   // 初始化会话时间管理          
+            this.initUserActivityMonitoring();  // 初始化用户活动监控           
+            this.initCharacterStatus();         // 初始化角色状态       
+            this.initConversationUI();          // 初始化对话UI功能
+
+            //🌐 初始化实时通信（在数据准备好后）
+            if (this.currentScene) {
+                await this.initRealtimeConnection(sceneId);
+            }
 
             // 绑定事件
             this.bindSceneEvents();
-
-            // 初始化实时通信
-            await this.initRealtimeConnection(sceneId);
 
             // 初始化故事通知系统
             this.initStoryNotificationSystem();
@@ -160,6 +170,9 @@ class SceneApp {
                 isLoading: false,
                 sceneLoaded: true
             });
+
+            // 记录初始活动
+            this.updateLastActivity();
 
             Utils.showSuccess('场景加载完成');
         } catch (error) {
@@ -5924,8 +5937,8 @@ class SceneApp {
             // 显示发送状态
             this.showMessageSendingStatus(message);
 
-            // 记录最后活动时间
-            this.realtimeState.lastActivity = Date.now();
+            // 消息发送计数
+            this.incrementMessageSentCount();
 
             console.log('📤 实时消息已发送:', { sceneId, selectedCharacter, message });
         } else {
@@ -5998,6 +6011,3191 @@ class SceneApp {
 
         // 自动滚动到最新消息
         this.scrollToLatestMessage();
+    }
+
+    /**
+     * 添加对话到UI - 核心方法
+     */
+    addConversationToUI(conversation) {
+        if (!conversation) {
+            console.warn('无效的对话数据');
+            return;
+        }
+
+        try {
+            console.log('📨 添加对话到UI:', conversation);
+
+            // 更新本地对话数据
+            this.addConversationToLocal(conversation);
+
+            // 查找对话容器
+            const conversationContainer = this.getConversationContainer();
+            if (!conversationContainer) {
+                console.error('找不到对话容器');
+                this.createConversationContainer();
+                return;
+            }
+
+            // 创建对话元素
+            const conversationElement = this.createConversationElement(conversation);
+
+            // 检查是否为重复消息
+            if (this.isDuplicateMessage(conversation, conversationContainer)) {
+                console.log('跳过重复消息:', conversation.id);
+                return;
+            }
+
+            // 添加到容器
+            conversationContainer.appendChild(conversationElement);
+
+            // 应用动画效果
+            this.animateNewConversation(conversationElement);
+
+            // 更新对话计数
+            this.updateConversationCount();
+
+            // 自动滚动到最新消息
+            this.scrollToLatestMessage();
+
+            // 更新最后活动时间
+            this.updateLastActivity();
+
+            // 触发对话添加事件
+            this.triggerConversationEvent('conversation_added', {
+                conversation,
+                element: conversationElement,
+                timestamp: Date.now()
+            });
+
+            console.log('✅ 对话已添加到UI');
+
+        } catch (error) {
+            console.error('❌ 添加对话到UI失败:', error);
+            // 降级处理
+            this.addMessageToChat(conversation);
+        }
+    }
+
+    /**
+     * 更新最后活动时间
+     */
+    updateLastActivity() {
+        const now = Date.now();
+
+        // 更新本地状态
+        if (this.realtimeState) {
+            this.realtimeState.lastActivity = now;
+        }
+
+        // 更新全局最后活动时间
+        this.lastActivityTime = now;
+
+        // 更新本地存储（可选）
+        try {
+            localStorage.setItem('last_activity', now.toString());
+        } catch (error) {
+            console.warn('保存最后活动时间失败:', error);
+        }
+
+        // 更新UI显示
+        this.updateLastActivityDisplay(now);
+
+        // 发送用户活动状态到实时服务
+        this.sendUserActivityStatus();
+
+        // 重置空闲计时器
+        this.resetIdleTimer();
+
+        console.log('📱 最后活动时间已更新:', new Date(now).toLocaleTimeString());
+    }
+
+    /**
+     * 更新最后活动时间显示
+     */
+    updateLastActivityDisplay(timestamp) {
+        const displayElements = document.querySelectorAll('.last-activity-time, #last-activity-time');
+        displayElements.forEach(element => {
+            element.textContent = this.formatLastActivity(timestamp);
+            element.title = `最后活动: ${new Date(timestamp).toLocaleString()}`;
+        });
+
+        // 更新页面标题中的活动状态（可选）
+        this.updatePageActivityStatus(timestamp);
+    }
+
+    /**
+     * 格式化最后活动时间
+     */
+    formatLastActivity(timestamp) {
+        if (!timestamp) return '从未活动';
+
+        const now = Date.now();
+        const diffMs = now - timestamp;
+        const diffSeconds = Math.floor(diffMs / 1000);
+        const diffMinutes = Math.floor(diffSeconds / 60);
+        const diffHours = Math.floor(diffMinutes / 60);
+
+        if (diffSeconds < 10) {
+            return '刚刚活动';
+        } else if (diffSeconds < 60) {
+            return `${diffSeconds}秒前`;
+        } else if (diffMinutes < 60) {
+            return `${diffMinutes}分钟前`;
+        } else if (diffHours < 24) {
+            return `${diffHours}小时前`;
+        } else {
+            const days = Math.floor(diffHours / 24);
+            return `${days}天前`;
+        }
+    }
+
+    /**
+     * 发送用户活动状态
+     */
+    sendUserActivityStatus() {
+        if (!this.realtimeManager || !this.realtimeState) {
+            return;
+        }
+
+        // 发送用户状态更新
+        this.realtimeManager.sendUserStatusUpdate('active', 'user_activity', {
+            last_activity: this.realtimeState.lastActivity,
+            scene_id: this.getSceneIdFromPage(),
+            user_agent: navigator.userAgent,
+            timestamp: Date.now()
+        });
+    }
+
+    /**
+     * 重置空闲计时器
+     */
+    resetIdleTimer() {
+        // 清除现有的空闲计时器
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+        }
+
+        // 设置新的空闲计时器（5分钟后标记为空闲）
+        this.idleTimer = setTimeout(() => {
+            this.markUserAsIdle();
+        }, 5 * 60 * 1000); // 5分钟
+
+        // 如果用户之前是空闲状态，现在变为活跃
+        if (this.userIdleState === 'idle') {
+            this.markUserAsActive();
+        }
+    }
+
+    /**
+     * 标记用户为空闲状态
+     */
+    markUserAsIdle() {
+        this.userIdleState = 'idle';
+
+        console.log('😴 用户进入空闲状态');
+
+        // 发送空闲状态到实时服务
+        if (this.realtimeManager) {
+            this.realtimeManager.sendUserStatusUpdate('idle', 'user_idle', {
+                idle_since: Date.now(),
+                scene_id: this.getSceneIdFromPage()
+            });
+        }
+
+        // 更新UI显示
+        this.updateUserIdleUI(true);
+
+        // 触发空闲事件
+        this.triggerUserEvent('user_idle', {
+            idle_since: Date.now(),
+            last_activity: this.lastActivityTime
+        });
+    }
+
+    /**
+     * 标记用户为活跃状态
+     */
+    markUserAsActive() {
+        const wasIdle = this.userIdleState === 'idle';
+        this.userIdleState = 'active';
+
+        if (wasIdle) {
+            console.log('🔥 用户从空闲状态恢复活跃');
+
+            // 发送活跃状态到实时服务
+            if (this.realtimeManager) {
+                this.realtimeManager.sendUserStatusUpdate('active', 'user_active', {
+                    active_since: Date.now(),
+                    scene_id: this.getSceneIdFromPage()
+                });
+            }
+
+            // 更新UI显示
+            this.updateUserIdleUI(false);
+
+            // 触发活跃事件
+            this.triggerUserEvent('user_active', {
+                active_since: Date.now(),
+                was_idle_duration: Date.now() - this.lastActivityTime
+            });
+        }
+    }
+
+    /**
+     * 更新用户空闲状态UI
+     */
+    updateUserIdleUI(isIdle) {
+        // 更新状态指示器
+        const statusIndicators = document.querySelectorAll('.user-status-indicator, #user-status-indicator');
+        statusIndicators.forEach(indicator => {
+            indicator.className = `user-status-indicator ${isIdle ? 'idle' : 'active'}`;
+            indicator.innerHTML = `
+            <span class="status-dot ${isIdle ? 'idle' : 'active'}"></span>
+            <span class="status-text">${isIdle ? '空闲中' : '活跃'}</span>
+        `;
+            indicator.title = isIdle ? '用户当前处于空闲状态' : '用户当前活跃';
+        });
+
+        // 更新页面可见性（可选）
+        if (isIdle) {
+            document.body.classList.add('user-idle');
+        } else {
+            document.body.classList.remove('user-idle');
+        }
+    }
+
+    /**
+     * 更新页面活动状态
+     */
+    updatePageActivityStatus(timestamp) {
+        // 可以在页面标题中显示活动状态
+        const originalTitle = document.title.replace(/ - \d+分钟前活动$/, '');
+
+        const activityText = this.formatLastActivity(timestamp);
+        if (activityText !== '刚刚活动') {
+            document.title = `${originalTitle} - ${activityText}活动`;
+        } else {
+            document.title = originalTitle;
+        }
+    }
+
+    /**
+     * 初始化用户活动监控
+     */
+    initUserActivityMonitoring() {
+        console.log('📊 初始化用户活动监控');
+
+        // 初始化状态
+        this.lastActivityTime = Date.now();
+        this.userIdleState = 'active';
+        this.idleTimer = null;
+
+        // 从本地存储恢复最后活动时间
+        try {
+            const savedActivity = localStorage.getItem('last_activity');
+            if (savedActivity) {
+                this.lastActivityTime = parseInt(savedActivity, 10);
+            }
+        } catch (error) {
+            console.warn('读取最后活动时间失败:', error);
+        }
+
+        // 监听用户活动事件
+        const activityEvents = [
+            'mousedown', 'mousemove', 'keypress', 'scroll',
+            'touchstart', 'click', 'focus', 'blur'
+        ];
+
+        // 使用防抖来避免过于频繁的更新
+        const debouncedUpdateActivity = this.debounce(() => {
+            this.updateLastActivity();
+        }, 1000); // 1秒内最多更新一次
+
+        activityEvents.forEach(eventType => {
+            document.addEventListener(eventType, debouncedUpdateActivity, {
+                passive: true,
+                capture: false
+            });
+        });
+
+        // 监听页面可见性变化
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                // 页面变为可见时更新活动时间
+                this.updateLastActivity();
+            } else {
+                // 页面变为隐藏时可以考虑标记为空闲
+                setTimeout(() => {
+                    if (document.visibilityState === 'hidden') {
+                        this.markUserAsIdle();
+                    }
+                }, 2000); // 2秒后如果页面仍然隐藏则标记为空闲
+            }
+        });
+
+        // 监听窗口焦点变化
+        window.addEventListener('focus', () => {
+            this.markUserAsActive();
+            this.updateLastActivity();
+        });
+
+        window.addEventListener('blur', () => {
+            // 窗口失去焦点时不立即标记为空闲，等待空闲计时器
+        });
+
+        // 初始更新
+        this.updateLastActivity();
+
+        console.log('✅ 用户活动监控已启动');
+    }
+
+    /**
+     * 停止用户活动监控
+     */
+    stopUserActivityMonitoring() {
+        console.log('🛑 停止用户活动监控');
+
+        // 清除空闲计时器
+        if (this.idleTimer) {
+            clearTimeout(this.idleTimer);
+            this.idleTimer = null;
+        }
+
+        // 这里可以移除事件监听器，但由于使用了debounce，
+        // 移除会比较复杂，通常在页面卸载时会自动清理
+    }
+
+    /**
+     * 获取用户活动统计
+     */
+    getUserActivityStats() {
+        const now = Date.now();
+        const sessionStart = this.sessionStartTime || now;
+        const sessionDuration = now - sessionStart;
+        const lastActivity = this.lastActivityTime || now;
+        const timeSinceLastActivity = now - lastActivity;
+
+        return {
+            session_duration: sessionDuration,
+            session_duration_text: this.formatDuration(sessionDuration),
+            last_activity: lastActivity,
+            time_since_last_activity: timeSinceLastActivity,
+            time_since_last_activity_text: this.formatLastActivity(lastActivity),
+            current_state: this.userIdleState || 'active',
+            scene_id: this.getSceneIdFromPage(),
+            conversation_count: this.conversations ? this.conversations.length : 0,
+            messages_sent: this.messagesSentCount || 0
+        };
+    }
+
+    /**
+     * 格式化持续时间
+     */
+    formatDuration(milliseconds) {
+        const seconds = Math.floor(milliseconds / 1000);
+        const minutes = Math.floor(seconds / 60);
+        const hours = Math.floor(minutes / 60);
+
+        if (hours > 0) {
+            return `${hours}小时${minutes % 60}分钟`;
+        } else if (minutes > 0) {
+            return `${minutes}分钟${seconds % 60}秒`;
+        } else {
+            return `${seconds}秒`;
+        }
+    }
+
+    /**
+     * 防抖函数
+     */
+    debounce(func, wait) {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func.apply(this, args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    }
+
+    /**
+     * 触发用户事件
+     */
+    triggerUserEvent(eventType, eventData) {
+        // 触发自定义事件
+        const event = new CustomEvent(eventType, {
+            detail: eventData
+        });
+        document.dispatchEvent(event);
+
+        // 如果有实时管理器，也通过它触发事件
+        if (this.realtimeManager && this.realtimeManager.emit) {
+            this.realtimeManager.emit(eventType, eventData);
+        }
+    }
+
+    /**
+     * 更新消息发送计数
+     */
+    incrementMessageSentCount() {
+        this.messagesSentCount = (this.messagesSentCount || 0) + 1;
+
+        // 更新活动时间
+        this.updateLastActivity();
+
+        // 保存到本地存储
+        try {
+            localStorage.setItem('messages_sent_count', this.messagesSentCount.toString());
+        } catch (error) {
+            console.warn('保存消息计数失败:', error);
+        }
+    }
+
+    /**
+     * 获取会话开始时间
+     */
+    getSessionStartTime() {
+        if (!this.sessionStartTime) {
+            this.sessionStartTime = Date.now();
+
+            // 保存到本地存储
+            try {
+                localStorage.setItem('session_start_time', this.sessionStartTime.toString());
+            } catch (error) {
+                console.warn('保存会话开始时间失败:', error);
+            }
+        }
+
+        return this.sessionStartTime;
+    }
+
+    /**
+     * 初始化会话时间管理
+     */
+    initSessionTimeManagement() {
+        // 尝试从本地存储恢复会话开始时间
+        try {
+            const savedSessionStart = localStorage.getItem('session_start_time');
+            if (savedSessionStart) {
+                const sessionStart = parseInt(savedSessionStart, 10);
+                const now = Date.now();
+
+                // 如果会话时间超过6小时，重新开始新会话
+                if (now - sessionStart > 6 * 60 * 60 * 1000) {
+                    this.sessionStartTime = now;
+                    localStorage.setItem('session_start_time', now.toString());
+                } else {
+                    this.sessionStartTime = sessionStart;
+                }
+            } else {
+                this.sessionStartTime = Date.now();
+                localStorage.setItem('session_start_time', this.sessionStartTime.toString());
+            }
+        } catch (error) {
+            console.warn('初始化会话时间管理失败:', error);
+            this.sessionStartTime = Date.now();
+        }
+
+        // 尝试恢复消息发送计数
+        try {
+            const savedMessageCount = localStorage.getItem('messages_sent_count');
+            if (savedMessageCount) {
+                this.messagesSentCount = parseInt(savedMessageCount, 10);
+            } else {
+                this.messagesSentCount = 0;
+            }
+        } catch (error) {
+            console.warn('恢复消息计数失败:', error);
+            this.messagesSentCount = 0;
+        }
+
+        console.log('📅 会话时间管理已初始化');
+    }
+
+    /**
+     * 清理会话数据
+     */
+    clearSessionData() {
+        this.sessionStartTime = Date.now();
+        this.messagesSentCount = 0;
+        this.lastActivityTime = Date.now();
+
+        // 清理本地存储
+        try {
+            localStorage.removeItem('session_start_time');
+            localStorage.removeItem('messages_sent_count');
+            localStorage.removeItem('last_activity');
+        } catch (error) {
+            console.warn('清理会话数据失败:', error);
+        }
+
+        console.log('🧹 会话数据已清理');
+    }
+
+    /**
+     * 监听页面卸载，保存最后活动时间
+     */
+    setupActivityPersistence() {
+        // 监听页面卸载事件
+        window.addEventListener('beforeunload', () => {
+            // 更新最后活动时间
+            this.updateLastActivity();
+
+            // 发送最终状态
+            if (this.realtimeManager) {
+                this.realtimeManager.sendUserStatusUpdate('offline', 'user_leaving', {
+                    session_duration: Date.now() - this.sessionStartTime,
+                    messages_sent: this.messagesSentCount,
+                    final_activity: Date.now()
+                });
+            }
+        });
+
+        // 监听页面隐藏事件（移动端友好）
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') {
+                this.updateLastActivity();
+            }
+        });
+    }
+
+    /**
+     * 获取或创建对话容器
+     */
+    getConversationContainer() {
+        // 按优先级查找对话容器
+        const selectors = [
+            '#conversation-history',
+            '#chat-messages',
+            '.conversation-container',
+            '.chat-container',
+            '.messages-container',
+            '#messages'
+        ];
+
+        for (const selector of selectors) {
+            const container = document.querySelector(selector);
+            if (container) {
+                return container;
+            }
+        }
+
+        // 如果没找到，尝试创建一个
+        return this.createConversationContainer();
+    }
+
+    /**
+     * 创建对话容器
+     */
+    createConversationContainer() {
+        console.log('📦 创建新的对话容器');
+
+        const container = document.createElement('div');
+        container.id = 'conversation-history';
+        container.className = 'conversation-container';
+        container.style.cssText = `
+        max-height: 400px;
+        overflow-y: auto;
+        padding: 1rem;
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 0.5rem;
+        margin-bottom: 1rem;
+    `;
+
+        // 添加标题
+        const title = document.createElement('h5');
+        title.textContent = '对话历史';
+        title.className = 'mb-3';
+
+        container.appendChild(title);
+
+        // 查找合适的位置插入
+        const targetContainer = this.findInsertionPoint();
+        if (targetContainer) {
+            targetContainer.appendChild(container);
+        } else {
+            document.body.appendChild(container);
+        }
+
+        return container;
+    }
+
+    /**
+     * 查找容器插入位置
+     */
+    findInsertionPoint() {
+        // 查找场景内容区域
+        const sceneContent = document.querySelector('.scene-content, .main-content, .container, main');
+        if (sceneContent) {
+            return sceneContent;
+        }
+
+        // 查找聊天界面区域
+        const chatInterface = document.querySelector('.chat-interface, .chat-container');
+        if (chatInterface) {
+            return chatInterface.parentNode;
+        }
+
+        return null;
+    }
+
+    /**
+     * 创建对话元素
+     */
+    createConversationElement(conversation) {
+        const element = document.createElement('div');
+        element.className = 'conversation-item mb-3';
+        element.setAttribute('data-conversation-id', conversation.id || this.generateConversationId());
+        element.setAttribute('data-speaker-id', conversation.speaker_id || conversation.speakerId || 'unknown');
+
+        // 获取说话者信息
+        const speakerInfo = this.getSpeakerInfo(conversation);
+
+        // 格式化时间
+        const timestamp = this.formatConversationTime(conversation.timestamp || Date.now());
+
+        // 构建HTML内容
+        element.innerHTML = `
+        <div class="conversation-header d-flex align-items-center mb-2">
+            <div class="speaker-avatar me-2">
+                ${speakerInfo.avatar ?
+                `<img src="${speakerInfo.avatar}" alt="${speakerInfo.name}" class="rounded-circle" width="32" height="32">` :
+                `<div class="avatar-placeholder rounded-circle d-flex align-items-center justify-content-center" style="width: 32px; height: 32px; background: ${speakerInfo.color}; color: white; font-size: 14px; font-weight: 600;">
+                        ${speakerInfo.initial}
+                    </div>`
+            }
+            </div>
+            <div class="speaker-info flex-grow-1">
+                <div class="speaker-name fw-bold text-primary">${speakerInfo.name}</div>
+                <div class="conversation-time text-muted small">${timestamp}</div>
+            </div>
+            <div class="conversation-actions">
+                <button class="btn btn-sm btn-outline-secondary copy-conversation-btn" title="复制对话">
+                    <i class="bi bi-clipboard"></i>
+                </button>
+            </div>
+        </div>
+        <div class="conversation-content">
+            <div class="message-text">${this.formatConversationContent(conversation)}</div>
+            ${this.renderConversationMetadata(conversation)}
+        </div>
+    `;
+
+        // 绑定事件
+        this.bindConversationElementEvents(element, conversation);
+
+        return element;
+    }
+
+    /**
+     * 获取说话者信息
+     */
+    getSpeakerInfo(conversation) {
+        const speakerId = conversation.speaker_id || conversation.speakerId || conversation.character_id;
+
+        // 默认信息
+        let speakerInfo = {
+            id: speakerId,
+            name: '未知说话者',
+            avatar: null,
+            color: '#6c757d',
+            initial: '?'
+        };
+
+        // 如果是用户消息
+        if (conversation.message_type === 'user' || conversation.type === 'user') {
+            speakerInfo = {
+                id: 'user',
+                name: '你',
+                avatar: null,
+                color: '#007bff',
+                initial: '我'
+            };
+        }
+        // 如果是角色消息
+        else if (speakerId && this.currentScene?.characters) {
+            const character = this.currentScene.characters.find(c => c.id === speakerId);
+            if (character) {
+                speakerInfo = {
+                    id: character.id,
+                    name: character.name,
+                    avatar: character.avatar,
+                    color: this.getCharacterColor(character.id),
+                    initial: character.name.charAt(0).toUpperCase()
+                };
+            }
+        }
+        // 如果有直接的说话者名称
+        else if (conversation.speaker_name || conversation.speakerName) {
+            const name = conversation.speaker_name || conversation.speakerName;
+            speakerInfo = {
+                id: speakerId || 'unknown',
+                name: name,
+                avatar: null,
+                color: this.getColorForName(name),
+                initial: name.charAt(0).toUpperCase()
+            };
+        }
+
+        return speakerInfo;
+    }
+
+    /**
+     * 格式化对话内容
+     */
+    formatConversationContent(conversation) {
+        let content = conversation.message || conversation.content || conversation.text || '';
+
+        // HTML转义
+        content = this.escapeHtml(content);
+
+        // 处理换行
+        content = content.replace(/\n/g, '<br>');
+
+        // 处理简单的markdown（可选）
+        if (this.shouldParseMarkdown(content)) {
+            content = this.parseSimpleMarkdown(content);
+        }
+
+        return content;
+    }
+
+    /**
+     * 渲染对话元数据
+     */
+    renderConversationMetadata(conversation) {
+        const metadata = [];
+
+        // 情绪信息
+        if (conversation.emotion) {
+            metadata.push(`<span class="badge bg-secondary me-1" title="情绪">${conversation.emotion}</span>`);
+        }
+
+        // 消息类型
+        if (conversation.message_type && conversation.message_type !== 'chat') {
+            metadata.push(`<span class="badge bg-info me-1" title="类型">${this.formatMessageType(conversation.message_type)}</span>`);
+        }
+
+        // 角色回应时间（如果有）
+        if (conversation.response_time) {
+            metadata.push(`<span class="badge bg-success me-1" title="响应时间">${conversation.response_time}ms</span>`);
+        }
+
+        // 使用的token数（如果有）
+        if (conversation.tokens_used) {
+            metadata.push(`<span class="badge bg-warning me-1" title="使用的token">${conversation.tokens_used}</span>`);
+        }
+
+        if (metadata.length > 0) {
+            return `<div class="conversation-metadata mt-2">${metadata.join('')}</div>`;
+        }
+
+        return '';
+    }
+
+    /**
+     * 绑定对话元素事件
+     */
+    bindConversationElementEvents(element, conversation) {
+        // 复制按钮事件
+        const copyBtn = element.querySelector('.copy-conversation-btn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                this.copyConversationToClipboard(conversation);
+            });
+        }
+
+        // 点击对话元素事件（可选功能）
+        element.addEventListener('click', () => {
+            this.handleConversationClick(conversation, element);
+        });
+
+        // 长按事件（移动端）
+        let longPressTimer;
+        element.addEventListener('touchstart', () => {
+            longPressTimer = setTimeout(() => {
+                this.showConversationContextMenu(conversation, element);
+            }, 800);
+        });
+
+        element.addEventListener('touchend', () => {
+            if (longPressTimer) {
+                clearTimeout(longPressTimer);
+            }
+        });
+    }
+
+    /**
+     * 复制对话到剪贴板
+     */
+    async copyConversationToClipboard(conversation) {
+        const speakerInfo = this.getSpeakerInfo(conversation);
+        const content = conversation.message || conversation.content || '';
+        const timestamp = this.formatConversationTime(conversation.timestamp);
+
+        const textToCopy = `${speakerInfo.name} (${timestamp}):\n${content}`;
+
+        try {
+            if (typeof Utils !== 'undefined' && Utils.copyToClipboard) {
+                await Utils.copyToClipboard(textToCopy);
+            } else {
+                // 降级处理
+                await navigator.clipboard.writeText(textToCopy);
+                this.showNotification('对话已复制到剪贴板', 'success');
+            }
+        } catch (error) {
+            console.error('复制失败:', error);
+            this.showNotification('复制失败', 'error');
+        }
+    }
+
+    /**
+     * 处理对话点击事件
+     */
+    handleConversationClick(conversation, element) {
+        // 高亮选中的对话
+        document.querySelectorAll('.conversation-item').forEach(item => {
+            item.classList.remove('selected');
+        });
+        element.classList.add('selected');
+
+        // 显示对话详情（可选）
+        this.showConversationDetails(conversation);
+    }
+
+    /**
+     * 显示对话详情 - 完整实现
+     */
+    showConversationDetails(conversation) {
+        if (!conversation) {
+            console.warn('无效的对话数据');
+            return;
+        }
+
+        try {
+            console.log('显示对话详情:', conversation);
+
+            // 创建或获取模态框
+            const modal = this.createConversationDetailsModal();
+
+            // 填充对话详情数据
+            this.populateConversationDetails(modal, conversation);
+
+            // 显示模态框
+            this.showModal(modal);
+
+            // 绑定模态框事件
+            this.bindConversationDetailsEvents(modal, conversation);
+
+        } catch (error) {
+            console.error('显示对话详情失败:', error);
+            this.showNotification('显示对话详情失败', 'error');
+        }
+    }
+
+    /**
+     * 创建对话详情模态框
+     */
+    createConversationDetailsModal() {
+        // 检查是否已存在模态框
+        let modal = document.getElementById('conversation-details-modal');
+
+        if (!modal) {
+            modal = document.createElement('div');
+            modal.id = 'conversation-details-modal';
+            modal.className = 'modal fade';
+            modal.setAttribute('tabindex', '-1');
+            modal.setAttribute('aria-labelledby', 'conversationDetailsModalLabel');
+            modal.setAttribute('aria-hidden', 'true');
+
+            modal.innerHTML = `
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="conversationDetailsModalLabel">
+                            <i class="bi bi-chat-dots me-2"></i>
+                            对话详情
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+                    </div>
+                    <div class="modal-body">
+                        <!-- 对话基本信息 -->
+                        <div class="conversation-basic-info mb-4">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="info-card">
+                                        <div class="info-header">
+                                            <i class="bi bi-person-circle text-primary"></i>
+                                            <span class="info-title">说话者信息</span>
+                                        </div>
+                                        <div class="info-content">
+                                            <div class="speaker-info-display">
+                                                <div class="speaker-avatar-large"></div>
+                                                <div class="speaker-details">
+                                                    <h6 class="speaker-name-display mb-1"></h6>
+                                                    <small class="speaker-id-display text-muted"></small>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="info-card">
+                                        <div class="info-header">
+                                            <i class="bi bi-clock text-success"></i>
+                                            <span class="info-title">时间信息</span>
+                                        </div>
+                                        <div class="info-content">
+                                            <div class="time-display"></div>
+                                            <div class="relative-time-display text-muted"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 对话内容 -->
+                        <div class="conversation-content-section mb-4">
+                            <div class="info-card">
+                                <div class="info-header">
+                                    <i class="bi bi-chat-text text-info"></i>
+                                    <span class="info-title">对话内容</span>
+                                    <div class="header-actions">
+                                        <button class="btn btn-sm btn-outline-secondary copy-content-btn" title="复制内容">
+                                            <i class="bi bi-clipboard"></i>
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary expand-content-btn" title="全屏查看">
+                                            <i class="bi bi-arrows-fullscreen"></i>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="info-content">
+                                    <div class="conversation-content-display"></div>
+                                    <div class="content-stats">
+                                        <small class="text-muted">
+                                            字符数: <span class="char-count">0</span> | 
+                                            词数: <span class="word-count">0</span>
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 元数据信息 -->
+                        <div class="conversation-metadata-section mb-4">
+                            <div class="info-card">
+                                <div class="info-header">
+                                    <i class="bi bi-info-circle text-warning"></i>
+                                    <span class="info-title">元数据</span>
+                                </div>
+                                <div class="info-content">
+                                    <div class="metadata-display"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 技术信息 -->
+                        <div class="conversation-technical-section mb-4">
+                            <div class="info-card">
+                                <div class="info-header">
+                                    <i class="bi bi-gear text-secondary"></i>
+                                    <span class="info-title">技术信息</span>
+                                </div>
+                                <div class="info-content">
+                                    <div class="technical-info-display"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 相关操作 -->
+                        <div class="conversation-actions-section">
+                            <div class="info-card">
+                                <div class="info-header">
+                                    <i class="bi bi-tools text-dark"></i>
+                                    <span class="info-title">相关操作</span>
+                                </div>
+                                <div class="info-content">
+                                    <div class="action-buttons">
+                                        <button class="btn btn-outline-primary btn-sm reply-to-conversation-btn">
+                                            <i class="bi bi-reply me-1"></i>回复此对话
+                                        </button>
+                                        <button class="btn btn-outline-success btn-sm quote-conversation-btn">
+                                            <i class="bi bi-quote me-1"></i>引用内容
+                                        </button>
+                                        <button class="btn btn-outline-info btn-sm view-context-btn">
+                                            <i class="bi bi-eye me-1"></i>查看上下文
+                                        </button>
+                                        <button class="btn btn-outline-secondary btn-sm export-conversation-btn">
+                                            <i class="bi bi-download me-1"></i>导出对话
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 调试信息（开发模式） -->
+                        <div class="conversation-debug-section" style="display: none;">
+                            <div class="info-card">
+                                <div class="info-header">
+                                    <i class="bi bi-bug text-danger"></i>
+                                    <span class="info-title">调试信息</span>
+                                </div>
+                                <div class="info-content">
+                                    <pre class="debug-info-display"></pre>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                        <button type="button" class="btn btn-primary copy-all-btn">
+                            <i class="bi bi-clipboard me-1"></i>复制全部信息
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+            // 添加到页面
+            document.body.appendChild(modal);
+        }
+
+        return modal;
+    }
+
+    /**
+     * 填充对话详情数据
+     */
+    populateConversationDetails(modal, conversation) {
+        try {
+            // 获取说话者信息
+            const speakerInfo = this.getSpeakerInfo(conversation);
+
+            // 填充说话者信息
+            this.populateSpeakerInfo(modal, speakerInfo);
+
+            // 填充时间信息
+            this.populateTimeInfo(modal, conversation);
+
+            // 填充对话内容
+            this.populateConversationContent(modal, conversation);
+
+            // 填充元数据
+            this.populateMetadata(modal, conversation);
+
+            // 填充技术信息
+            this.populateTechnicalInfo(modal, conversation);
+
+            // 显示调试信息（如果是开发模式）
+            this.populateDebugInfo(modal, conversation);
+
+        } catch (error) {
+            console.error('填充对话详情数据失败:', error);
+        }
+    }
+
+    /**
+     * 填充说话者信息
+     */
+    populateSpeakerInfo(modal, speakerInfo) {
+        const avatarElement = modal.querySelector('.speaker-avatar-large');
+        const nameElement = modal.querySelector('.speaker-name-display');
+        const idElement = modal.querySelector('.speaker-id-display');
+
+        // 设置头像
+        if (speakerInfo.avatar) {
+            avatarElement.innerHTML = `
+            <img src="${speakerInfo.avatar}" alt="${speakerInfo.name}" 
+                 class="rounded-circle" width="48" height="48">
+        `;
+        } else {
+            avatarElement.innerHTML = `
+            <div class="avatar-placeholder-large rounded-circle d-flex align-items-center justify-content-center" 
+                 style="width: 48px; height: 48px; background: ${speakerInfo.color}; color: white; font-size: 18px; font-weight: 600;">
+                ${speakerInfo.initial}
+            </div>
+        `;
+        }
+
+        // 设置名称和ID
+        nameElement.textContent = speakerInfo.name;
+        idElement.textContent = `ID: ${speakerInfo.id}`;
+    }
+
+    /**
+     * 填充时间信息
+     */
+    populateTimeInfo(modal, conversation) {
+        const timeDisplay = modal.querySelector('.time-display');
+        const relativeTimeDisplay = modal.querySelector('.relative-time-display');
+
+        const timestamp = conversation.timestamp || Date.now();
+        const date = new Date(timestamp);
+
+        // 完整时间
+        timeDisplay.innerHTML = `
+        <div class="mb-1">
+            <strong>发送时间:</strong> ${date.toLocaleString()}
+        </div>
+        <div>
+            <strong>UTC时间:</strong> ${date.toISOString()}
+        </div>
+    `;
+
+        // 相对时间
+        relativeTimeDisplay.textContent = this.formatConversationTime(timestamp);
+    }
+
+    /**
+     * 填充对话内容
+     */
+    populateConversationContent(modal, conversation) {
+        const contentDisplay = modal.querySelector('.conversation-content-display');
+        const charCountElement = modal.querySelector('.char-count');
+        const wordCountElement = modal.querySelector('.word-count');
+
+        const content = conversation.message || conversation.content || conversation.text || '';
+
+        // 显示格式化的内容
+        contentDisplay.innerHTML = `
+        <div class="content-preview">
+            ${this.formatConversationContent(conversation)}
+        </div>
+        <div class="raw-content mt-3" style="display: none;">
+            <h6>原始内容:</h6>
+            <pre class="text-muted small">${this.escapeHtml(content)}</pre>
+        </div>
+    `;
+
+        // 计算统计信息
+        charCountElement.textContent = content.length;
+        wordCountElement.textContent = this.countWords(content);
+
+        // 添加切换原始内容的功能
+        const toggleBtn = document.createElement('button');
+        toggleBtn.className = 'btn btn-sm btn-outline-info mt-2';
+        toggleBtn.innerHTML = '<i class="bi bi-code me-1"></i>查看原始内容';
+        toggleBtn.onclick = () => this.toggleRawContent(modal);
+        contentDisplay.appendChild(toggleBtn);
+    }
+
+    /**
+     * 填充元数据
+     */
+    populateMetadata(modal, conversation) {
+        const metadataDisplay = modal.querySelector('.metadata-display');
+
+        const metadata = [];
+
+        // 消息类型
+        if (conversation.message_type || conversation.type) {
+            const type = conversation.message_type || conversation.type;
+            metadata.push({
+                label: '消息类型',
+                value: this.formatMessageType(type),
+                icon: 'bi-tag'
+            });
+        }
+
+        // 情绪信息
+        if (conversation.emotion) {
+            metadata.push({
+                label: '情绪',
+                value: conversation.emotion,
+                icon: 'bi-emoji-smile'
+            });
+        }
+
+        // 响应时间
+        if (conversation.response_time) {
+            metadata.push({
+                label: '响应时间',
+                value: `${conversation.response_time}ms`,
+                icon: 'bi-stopwatch'
+            });
+        }
+
+        // Token使用量
+        if (conversation.tokens_used) {
+            metadata.push({
+                label: '使用的Token',
+                value: conversation.tokens_used,
+                icon: 'bi-cpu'
+            });
+        }
+
+        // 置信度
+        if (conversation.confidence) {
+            metadata.push({
+                label: '置信度',
+                value: `${Math.round(conversation.confidence * 100)}%`,
+                icon: 'bi-graph-up'
+            });
+        }
+
+        // 目标角色
+        if (conversation.target_character_id) {
+            metadata.push({
+                label: '目标角色',
+                value: this.getCharacterName(conversation.target_character_id),
+                icon: 'bi-person-check'
+            });
+        }
+
+        // 渲染元数据
+        if (metadata.length > 0) {
+            metadataDisplay.innerHTML = metadata.map(item => `
+            <div class="metadata-item d-flex align-items-center mb-2">
+                <i class="${item.icon} text-primary me-2"></i>
+                <span class="metadata-label fw-bold me-2">${item.label}:</span>
+                <span class="metadata-value">${item.value}</span>
+            </div>
+        `).join('');
+        } else {
+            metadataDisplay.innerHTML = '<p class="text-muted">暂无元数据信息</p>';
+        }
+    }
+
+    /**
+     * 填充技术信息
+     */
+    populateTechnicalInfo(modal, conversation) {
+        const technicalDisplay = modal.querySelector('.technical-info-display');
+
+        const technicalInfo = [];
+
+        // 对话ID
+        if (conversation.id) {
+            technicalInfo.push({
+                label: '对话ID',
+                value: conversation.id,
+                copyable: true
+            });
+        }
+
+        // 场景ID
+        if (conversation.scene_id || conversation.sceneId) {
+            const sceneId = conversation.scene_id || conversation.sceneId;
+            technicalInfo.push({
+                label: '场景ID',
+                value: sceneId,
+                copyable: true
+            });
+        }
+
+        // 说话者ID
+        if (conversation.speaker_id || conversation.speakerId) {
+            const speakerId = conversation.speaker_id || conversation.speakerId;
+            technicalInfo.push({
+                label: '说话者ID',
+                value: speakerId,
+                copyable: true
+            });
+        }
+
+        // 交互ID
+        if (conversation.interaction_id) {
+            technicalInfo.push({
+                label: '交互ID',
+                value: conversation.interaction_id,
+                copyable: true
+            });
+        }
+
+        // 模拟ID
+        if (conversation.simulation_id) {
+            technicalInfo.push({
+                label: '模拟ID',
+                value: conversation.simulation_id,
+                copyable: true
+            });
+        }
+
+        // 会话ID
+        if (conversation.session_id) {
+            technicalInfo.push({
+                label: '会话ID',
+                value: conversation.session_id,
+                copyable: true
+            });
+        }
+
+        // 渲染技术信息
+        if (technicalInfo.length > 0) {
+            technicalDisplay.innerHTML = technicalInfo.map(item => `
+            <div class="technical-item d-flex align-items-center justify-content-between mb-2">
+                <div>
+                    <span class="technical-label fw-bold me-2">${item.label}:</span>
+                    <span class="technical-value font-monospace">${item.value}</span>
+                </div>
+                ${item.copyable ? `
+                    <button class="btn btn-sm btn-outline-secondary copy-tech-btn" 
+                            data-value="${item.value}" title="复制">
+                        <i class="bi bi-clipboard"></i>
+                    </button>
+                ` : ''}
+            </div>
+        `).join('');
+        } else {
+            technicalDisplay.innerHTML = '<p class="text-muted">暂无技术信息</p>';
+        }
+    }
+
+    /**
+     * 填充调试信息
+     */
+    populateDebugInfo(modal, conversation) {
+        const debugSection = modal.querySelector('.conversation-debug-section');
+        const debugDisplay = modal.querySelector('.debug-info-display');
+
+        // 只在开发模式下显示
+        if (window.location.hostname === 'localhost' || window.location.search.includes('debug=1')) {
+            debugSection.style.display = 'block';
+            debugDisplay.textContent = JSON.stringify(conversation, null, 2);
+        }
+    }
+
+    /**
+     * 绑定对话详情模态框事件
+     */
+    bindConversationDetailsEvents(modal, conversation) {
+        // 复制内容按钮
+        const copyContentBtn = modal.querySelector('.copy-content-btn');
+        if (copyContentBtn) {
+            copyContentBtn.onclick = () => this.copyConversationContent(conversation);
+        }
+
+        // 全屏查看按钮
+        const expandBtn = modal.querySelector('.expand-content-btn');
+        if (expandBtn) {
+            expandBtn.onclick = () => this.expandConversationContent(conversation);
+        }
+
+        // 回复对话按钮
+        const replyBtn = modal.querySelector('.reply-to-conversation-btn');
+        if (replyBtn) {
+            replyBtn.onclick = () => {
+                this.replyToConversation(conversation);
+                this.closeModal(modal);
+            };
+        }
+
+        // 引用内容按钮
+        const quoteBtn = modal.querySelector('.quote-conversation-btn');
+        if (quoteBtn) {
+            quoteBtn.onclick = () => this.quoteConversationContent(conversation);
+        }
+
+        // 查看上下文按钮
+        const contextBtn = modal.querySelector('.view-context-btn');
+        if (contextBtn) {
+            contextBtn.onclick = () => this.viewConversationContext(conversation);
+        }
+
+        // 导出对话按钮
+        const exportBtn = modal.querySelector('.export-conversation-btn');
+        if (exportBtn) {
+            exportBtn.onclick = () => this.exportSingleConversation(conversation);
+        }
+
+        // 复制全部信息按钮
+        const copyAllBtn = modal.querySelector('.copy-all-btn');
+        if (copyAllBtn) {
+            copyAllBtn.onclick = () => this.copyAllConversationInfo(conversation);
+        }
+
+        // 技术信息复制按钮
+        const techCopyBtns = modal.querySelectorAll('.copy-tech-btn');
+        techCopyBtns.forEach(btn => {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                const value = btn.dataset.value;
+                this.copyToClipboard(value);
+            };
+        });
+    }
+
+    /**
+     * 显示模态框
+     */
+    showModal(modal) {
+        // 如果使用Bootstrap 5
+        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+            const modalInstance = new bootstrap.Modal(modal);
+            modalInstance.show();
+        } else {
+            // 降级处理：简单显示
+            modal.style.display = 'block';
+            modal.classList.add('show');
+            document.body.classList.add('modal-open');
+
+            // 添加背景遮罩
+            const backdrop = document.createElement('div');
+            backdrop.className = 'modal-backdrop fade show';
+            backdrop.id = 'conversation-modal-backdrop';
+            document.body.appendChild(backdrop);
+        }
+    }
+
+    /**
+     * 关闭模态框
+     */
+    closeModal(modal) {
+        if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+            const modalInstance = bootstrap.Modal.getInstance(modal);
+            if (modalInstance) {
+                modalInstance.hide();
+            }
+        } else {
+            // 降级处理
+            modal.style.display = 'none';
+            modal.classList.remove('show');
+            document.body.classList.remove('modal-open');
+
+            // 移除背景遮罩
+            const backdrop = document.getElementById('conversation-modal-backdrop');
+            if (backdrop) {
+                backdrop.remove();
+            }
+        }
+    }
+
+    /**
+     * 复制对话内容
+     */
+    copyConversationContent(conversation) {
+        const content = conversation.message || conversation.content || conversation.text || '';
+        this.copyToClipboard(content);
+        this.showNotification('对话内容已复制', 'success');
+    }
+
+    /**
+     * 全屏查看对话内容
+     */
+    expandConversationContent(conversation) {
+        const content = conversation.message || conversation.content || conversation.text || '';
+        const speakerInfo = this.getSpeakerInfo(conversation);
+
+        // 创建全屏显示
+        const fullscreenDiv = document.createElement('div');
+        fullscreenDiv.className = 'conversation-fullscreen';
+        fullscreenDiv.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.9);
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        color: white;
+        padding: 2rem;
+    `;
+
+        fullscreenDiv.innerHTML = `
+        <div class="fullscreen-header mb-4 text-center">
+            <h3>${speakerInfo.name}</h3>
+            <p class="text-muted">${this.formatConversationTime(conversation.timestamp)}</p>
+        </div>
+        <div class="fullscreen-content" style="
+            max-width: 80%;
+            max-height: 70%;
+            overflow-y: auto;
+            font-size: 1.2rem;
+            line-height: 1.6;
+            text-align: center;
+        ">
+            ${this.formatConversationContent(conversation)}
+        </div>
+        <div class="fullscreen-footer mt-4">
+            <button class="btn btn-secondary" onclick="this.parentNode.parentNode.remove()">
+                <i class="bi bi-x-lg me-1"></i>关闭
+            </button>
+        </div>
+    `;
+
+        document.body.appendChild(fullscreenDiv);
+
+        // ESC键关闭
+        const closeOnEsc = (e) => {
+            if (e.key === 'Escape') {
+                fullscreenDiv.remove();
+                document.removeEventListener('keydown', closeOnEsc);
+            }
+        };
+        document.addEventListener('keydown', closeOnEsc);
+    }
+
+    /**
+     * 引用对话内容
+     */
+    quoteConversationContent(conversation) {
+        const messageInput = document.getElementById('message-input');
+        if (!messageInput) {
+            this.showNotification('未找到消息输入框', 'warning');
+            return;
+        }
+
+        const content = conversation.message || conversation.content || conversation.text || '';
+        const speakerInfo = this.getSpeakerInfo(conversation);
+        const quoteText = `> ${speakerInfo.name}: ${content}\n\n`;
+
+        // 在当前光标位置插入引用
+        this.insertTextAtCursor(messageInput, quoteText);
+        messageInput.focus();
+
+        this.showNotification('内容已引用到输入框', 'success');
+    }
+
+    /**
+     * 在光标位置插入文本
+     */
+    insertTextAtCursor(inputElement, text) {
+        if (!inputElement || !text) {
+            console.warn('insertTextAtCursor: 无效的输入元素或文本');
+            return false;
+        }
+
+        try {
+            const elementType = this.detectInputElementType(inputElement);
+
+            switch (elementType) {
+                case 'input-text':
+                case 'textarea':
+                    return this.insertTextIntoInput(inputElement, text);
+
+                case 'contenteditable':
+                    return this.insertTextIntoContentEditable(inputElement, text);
+
+                default:
+                    // 降级：追加到末尾
+                    if (inputElement.value !== undefined) {
+                        inputElement.value += text;
+                        this.moveCursorToEnd(inputElement);
+                        return true;
+                    }
+                    return false;
+            }
+
+        } catch (error) {
+            console.error('插入文本失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 检测输入元素类型
+     */
+    detectInputElementType(element) {
+        if (!element) return 'unknown';
+
+        const tagName = element.tagName.toLowerCase();
+
+        if (tagName === 'input') {
+            const type = element.type.toLowerCase();
+            if (['text', 'search', 'url', 'tel', 'password'].includes(type)) {
+                return 'input-text';
+            }
+            return 'input-other';
+        } else if (tagName === 'textarea') {
+            return 'textarea';
+        } else if (element.contentEditable === 'true') {
+            return 'contenteditable';
+        }
+
+        return 'unknown';
+    }
+
+    /**
+     * 在文本输入框中插入文本
+     */
+    insertTextIntoInput(inputElement, text) {
+        try {
+            const cursorPos = this.getCurrentCursorPosition(inputElement);
+
+            if (cursorPos >= 0) {
+                const value = inputElement.value;
+                const newValue = value.substring(0, cursorPos) + text + value.substring(cursorPos);
+
+                inputElement.value = newValue;
+                this.setCursorPosition(inputElement, cursorPos + text.length);
+
+                // 触发输入事件
+                this.triggerInputEvents(inputElement);
+                return true;
+            }
+
+            // 降级：追加到末尾
+            inputElement.value += text;
+            this.moveCursorToEnd(inputElement);
+            this.triggerInputEvents(inputElement);
+            return true;
+
+        } catch (error) {
+            console.error('在输入框中插入文本失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 在contenteditable元素中插入文本
+     */
+    insertTextIntoContentEditable(element, text) {
+        try {
+            if (window.getSelection && document.createRange) {
+                const selection = window.getSelection();
+
+                if (selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    range.deleteContents();
+                    range.insertNode(document.createTextNode(text));
+                    range.collapse(false);
+
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+
+                    // 触发输入事件
+                    this.triggerInputEvents(element);
+                    return true;
+                }
+            }
+
+            // 降级：追加到末尾
+            element.textContent += text;
+            this.moveCursorToEnd(element);
+            this.triggerInputEvents(element);
+            return true;
+
+        } catch (error) {
+            console.error('在contenteditable中插入文本失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 获取当前光标位置
+     */
+    getCurrentCursorPosition(inputElement) {
+        if (!inputElement) return -1;
+
+        try {
+            const elementType = this.detectInputElementType(inputElement);
+
+            switch (elementType) {
+                case 'input-text':
+                case 'textarea':
+                    if ('selectionStart' in inputElement) {
+                        return inputElement.selectionStart;
+                    }
+                    break;
+
+                case 'contenteditable':
+                    if (window.getSelection) {
+                        const selection = window.getSelection();
+                        if (selection.rangeCount > 0) {
+                            const range = selection.getRangeAt(0);
+                            return this.getTextPositionFromRange(inputElement, range);
+                        }
+                    }
+                    break;
+            }
+
+            return -1;
+
+        } catch (error) {
+            console.error('获取光标位置失败:', error);
+            return -1;
+        }
+    }
+
+    /**
+     * 从Range对象获取文本位置
+     */
+    getTextPositionFromRange(element, range) {
+        let position = 0;
+
+        function traverse(node) {
+            if (node === range.startContainer) {
+                return position + range.startOffset;
+            }
+
+            if (node.nodeType === Node.TEXT_NODE) {
+                position += node.textContent.length;
+            } else {
+                for (let child of node.childNodes) {
+                    const result = traverse(child);
+                    if (result !== undefined) return result;
+                }
+            }
+
+            return undefined;
+        }
+
+        const result = traverse(element);
+        return result !== undefined ? result : position;
+    }
+
+    /**
+     * 设置光标位置
+     */
+    setCursorPosition(inputElement, position) {
+        if (!inputElement) {
+            console.warn('输入元素无效');
+            return false;
+        }
+
+        try {
+            // 方法1: 使用 setSelectionRange (现代浏览器)
+            if (typeof inputElement.setSelectionRange === 'function') {
+                inputElement.setSelectionRange(position, position);
+                return true;
+            }
+
+            // 方法2: 使用 createTextRange (IE兼容)
+            if (inputElement.createTextRange) {
+                const range = inputElement.createTextRange();
+                range.collapse(true);
+                range.moveEnd('character', position);
+                range.moveStart('character', position);
+                range.select();
+                return true;
+            }
+
+            // 方法3: 使用 Selection API (现代浏览器替代方案)
+            if (window.getSelection && document.createRange) {
+                const selection = window.getSelection();
+                const range = document.createRange();
+
+                // 对于input/textarea，需要特殊处理
+                if (inputElement.tagName === 'INPUT' || inputElement.tagName === 'TEXTAREA') {
+                    // 尝试通过selectionStart/selectionEnd设置
+                    if ('selectionStart' in inputElement) {
+                        inputElement.selectionStart = position;
+                        inputElement.selectionEnd = position;
+                        return true;
+                    }
+                } else {
+                    // 对于contenteditable元素
+                    if (inputElement.firstChild) {
+                        range.setStart(inputElement.firstChild, Math.min(position, inputElement.textContent.length));
+                        range.setEnd(inputElement.firstChild, Math.min(position, inputElement.textContent.length));
+                        selection.removeAllRanges();
+                        selection.addRange(range);
+                        return true;
+                    }
+                }
+            }
+
+            // 方法4: 最后的降级方案 - 移动到末尾
+            if ('selectionStart' in inputElement) {
+                inputElement.selectionStart = inputElement.value.length;
+                inputElement.selectionEnd = inputElement.value.length;
+                return true;
+            }
+
+            console.warn('无法设置光标位置，使用默认位置');
+            return false;
+
+        } catch (error) {
+            console.error('设置光标位置失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 移动光标到文本末尾
+     */
+    moveCursorToEnd(inputElement) {
+        if (!inputElement) return false;
+
+        try {
+            const textLength = inputElement.value ? inputElement.value.length :
+                inputElement.textContent ? inputElement.textContent.length : 0;
+
+            return this.setCursorPosition(inputElement, textLength);
+
+        } catch (error) {
+            console.error('移动光标到末尾失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 移动光标到文本开头
+     */
+    moveCursorToStart(inputElement) {
+        if (!inputElement) return false;
+
+        try {
+            return this.setCursorPosition(inputElement, 0);
+
+        } catch (error) {
+            console.error('移动光标到开头失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 选择指定范围的文本
+     */
+    selectTextRange(inputElement, start, end) {
+        if (!inputElement) return false;
+
+        try {
+            const elementType = this.detectInputElementType(inputElement);
+
+            switch (elementType) {
+                case 'input-text':
+                case 'textarea':
+                    return this.selectTextInputRange(inputElement, start, end);
+
+                case 'contenteditable':
+                    return this.selectContentEditableRange(inputElement, start, end);
+
+                default:
+                    console.warn('不支持的元素类型:', elementType);
+                    return false;
+            }
+
+        } catch (error) {
+            console.error('选择文本范围失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 选择文本输入框的指定范围
+     */
+    selectTextInputRange(inputElement, start, end) {
+        try {
+            const maxLength = inputElement.value.length;
+            const safeStart = Math.max(0, Math.min(start, maxLength));
+            const safeEnd = Math.max(safeStart, Math.min(end, maxLength));
+
+            if (typeof inputElement.setSelectionRange === 'function') {
+                inputElement.setSelectionRange(safeStart, safeEnd);
+                return true;
+            }
+
+            if ('selectionStart' in inputElement && 'selectionEnd' in inputElement) {
+                inputElement.selectionStart = safeStart;
+                inputElement.selectionEnd = safeEnd;
+                return true;
+            }
+
+            if (inputElement.createTextRange) {
+                const range = inputElement.createTextRange();
+                range.collapse(true);
+                range.moveStart('character', safeStart);
+                range.moveEnd('character', safeEnd - safeStart);
+                range.select();
+                return true;
+            }
+
+            return false;
+
+        } catch (error) {
+            console.error('选择文本输入范围失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 选择contenteditable元素的指定范围
+     */
+    selectContentEditableRange(element, start, end) {
+        try {
+            if (!window.getSelection || !document.createRange) {
+                return false;
+            }
+
+            const selection = window.getSelection();
+            const range = document.createRange();
+
+            const startNode = this.findTextNodeAtPosition(element, start);
+            const endNode = this.findTextNodeAtPosition(element, end);
+
+            if (startNode.node && endNode.node) {
+                range.setStart(startNode.node, startNode.offset);
+                range.setEnd(endNode.node, endNode.offset);
+
+                selection.removeAllRanges();
+                selection.addRange(range);
+                return true;
+            }
+
+            return false;
+
+        } catch (error) {
+            console.error('选择contenteditable范围失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 在指定位置查找文本节点
+     */
+    findTextNodeAtPosition(element, position) {
+        let currentPosition = 0;
+
+        function traverse(node) {
+            if (node.nodeType === Node.TEXT_NODE) {
+                const nodeLength = node.textContent.length;
+                if (currentPosition + nodeLength >= position) {
+                    return {
+                        node: node,
+                        offset: position - currentPosition
+                    };
+                }
+                currentPosition += nodeLength;
+            } else {
+                for (let child of node.childNodes) {
+                    const result = traverse(child);
+                    if (result) return result;
+                }
+            }
+            return null;
+        }
+
+        const result = traverse(element);
+        return result || { node: element, offset: 0 };
+    }
+
+    /**
+     * 智能文本插入（自动检测并处理不同情况）
+     */
+    smartInsertText(inputElement, text, options = {}) {
+        const defaultOptions = {
+            replaceSelection: true,      // 是否替换选中的文本
+            moveCursorToEnd: true,       // 是否将光标移到插入文本的末尾
+            triggerEvents: true,         // 是否触发input事件
+            addSpace: false,             // 是否在文本后添加空格
+            addNewline: false            // 是否在文本后添加换行
+        };
+
+        const config = { ...defaultOptions, ...options };
+
+        try {
+            // 处理文本
+            let insertText = text;
+            if (config.addSpace && !insertText.endsWith(' ')) {
+                insertText += ' ';
+            }
+            if (config.addNewline && !insertText.endsWith('\n')) {
+                insertText += '\n';
+            }
+
+            // 执行插入
+            const success = this.insertTextAtCursor(inputElement, insertText);
+
+            // 触发事件
+            if (success && config.triggerEvents) {
+                this.triggerInputEvents(inputElement);
+            }
+
+            return success;
+
+        } catch (error) {
+            console.error('智能文本插入失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 触发输入相关事件
+     */
+    triggerInputEvents(inputElement) {
+        try {
+            // 触发input事件
+            const inputEvent = new Event('input', {
+                bubbles: true,
+                cancelable: true
+            });
+            inputElement.dispatchEvent(inputEvent);
+
+            // 触发change事件
+            const changeEvent = new Event('change', {
+                bubbles: true,
+                cancelable: true
+            });
+            inputElement.dispatchEvent(changeEvent);
+
+            // 对于某些框架，可能需要触发自定义事件
+            if (inputElement.oninput) {
+                inputElement.oninput(inputEvent);
+            }
+
+        } catch (error) {
+            console.warn('触发输入事件失败:', error);
+        }
+    }
+
+    /**
+     * 复制文本到剪贴板
+     */
+    async copyToClipboard(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                // 降级处理
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '-999999px';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                document.execCommand('copy');
+                textArea.remove();
+            }
+            return true;
+        } catch (error) {
+            console.error('复制失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 从剪贴板粘贴文本
+     */
+    async pasteFromClipboard(inputElement) {
+        try {
+            let text = '';
+
+            if (navigator.clipboard && window.isSecureContext) {
+                text = await navigator.clipboard.readText();
+            } else {
+                // 降级处理：模拟Ctrl+V
+                console.warn('无法直接从剪贴板读取，请使用Ctrl+V手动粘贴');
+                return false;
+            }
+
+            if (text) {
+                return this.insertTextAtCursor(inputElement, text);
+            }
+
+            return false;
+
+        } catch (error) {
+            console.error('粘贴失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 清空输入框内容
+     */
+    clearInput(inputElement) {
+        if (!inputElement) return false;
+
+        try {
+            if (inputElement.value !== undefined) {
+                inputElement.value = '';
+            } else if (inputElement.textContent !== undefined) {
+                inputElement.textContent = '';
+            } else if (inputElement.innerHTML !== undefined) {
+                inputElement.innerHTML = '';
+            }
+
+            // 触发事件
+            this.triggerInputEvents(inputElement);
+
+            return true;
+
+        } catch (error) {
+            console.error('清空输入框失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 在当前位置插入HTML内容（仅用于contenteditable）
+     */
+    insertHTMLAtCursor(element, html) {
+        if (!element || element.contentEditable !== 'true') {
+            console.warn('insertHTMLAtCursor只能用于contenteditable元素');
+            return false;
+        }
+
+        try {
+            if (window.getSelection && document.createRange) {
+                const selection = window.getSelection();
+
+                if (selection.rangeCount > 0) {
+                    const range = selection.getRangeAt(0);
+                    range.deleteContents();
+
+                    const fragment = document.createDocumentFragment();
+                    const div = document.createElement('div');
+                    div.innerHTML = html;
+
+                    while (div.firstChild) {
+                        fragment.appendChild(div.firstChild);
+                    }
+
+                    range.insertNode(fragment);
+                    range.collapse(false);
+
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+
+                    this.triggerInputEvents(element);
+                    return true;
+                }
+            }
+
+            // 降级：追加到末尾
+            element.innerHTML += html;
+            this.moveCursorToEnd(element);
+            this.triggerInputEvents(element);
+            return true;
+
+        } catch (error) {
+            console.error('插入HTML失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 获取选中的文本
+     */
+    getSelectedText(inputElement) {
+        try {
+            const elementType = this.detectInputElementType(inputElement);
+
+            switch (elementType) {
+                case 'input-text':
+                case 'textarea':
+                    if ('selectionStart' in inputElement && 'selectionEnd' in inputElement) {
+                        const start = inputElement.selectionStart;
+                        const end = inputElement.selectionEnd;
+                        return inputElement.value.substring(start, end);
+                    }
+                    break;
+
+                case 'contenteditable':
+                    if (window.getSelection) {
+                        const selection = window.getSelection();
+                        return selection.toString();
+                    }
+                    break;
+            }
+
+            return '';
+
+        } catch (error) {
+            console.error('获取选中文本失败:', error);
+            return '';
+        }
+    }
+
+    /**
+     * 替换选中的文本
+     */
+    replaceSelectedText(inputElement, newText) {
+        try {
+            const elementType = this.detectInputElementType(inputElement);
+
+            switch (elementType) {
+                case 'input-text':
+                case 'textarea':
+                    if ('selectionStart' in inputElement && 'selectionEnd' in inputElement) {
+                        const start = inputElement.selectionStart;
+                        const end = inputElement.selectionEnd;
+                        const value = inputElement.value;
+
+                        inputElement.value = value.substring(0, start) + newText + value.substring(end);
+                        inputElement.selectionStart = start;
+                        inputElement.selectionEnd = start + newText.length;
+
+                        this.triggerInputEvents(inputElement);
+                        return true;
+                    }
+                    break;
+
+                case 'contenteditable':
+                    if (window.getSelection) {
+                        const selection = window.getSelection();
+                        if (selection.rangeCount > 0) {
+                            const range = selection.getRangeAt(0);
+                            range.deleteContents();
+                            range.insertNode(document.createTextNode(newText));
+                            range.collapse(false);
+
+                            this.triggerInputEvents(inputElement);
+                            return true;
+                        }
+                    }
+                    break;
+            }
+
+            return false;
+
+        } catch (error) {
+            console.error('替换选中文本失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 测试文本插入功能
+     */
+    testTextInsertion() {
+        console.log('🔧 测试文本插入功能...');
+
+        const messageInput = document.getElementById('message-input');
+        if (!messageInput) {
+            console.warn('未找到消息输入框，无法测试');
+            return;
+        }
+
+        try {
+            // 测试基本插入
+            this.clearInput(messageInput);
+            const success1 = this.insertTextAtCursor(messageInput, 'Hello ');
+            console.log('基本文本插入:', success1 ? '✅' : '❌');
+
+            // 测试智能插入
+            const success2 = this.smartInsertText(messageInput, 'World', {
+                addSpace: true,
+                triggerEvents: true
+            });
+            console.log('智能文本插入:', success2 ? '✅' : '❌');
+
+            // 测试光标位置
+            this.setCursorPosition(messageInput, 6);
+            const success3 = this.insertTextAtCursor(messageInput, 'Beautiful ');
+            console.log('光标位置插入:', success3 ? '✅' : '❌');
+
+            // 清理
+            setTimeout(() => {
+                this.clearInput(messageInput);
+            }, 3000);
+
+            console.log('✅ 文本插入功能测试完成');
+
+        } catch (error) {
+            console.error('❌ 文本插入测试失败:', error);
+        }
+    }
+
+    /**
+     * 初始化键盘快捷键
+     */
+    initKeyboardShortcuts() {
+        console.log('⌨️ 初始化键盘快捷键...');
+
+        document.addEventListener('keydown', (e) => {
+            // Ctrl/Cmd + Enter: 发送消息
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                this.sendRealtimeMessage();
+                return;
+            }
+
+            // Ctrl/Cmd + K: 清空输入框
+            if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+                e.preventDefault();
+                const messageInput = document.getElementById('message-input');
+                if (messageInput) {
+                    this.clearInput(messageInput);
+                    messageInput.focus();
+                }
+                return;
+            }
+
+            // Ctrl/Cmd + V: 增强粘贴
+            if ((e.ctrlKey || e.metaKey) && e.key === 'v') {
+                const activeElement = document.activeElement;
+                if (activeElement && activeElement.id === 'message-input') {
+                    // 让默认粘贴行为执行，然后处理
+                    setTimeout(() => {
+                        this.triggerInputEvents(activeElement);
+                    }, 10);
+                }
+                return;
+            }
+
+            // Esc: 取消当前操作
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                // 关闭模态框
+                const modals = document.querySelectorAll('.modal.show');
+                modals.forEach(modal => {
+                    this.closeModal(modal);
+                });
+                return;
+            }
+
+            // F1: 显示帮助
+            if (e.key === 'F1') {
+                e.preventDefault();
+                this.showKeyboardShortcutsHelp();
+                return;
+            }
+        });
+
+        console.log('✅ 键盘快捷键已初始化');
+    }
+
+    /**
+     * 显示键盘快捷键帮助
+     */
+    showKeyboardShortcutsHelp() {
+        const shortcuts = [
+            { key: 'Ctrl/Cmd + Enter', desc: '发送消息' },
+            { key: 'Ctrl/Cmd + K', desc: '清空输入框' },
+            { key: 'Ctrl/Cmd + V', desc: '粘贴文本' },
+            { key: 'Esc', desc: '取消当前操作/关闭模态框' },
+            { key: 'F1', desc: '显示快捷键帮助' }
+        ];
+
+        const helpContent = shortcuts.map(s =>
+            `<div class="shortcut-item"><kbd>${s.key}</kbd> - ${s.desc}</div>`
+        ).join('');
+
+        // 创建帮助模态框
+        const helpModal = document.createElement('div');
+        helpModal.className = 'modal fade';
+        helpModal.innerHTML = `
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-keyboard me-2"></i>键盘快捷键
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="shortcuts-list">
+                        ${helpContent}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        // 添加样式
+        const style = document.createElement('style');
+        style.textContent = `
+        .shortcut-item {
+            display: flex;
+            align-items: center;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .shortcut-item:last-child {
+            border-bottom: none;
+        }
+        .shortcut-item kbd {
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 0.25rem;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.875rem;
+            margin-right: 1rem;
+            min-width: 120px;
+        }
+    `;
+
+        if (!document.getElementById('shortcuts-help-styles')) {
+            style.id = 'shortcuts-help-styles';
+            document.head.appendChild(style);
+        }
+
+        document.body.appendChild(helpModal);
+        this.showModal(helpModal);
+
+        // 自动移除模态框
+        helpModal.addEventListener('hidden.bs.modal', () => {
+            helpModal.remove();
+        });
+    }
+
+    /**
+     * 查看对话上下文
+     */
+    viewConversationContext(conversation) {
+        // 获取对话的上下文（前后几条消息）
+        const contextSize = 3; // 前后各3条消息
+        const allConversations = this.conversations || [];
+
+        // 找到当前对话的索引
+        const currentIndex = allConversations.findIndex(conv =>
+            conv.id === conversation.id ||
+            (conv.timestamp === conversation.timestamp &&
+                conv.speaker_id === conversation.speaker_id)
+        );
+
+        if (currentIndex === -1) {
+            this.showNotification('无法找到对话上下文', 'warning');
+            return;
+        }
+
+        // 获取上下文对话
+        const startIndex = Math.max(0, currentIndex - contextSize);
+        const endIndex = Math.min(allConversations.length, currentIndex + contextSize + 1);
+        const contextConversations = allConversations.slice(startIndex, endIndex);
+
+        // 显示上下文对话
+        this.showConversationContext(contextConversations, currentIndex - startIndex);
+    }
+
+    /**
+     * 导出单个对话
+     */
+    exportSingleConversation(conversation) {
+        const speakerInfo = this.getSpeakerInfo(conversation);
+        const content = conversation.message || conversation.content || conversation.text || '';
+        const timestamp = new Date(conversation.timestamp || Date.now());
+
+        const exportData = {
+            conversation_id: conversation.id,
+            speaker: {
+                id: speakerInfo.id,
+                name: speakerInfo.name
+            },
+            content: content,
+            timestamp: timestamp.toISOString(),
+            formatted_time: timestamp.toLocaleString(),
+            metadata: {
+                message_type: conversation.message_type || conversation.type,
+                emotion: conversation.emotion,
+                response_time: conversation.response_time,
+                tokens_used: conversation.tokens_used
+            }
+        };
+
+        // 下载为JSON文件
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], {
+            type: 'application/json'
+        });
+
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `conversation_${conversation.id || Date.now()}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        this.showNotification('对话已导出', 'success');
+    }
+
+    /**
+     * 复制所有对话信息
+     */
+    copyAllConversationInfo(conversation) {
+        const speakerInfo = this.getSpeakerInfo(conversation);
+        const content = conversation.message || conversation.content || conversation.text || '';
+        const timestamp = new Date(conversation.timestamp || Date.now());
+
+        const allInfo = `
+对话详情
+========
+说话者: ${speakerInfo.name} (${speakerInfo.id})
+时间: ${timestamp.toLocaleString()}
+内容: ${content}
+
+元数据:
+- 消息类型: ${conversation.message_type || conversation.type || '未知'}
+- 情绪: ${conversation.emotion || '无'}
+- 响应时间: ${conversation.response_time || '无'}ms
+- 使用Token: ${conversation.tokens_used || '无'}
+
+技术信息:
+- 对话ID: ${conversation.id || '无'}
+- 场景ID: ${conversation.scene_id || conversation.sceneId || '无'}
+- 说话者ID: ${conversation.speaker_id || conversation.speakerId || '无'}
+
+导出时间: ${new Date().toLocaleString()}
+    `.trim();
+
+        this.copyToClipboard(allInfo);
+        this.showNotification('所有信息已复制到剪贴板', 'success');
+    }
+
+    /**
+     * 切换原始内容显示
+     */
+    toggleRawContent(modal) {
+        const rawContent = modal.querySelector('.raw-content');
+        const toggleBtn = modal.querySelector('.btn-outline-info');
+
+        if (rawContent.style.display === 'none') {
+            rawContent.style.display = 'block';
+            toggleBtn.innerHTML = '<i class="bi bi-eye-slash me-1"></i>隐藏原始内容';
+        } else {
+            rawContent.style.display = 'none';
+            toggleBtn.innerHTML = '<i class="bi bi-code me-1"></i>查看原始内容';
+        }
+    }
+
+    /**
+     * 计算单词数量
+     */
+    countWords(text) {
+        if (!text) return 0;
+
+        // 简单的单词计数，适用于中英文混合
+        const words = text.trim().split(/\s+/);
+        const chineseChars = text.match(/[\u4e00-\u9fff]/g) || [];
+
+        return words.length + chineseChars.length;
+    }
+
+    /**
+     * 复制到剪贴板的通用方法
+     */
+    async copyToClipboard(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+            } else {
+                // 降级处理
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '-999999px';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                document.execCommand('copy');
+                textArea.remove();
+            }
+            return true;
+        } catch (error) {
+            console.error('复制失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 显示对话上下文
+     */
+    showConversationContext(contextConversations, currentIndex) {
+        // 创建上下文模态框
+        const contextModal = document.createElement('div');
+        contextModal.className = 'modal fade';
+        contextModal.id = 'conversation-context-modal';
+
+        contextModal.innerHTML = `
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="bi bi-chat-left-text me-2"></i>
+                        对话上下文
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="context-conversations">
+                        ${contextConversations.map((conv, index) => {
+            const speakerInfo = this.getSpeakerInfo(conv);
+            const isCurrentConversation = index === currentIndex;
+            return `
+                                <div class="context-conversation-item ${isCurrentConversation ? 'current-conversation' : ''} mb-3 p-3 border rounded">
+                                    <div class="d-flex align-items-center mb-2">
+                                        <div class="speaker-avatar me-2">
+                                            ${speakerInfo.avatar ?
+                    `<img src="${speakerInfo.avatar}" class="rounded-circle" width="24" height="24">` :
+                    `<div class="avatar-placeholder rounded-circle" style="width: 24px; height: 24px; background: ${speakerInfo.color}; color: white; font-size: 10px; display: flex; align-items: center; justify-content: center;">${speakerInfo.initial}</div>`
+                }
+                                        </div>
+                                        <strong class="speaker-name">${speakerInfo.name}</strong>
+                                        <small class="text-muted ms-auto">${this.formatConversationTime(conv.timestamp)}</small>
+                                        ${isCurrentConversation ? '<span class="badge bg-primary ms-2">当前对话</span>' : ''}
+                                    </div>
+                                    <div class="conversation-content">
+                                        ${this.formatConversationContent(conv)}
+                                    </div>
+                                </div>
+                            `;
+        }).join('')}
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                </div>
+            </div>
+        </div>
+    `;
+
+        document.body.appendChild(contextModal);
+
+        // 显示模态框
+        this.showModal(contextModal);
+
+        // 自动移除模态框
+        contextModal.addEventListener('hidden.bs.modal', () => {
+            contextModal.remove();
+        });
+    }
+
+    /**
+     * 检查是否为重复消息
+     */
+    isDuplicateMessage(conversation, container) {
+        const conversationId = conversation.id || this.generateConversationId(conversation);
+        const existingElement = container.querySelector(`[data-conversation-id="${conversationId}"]`);
+        return !!existingElement;
+    }
+
+    /**
+     * 生成对话ID
+     */
+    generateConversationId(conversation = null) {
+        if (conversation) {
+            // 基于内容和时间戳生成ID
+            const content = conversation.message || conversation.content || '';
+            const timestamp = conversation.timestamp || Date.now();
+            const speaker = conversation.speaker_id || conversation.speakerId || 'unknown';
+            return `conv_${speaker}_${timestamp}_${content.length}`;
+        }
+
+        return `conv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    /**
+     * 添加新对话动画
+     */
+    animateNewConversation(element) {
+        // 添加进入动画
+        element.style.opacity = '0';
+        element.style.transform = 'translateY(20px)';
+        element.style.transition = 'all 0.3s ease-out';
+
+        // 使用requestAnimationFrame确保动画执行
+        requestAnimationFrame(() => {
+            element.style.opacity = '1';
+            element.style.transform = 'translateY(0)';
+        });
+
+        // 动画完成后清理样式
+        setTimeout(() => {
+            element.style.transition = '';
+        }, 300);
+    }
+
+    /**
+     * 更新对话计数
+     */
+    updateConversationCount() {
+        const count = this.conversations ? this.conversations.length :
+            document.querySelectorAll('.conversation-item').length;
+
+        // 更新计数显示
+        const countElements = document.querySelectorAll('.conversation-count, #conversation-count');
+        countElements.forEach(element => {
+            element.textContent = count;
+        });
+
+        // 更新统计卡片
+        const statsCards = document.querySelectorAll('.stat-card');
+        statsCards.forEach(card => {
+            const statLabel = card.querySelector('.stat-label');
+            if (statLabel && statLabel.textContent.includes('对话')) {
+                const statValue = card.querySelector('.stat-value');
+                if (statValue) {
+                    this.animateNumber(statValue, count);
+                }
+            }
+        });
+    }
+
+    /**
+     * 添加对话到本地数据
+     */
+    addConversationToLocal(conversation) {
+        // 初始化对话数组
+        if (!this.conversations) {
+            this.conversations = [];
+        }
+
+        // 检查是否已存在
+        const existingIndex = this.conversations.findIndex(c =>
+            c.id === conversation.id ||
+            (c.timestamp === conversation.timestamp &&
+                c.speaker_id === conversation.speaker_id &&
+                c.message === conversation.message)
+        );
+
+        if (existingIndex === -1) {
+            // 添加新对话
+            this.conversations.push(conversation);
+
+            // 保持对话数量限制（可选）
+            const maxConversations = 100;
+            if (this.conversations.length > maxConversations) {
+                this.conversations = this.conversations.slice(-maxConversations);
+            }
+
+            // 按时间戳排序
+            this.conversations.sort((a, b) =>
+                (a.timestamp || 0) - (b.timestamp || 0)
+            );
+        } else {
+            // 更新现有对话
+            this.conversations[existingIndex] = { ...this.conversations[existingIndex], ...conversation };
+        }
+
+        // 保存到本地存储（可选）
+        this.saveConversationsToLocal();
+    }
+
+    /**
+     * 保存对话到本地存储
+     */
+    saveConversationsToLocal() {
+        try {
+            const sceneId = this.getSceneIdFromPage();
+            if (sceneId && this.conversations) {
+                const key = `conversations_${sceneId}`;
+                const data = {
+                    conversations: this.conversations.slice(-50), // 只保存最近50条
+                    timestamp: Date.now()
+                };
+                localStorage.setItem(key, JSON.stringify(data));
+            }
+        } catch (error) {
+            console.warn('保存对话到本地存储失败:', error);
+        }
+    }
+
+    /**
+     * 从本地存储加载对话
+     */
+    loadConversationsFromLocal() {
+        try {
+            const sceneId = this.getSceneIdFromPage();
+            if (sceneId) {
+                const key = `conversations_${sceneId}`;
+                const data = localStorage.getItem(key);
+                if (data) {
+                    const parsed = JSON.parse(data);
+                    if (parsed.conversations && Array.isArray(parsed.conversations)) {
+                        this.conversations = parsed.conversations;
+                        console.log(`从本地存储加载了 ${this.conversations.length} 条对话`);
+                    }
+                }
+            }
+        } catch (error) {
+            console.warn('从本地存储加载对话失败:', error);
+        }
+    }
+
+    /**
+     * 降级处理：添加消息到聊天区域
+     */
+    addMessageToChat(conversation) {
+        console.log('🔄 使用降级方案添加消息到聊天区域');
+
+        try {
+            // 查找聊天消息容器
+            const chatContainer = document.querySelector('#chat-messages, .chat-messages, .messages');
+            if (!chatContainer) {
+                console.warn('未找到聊天容器，创建简单的消息显示');
+                this.createSimpleMessageDisplay(conversation);
+                return;
+            }
+
+            // 创建简单的消息元素
+            const messageElement = document.createElement('div');
+            messageElement.className = 'chat-message mb-2 p-2 border rounded';
+
+            const speakerInfo = this.getSpeakerInfo(conversation);
+            const content = conversation.message || conversation.content || '';
+            const timestamp = this.formatConversationTime(conversation.timestamp);
+
+            messageElement.innerHTML = `
+            <div class="message-header d-flex justify-content-between">
+                <strong class="speaker-name">${speakerInfo.name}</strong>
+                <small class="text-muted">${timestamp}</small>
+            </div>
+            <div class="message-content mt-1">${this.escapeHtml(content)}</div>
+        `;
+
+            chatContainer.appendChild(messageElement);
+
+            // 滚动到底部
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+
+        } catch (error) {
+            console.error('降级方案也失败了:', error);
+            // 最后的降级：控制台输出
+            console.log('💬 新消息:', conversation);
+        }
+    }
+
+    /**
+     * 创建简单的消息显示
+     */
+    createSimpleMessageDisplay(conversation) {
+        const container = document.createElement('div');
+        container.className = 'simple-message-display';
+        container.style.cssText = `
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        background: white;
+        border: 1px solid #ccc;
+        border-radius: 8px;
+        padding: 15px;
+        max-width: 300px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        z-index: 1000;
+        animation: slideInUp 0.3s ease;
+    `;
+
+        const speakerInfo = this.getSpeakerInfo(conversation);
+        const content = conversation.message || conversation.content || '';
+
+        container.innerHTML = `
+        <div class="message-notification">
+            <div class="d-flex align-items-center mb-2">
+                <strong>${speakerInfo.name}</strong>
+                <button class="btn btn-sm ms-auto" onclick="this.parentNode.parentNode.parentNode.remove()">×</button>
+            </div>
+            <div class="message-content">${this.escapeHtml(content)}</div>
+        </div>
+    `;
+
+        document.body.appendChild(container);
+
+        // 5秒后自动消失
+        setTimeout(() => {
+            if (container.parentNode) {
+                container.remove();
+            }
+        }, 5000);
+    }
+
+    /**
+     * 格式化对话时间
+     */
+    formatConversationTime(timestamp) {
+        if (!timestamp) return '刚刚';
+
+        const date = new Date(timestamp);
+        const now = new Date();
+        const diffMs = now - date;
+        const diffMins = Math.floor(diffMs / 60000);
+        const diffHours = Math.floor(diffMs / 3600000);
+        const diffDays = Math.floor(diffMs / 86400000);
+
+        if (diffMins < 1) {
+            return '刚刚';
+        } else if (diffMins < 60) {
+            return `${diffMins}分钟前`;
+        } else if (diffHours < 24) {
+            return `${diffHours}小时前`;
+        } else if (diffDays < 7) {
+            return `${diffDays}天前`;
+        } else {
+            return date.toLocaleDateString();
+        }
+    }
+
+    /**
+     * 格式化消息类型
+     */
+    formatMessageType(type) {
+        const typeMap = {
+            'user': '用户',
+            'character': '角色',
+            'system': '系统',
+            'narrator': '旁白',
+            'action': '动作',
+            'thought': '思考'
+        };
+        return typeMap[type] || type;
+    }
+
+    /**
+     * 获取角色颜色
+     */
+    getCharacterColor(characterId) {
+        if (!characterId) return '#6c757d';
+
+        // 为角色ID生成一致的颜色
+        const colors = [
+            '#007bff', '#28a745', '#dc3545', '#ffc107',
+            '#17a2b8', '#6f42c1', '#e83e8c', '#fd7e14'
+        ];
+
+        let hash = 0;
+        for (let i = 0; i < characterId.length; i++) {
+            hash = characterId.charCodeAt(i) + ((hash << 5) - hash);
+        }
+
+        return colors[Math.abs(hash) % colors.length];
+    }
+
+    /**
+     * 获取名称对应的颜色
+     */
+    getColorForName(name) {
+        if (!name) return '#6c757d';
+
+        const colors = [
+            '#007bff', '#28a745', '#dc3545', '#ffc107',
+            '#17a2b8', '#6f42c1', '#e83e8c', '#fd7e14'
+        ];
+
+        let hash = 0;
+        for (let i = 0; i < name.length; i++) {
+            hash = name.charCodeAt(i) + ((hash << 5) - hash);
+        }
+
+        return colors[Math.abs(hash) % colors.length];
+    }
+
+    /**
+     * 判断是否应该解析Markdown
+     */
+    shouldParseMarkdown(content) {
+        // 简单判断：如果包含markdown标记则解析
+        return /[*_`]/.test(content);
+    }
+
+    /**
+     * 解析简单的Markdown
+     */
+    parseSimpleMarkdown(content) {
+        return content
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')  // 加粗
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')              // 斜体
+            .replace(/`(.*?)`/g, '<code>$1</code>');           // 行内代码
+    }
+
+    /**
+     * HTML转义
+     */
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    /**
+     * 显示通知
+     */
+    showNotification(message, type = 'info') {
+        if (typeof Utils !== 'undefined') {
+            switch (type) {
+                case 'success':
+                    Utils.showSuccess(message);
+                    break;
+                case 'error':
+                    Utils.showError(message);
+                    break;
+                case 'warning':
+                    Utils.showWarning(message);
+                    break;
+                default:
+                    Utils.showInfo(message);
+            }
+        } else {
+            console.log(`[${type.toUpperCase()}] ${message}`);
+        }
+    }
+
+    /**
+     * 触发对话事件
+     */
+    triggerConversationEvent(eventType, eventData) {
+        // 触发自定义事件
+        const event = new CustomEvent(eventType, {
+            detail: eventData
+        });
+        document.dispatchEvent(event);
+
+        // 如果有实时管理器，也通过它触发事件
+        if (this.realtimeManager && this.realtimeManager.emit) {
+            this.realtimeManager.emit(eventType, eventData);
+        }
+    }
+
+    /**
+     * 显示对话上下文菜单
+     */
+    showConversationContextMenu(conversation, element) {
+        // 创建上下文菜单
+        const menu = document.createElement('div');
+        menu.className = 'conversation-context-menu';
+        menu.style.cssText = `
+        position: fixed;
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        z-index: 1000;
+        min-width: 150px;
+    `;
+
+        menu.innerHTML = `
+        <div class="menu-item p-2 hover:bg-gray-100 cursor-pointer" data-action="copy">
+            <i class="bi bi-clipboard me-2"></i>复制
+        </div>
+        <div class="menu-item p-2 hover:bg-gray-100 cursor-pointer" data-action="reply">
+            <i class="bi bi-reply me-2"></i>回复
+        </div>
+        <div class="menu-item p-2 hover:bg-gray-100 cursor-pointer" data-action="details">
+            <i class="bi bi-info-circle me-2"></i>详情
+        </div>
+    `;
+
+        // 绑定菜单事件
+        menu.addEventListener('click', (e) => {
+            const action = e.target.closest('.menu-item')?.dataset.action;
+            if (action) {
+                this.handleContextMenuAction(action, conversation, element);
+                menu.remove();
+            }
+        });
+
+        // 定位菜单
+        const rect = element.getBoundingClientRect();
+        menu.style.top = `${rect.top + window.scrollY}px`;
+        menu.style.left = `${rect.right + 10}px`;
+
+        document.body.appendChild(menu);
+
+        // 点击其他地方关闭菜单
+        const closeMenu = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                document.removeEventListener('click', closeMenu);
+            }
+        };
+
+        setTimeout(() => {
+            document.addEventListener('click', closeMenu);
+        }, 100);
+    }
+
+    /**
+     * 处理上下文菜单动作
+     */
+    handleContextMenuAction(action, conversation, element) {
+        switch (action) {
+            case 'copy':
+                this.copyConversationToClipboard(conversation);
+                break;
+            case 'reply':
+                this.replyToConversation(conversation);
+                break;
+            case 'details':
+                this.showConversationDetails(conversation);
+                break;
+        }
+    }
+
+    /**
+     * 回复对话
+     */
+    replyToConversation(conversation) {
+        const messageInput = document.getElementById('message-input');
+        if (messageInput) {
+            const speakerInfo = this.getSpeakerInfo(conversation);
+            const replyText = `@${speakerInfo.name} `;
+            messageInput.value = replyText;
+            messageInput.focus();
+            messageInput.setSelectionRange(replyText.length, replyText.length);
+        }
+    }
+
+    /**
+     * 清理所有对话
+     */
+    clearAllConversations() {
+        // 清理UI
+        const container = this.getConversationContainer();
+        if (container) {
+            const conversations = container.querySelectorAll('.conversation-item');
+            conversations.forEach(item => item.remove());
+        }
+
+        // 清理本地数据
+        this.conversations = [];
+
+        // 清理本地存储
+        const sceneId = this.getSceneIdFromPage();
+        if (sceneId) {
+            localStorage.removeItem(`conversations_${sceneId}`);
+        }
+
+        // 更新计数
+        this.updateConversationCount();
+
+        console.log('🧹 所有对话已清理');
+    }
+
+    /**
+     * 重新渲染所有对话
+     */
+    rerenderAllConversations() {
+        console.log('🔄 重新渲染所有对话');
+
+        const container = this.getConversationContainer();
+        if (!container || !this.conversations) {
+            return;
+        }
+
+        // 清空容器
+        const conversations = container.querySelectorAll('.conversation-item');
+        conversations.forEach(item => item.remove());
+
+        // 重新添加所有对话
+        this.conversations.forEach(conversation => {
+            const element = this.createConversationElement(conversation);
+            container.appendChild(element);
+        });
+
+        // 滚动到最新消息
+        this.scrollToLatestMessage();
+    }
+
+    /**
+     * 初始化对话功能
+     */
+    initConversationUI() {
+        console.log('🎬 初始化对话UI功能');
+
+        // 从本地存储加载对话
+        this.loadConversationsFromLocal();
+
+        // 如果有现有对话，重新渲染
+        if (this.conversations && this.conversations.length > 0) {
+            this.rerenderAllConversations();
+        }
+
+        // 绑定清理按钮（如果存在）
+        const clearBtn = document.getElementById('clear-conversations-btn');
+        if (clearBtn) {
+            clearBtn.addEventListener('click', () => {
+                if (confirm('确定要清理所有对话吗？')) {
+                    this.clearAllConversations();
+                }
+            });
+        }
+
+        console.log('✅ 对话UI功能初始化完成');
     }
 
     /**
@@ -9165,7 +12363,7 @@ document.addEventListener('visibilitychange', function () {
 });
 
 // 场景状态调试工具
-if (typeof window !== 'undefined' && 
+if (typeof window !== 'undefined' &&
     (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
 
     window.SCENE_STATE_DEBUG = {
@@ -9220,6 +12418,183 @@ if (typeof window !== 'undefined' &&
 
     console.log('🎭 场景状态调试工具已加载');
     console.log('使用 window.SCENE_STATE_DEBUG 进行调试');
+}
+
+// 在开发环境中添加用户活动调试工具
+if (typeof window !== 'undefined' &&
+    (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
+
+    window.USER_ACTIVITY_DEBUG = {
+        // 获取活动统计
+        getActivityStats: () => {
+            return window.app ? window.app.getUserActivityStats() : null;
+        },
+
+        // 强制更新活动时间
+        updateActivity: () => {
+            if (window.app && window.app.updateLastActivity) {
+                window.app.updateLastActivity();
+                return true;
+            }
+            return false;
+        },
+
+        // 模拟用户空闲
+        simulateIdle: () => {
+            if (window.app && window.app.markUserAsIdle) {
+                window.app.markUserAsIdle();
+                return true;
+            }
+            return false;
+        },
+
+        // 模拟用户活跃
+        simulateActive: () => {
+            if (window.app && window.app.markUserAsActive) {
+                window.app.markUserAsActive();
+                return true;
+            }
+            return false;
+        },
+
+        // 显示活动统计
+        showStats: () => {
+            const stats = window.USER_ACTIVITY_DEBUG.getActivityStats();
+            if (stats) {
+                console.table(stats);
+                return stats;
+            }
+            return null;
+        },
+
+        // 清理会话数据
+        clearSession: () => {
+            if (window.app && window.app.clearSessionData) {
+                window.app.clearSessionData();
+                return true;
+            }
+            return false;
+        },
+
+        // 获取格式化的会话时间
+        getSessionDuration: () => {
+            const stats = window.USER_ACTIVITY_DEBUG.getActivityStats();
+            return stats ? stats.session_duration_text : null;
+        },
+
+        // 触发活动事件测试
+        testActivityEvents: () => {
+            const events = ['mousedown', 'keypress', 'scroll', 'click'];
+            events.forEach(eventType => {
+                document.dispatchEvent(new Event(eventType, { bubbles: true }));
+            });
+            console.log('✅ 活动事件测试完成');
+        },
+
+        // 监控活动状态变化
+        watchActivityChanges: () => {
+            const events = ['user_idle', 'user_active'];
+            events.forEach(eventType => {
+                document.addEventListener(eventType, (e) => {
+                    console.log(`🔄 用户状态变化: ${eventType}`, e.detail);
+                });
+            });
+            console.log('👀 开始监控用户活动状态变化');
+        }
+    };
+
+    console.log('📊 用户活动调试工具已加载');
+    console.log('使用 window.USER_ACTIVITY_DEBUG 进行调试');
+}
+
+// 在开发环境中添加文本插入调试工具
+if (typeof window !== 'undefined' &&
+    (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
+
+    window.TEXT_INSERTION_DEBUG = {
+        // 测试基本插入
+        testBasicInsertion: () => {
+            const input = document.getElementById('message-input');
+            if (!input) return false;
+
+            return window.app.insertTextAtCursor(input, 'Test text');
+        },
+
+        // 测试智能插入
+        testSmartInsertion: () => {
+            const input = document.getElementById('message-input');
+            if (!input) return false;
+
+            return window.app.smartInsertText(input, 'Smart text', {
+                addSpace: true,
+                triggerEvents: true
+            });
+        },
+
+        // 测试光标控制
+        testCursorControl: () => {
+            const input = document.getElementById('message-input');
+            if (!input) return false;
+
+            input.value = 'Hello World';
+            window.app.setCursorPosition(input, 5);
+            return window.app.insertTextAtCursor(input, ' Beautiful');
+        },
+
+        // 测试引用功能
+        testQuoteFunction: () => {
+            const mockConversation = {
+                speaker_name: '测试角色',
+                message: '这是一条测试消息'
+            };
+
+            return window.app.quoteConversationContent(mockConversation);
+        },
+
+        // 获取光标信息
+        getCursorInfo: () => {
+            const input = document.getElementById('message-input');
+            if (!input) return null;
+
+            return {
+                position: window.app.getCurrentCursorPosition(input),
+                elementType: window.app.detectInputElementType(input),
+                selectedText: window.app.getSelectedText(input),
+                value: input.value
+            };
+        },
+
+        // 运行所有测试
+        runAllTests: () => {
+            console.log('🔧 运行所有文本插入测试...');
+
+            const tests = [
+                { name: '基本插入', fn: window.TEXT_INSERTION_DEBUG.testBasicInsertion },
+                { name: '智能插入', fn: window.TEXT_INSERTION_DEBUG.testSmartInsertion },
+                { name: '光标控制', fn: window.TEXT_INSERTION_DEBUG.testCursorControl },
+                { name: '引用功能', fn: window.TEXT_INSERTION_DEBUG.testQuoteFunction }
+            ];
+
+            const results = tests.map(test => ({
+                name: test.name,
+                success: test.fn()
+            }));
+
+            console.table(results);
+            return results;
+        },
+
+        // 清理测试
+        cleanup: () => {
+            const input = document.getElementById('message-input');
+            if (input) {
+                window.app.clearInput(input);
+            }
+        }
+    };
+
+    console.log('🔧 文本插入调试工具已加载');
+    console.log('使用 window.TEXT_INSERTION_DEBUG 进行调试');
 }
 
 // 错误处理
