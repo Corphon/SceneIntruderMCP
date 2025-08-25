@@ -415,7 +415,7 @@ class AppLoader {
         if (loaded && typeof StoryManager !== 'undefined') {
             // 使用静态方法加载场景故事
             if (typeof StoryManager.loadStory === 'function') {
-                await StoryManager.loadSceneloadStoryStory(sceneId);
+                await StoryManager.loadStory(sceneId);
             } else {
                 // 降级：创建实例并加载
                 if (!window.storyManager) {
