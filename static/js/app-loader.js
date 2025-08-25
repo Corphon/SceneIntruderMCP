@@ -227,8 +227,8 @@ class AppLoader {
 
             } else if (path === '/' || path.includes('/dashboard')) {
                 // 首页/仪表板
-                if (window.SceneApp?.initDashboard) {
-                    window.SceneApp.initDashboard();
+                if (window.SceneApp?.initDashboardState) {
+                    window.SceneApp.initDashboardState();
                 }
             }
 
@@ -241,41 +241,664 @@ class AppLoader {
     }
 
     /**
- * 初始化故事视图页面 - 新增方法
- */
+    * 初始化故事视图页面
+    */
     async initStoryView(sceneId) {
         console.log(`📖 初始化故事视图: ${sceneId}`);
 
         try {
-            // 等待 StoryManager 加载
-            await this.waitForDependencies(['StoryManager'], 5000, false);
+            // 使用新的依赖等待方法
+            console.log('⏳ 等待故事管理器加载...');
 
-            if (typeof StoryManager !== 'undefined') {
-                // 初始化故事管理器
+            const storyDepsLoaded = await this.waitForDependencies(['StoryManager'], 8000, false);
+
+            if (storyDepsLoaded && typeof StoryManager !== 'undefined') {
+                // StoryManager 类可用，创建实例
                 if (!window.storyManager) {
+                    console.log('🏗️ 创建 StoryManager 实例...');
                     window.storyManager = new StoryManager();
                 }
 
-                // 加载场景故事
-                await window.storyManager.init(sceneId);
-                console.log('✅ 故事系统初始化完成');
+                // 等待实例初始化完成
+                if (typeof window.StoryManager.loadStory === 'function') {
+                    await window.StoryManager.loadStory(sceneId);
+                    console.log('✅ 故事系统初始化完成');
+                } else if (typeof window.StoryManager.init === 'function') {
+                    await window.StoryManager.init(sceneId);
+                    console.log('✅ 故事系统初始化完成（使用备用方法）');
+                } else {
+                    console.warn('⚠️ StoryManager 实例缺少必要方法');
+                }
             } else {
                 // 降级处理
                 console.warn('⚠️ StoryManager 不可用，使用基础功能');
-                this.showStoryLoadError('故事功能模块加载失败');
+                this.showStoryLoadError('故事功能模块加载失败，请刷新页面重试');
             }
 
-            // 初始化导出管理器
-            if (typeof ExportManager !== 'undefined') {
-                if (!window.exportManager) {
-                    window.exportManager = new ExportManager();
+            // 尝试初始化其他扩展功能
+            await this.initOptionalExtensions();
+
+        } catch (error) {
+            console.error('❌ 故事视图初始化失败:', error);
+            this.showStoryLoadError(error.message);
+        }
+    }
+
+    /**
+    * 初始化可选的扩展功能
+    */
+    async initOptionalExtensions() {
+        console.log('🔧 初始化可选扩展功能...');
+
+        // 并行初始化扩展功能
+        const extensionPromises = [
+            this.initExportManager(),
+            this.initEmotionDisplay(),
+            this.initRealtimeFeatures()
+        ];
+
+        const results = await Promise.allSettled(extensionPromises);
+
+        results.forEach((result, index) => {
+            const extensionNames = ['ExportManager', 'EmotionDisplay', 'RealtimeFeatures'];
+            if (result.status === 'fulfilled') {
+                console.log(`✅ ${extensionNames[index]} 初始化成功`);
+            } else {
+                console.warn(`⚠️ ${extensionNames[index]} 初始化失败:`, result.reason);
+            }
+        });
+    }
+
+    /**
+    * 初始化导出管理器
+    */
+    async initExportManager() {
+        const loaded = await this.waitForDependencies(['ExportManager'], 3000, false);
+
+        if (loaded && typeof ExportManager !== 'undefined') {
+            if (!window.ExportManager) {
+                window.ExportManager = new ExportManager();
+            }
+            return true;
+        }
+
+        throw new Error('ExportManager 加载失败');
+    }
+
+    /**
+     * 初始化情绪显示
+     */
+    async initEmotionDisplay() {
+        const loaded = await this.waitForDependencies(['EmotionDisplay'], 3000, false);
+
+        if (loaded && typeof EmotionDisplay !== 'undefined') {
+            // EmotionDisplay 通常自动监听聊天事件
+            console.log('EmotionDisplay 已就绪');
+            return true;
+        }
+
+        throw new Error('EmotionDisplay 加载失败');
+    }
+
+    /**
+    * 初始化实时功能
+    */
+    async initRealtimeFeatures() {
+        const loaded = await this.waitForDependencies(['RealtimeManager'], 3000, false);
+
+        if (loaded && typeof window.initSceneRealtime === 'function') {
+            // 这里可以根据需要初始化实时功能
+            console.log('实时功能已就绪');
+            return true;
+        }
+
+        throw new Error('实时功能加载失败');
+    }
+
+    /**
+ * 更新的场景视图初始化方法
+ */
+    async initSceneView(sceneId) {
+        console.log(`🎭 初始化场景视图: ${sceneId}`);
+
+        try {
+            // 等待核心依赖
+            const coreReady = await this.waitForCoreDependencies(10000);
+            if (!coreReady) {
+                throw new Error('核心依赖加载失败');
+            }
+
+            // 等待页面特定依赖
+            await this.waitForPageSpecificDependencies('scene-view', 8000);
+
+            // 并行初始化各个功能模块
+            const initPromises = [
+                this.initStoryManagerForScene(sceneId),
+                this.initEmotionDisplay(),
+                this.initExportManager(),
+                this.initRealtimeForScene(sceneId)
+            ];
+
+            const results = await Promise.allSettled(initPromises);
+
+            // 记录初始化结果
+            const moduleNames = ['StoryManager', 'EmotionDisplay', 'ExportManager', 'Realtime'];
+            results.forEach((result, index) => {
+                if (result.status === 'fulfilled') {
+                    console.log(`✅ ${moduleNames[index]} 初始化成功`);
+                } else {
+                    console.warn(`⚠️ ${moduleNames[index]} 初始化失败:`, result.reason);
+                }
+            });
+
+            // 最后初始化场景应用（如果可用）
+            if (window.SceneApp && typeof window.SceneApp.initScene === 'function') {
+                await window.SceneApp.initScene();
+            }
+
+            console.log('🎉 场景视图初始化完成');
+
+        } catch (error) {
+            console.error('❌ 场景视图初始化失败:', error);
+            if (typeof Utils !== 'undefined') {
+                Utils.showError('场景加载失败: ' + error.message);
+            }
+        }
+    }
+
+    /**
+ * 为场景初始化故事管理器
+ */
+    async initStoryManagerForScene(sceneId) {
+        const loaded = await this.waitForDependencies(['StoryManager'], 5000, false);
+
+        if (loaded && typeof StoryManager !== 'undefined') {
+            // 使用静态方法加载场景故事
+            if (typeof StoryManager.loadStory === 'function') {
+                await StoryManager.loadSceneloadStoryStory(sceneId);
+            } else {
+                // 降级：创建实例并加载
+                if (!window.storyManager) {
+                    window.storyManager = new StoryManager();
+                }
+                if (typeof window.storyManager.loadStory === 'function') {
+                    await window.storyManager.loadStory(sceneId);
+                }
+            }
+            return true;
+        }
+
+        throw new Error('StoryManager 不可用');
+    }
+
+    /**
+     * 为场景初始化实时功能
+     */
+    async initRealtimeForScene(sceneId) {
+        if (typeof window.initSceneRealtime === 'function') {
+            await window.initSceneRealtime(sceneId);
+            return true;
+        }
+
+        throw new Error('实时功能不可用');
+    }
+
+    /**
+     * 等待指定依赖加载完成
+     * @param {string|Array} dependencies - 依赖名称或依赖数组
+     * @param {number} timeout - 超时时间（毫秒）
+     * @param {boolean} throwOnTimeout - 超时时是否抛出异常
+     * @returns {Promise<boolean>} 是否成功加载所有依赖
+     */
+    async waitForDependencies(dependencies, timeout = 10000, throwOnTimeout = true) {
+        // 标准化依赖列表
+        const deps = Array.isArray(dependencies) ? dependencies : [dependencies];
+
+        console.log(`⏳ 等待依赖加载: ${deps.join(', ')} (超时: ${timeout}ms)`);
+
+        const startTime = Date.now();
+        const checkInterval = 100; // 每100ms检查一次
+
+        return new Promise((resolve, reject) => {
+            const checkLoop = () => {
+                // 检查所有依赖是否已加载
+                const missingDeps = deps.filter(dep => !this.isDependencyLoaded(dep));
+
+                if (missingDeps.length === 0) {
+                    console.log(`✅ 所有依赖已加载: ${deps.join(', ')}`);
+                    resolve(true);
+                    return;
+                }
+
+                // 检查是否超时
+                const elapsed = Date.now() - startTime;
+                if (elapsed > timeout) {
+                    const errorMessage = `依赖等待超时 (${elapsed}ms): ${missingDeps.join(', ')}`;
+                    console.warn(`⚠️ ${errorMessage}`);
+
+                    if (throwOnTimeout) {
+                        reject(new Error(errorMessage));
+                    } else {
+                        resolve(false);
+                    }
+                    return;
+                }
+
+                // 继续等待
+                setTimeout(checkLoop, checkInterval);
+            };
+
+            // 开始检查循环
+            checkLoop();
+        });
+    }
+
+    /**
+     * 检查单个依赖是否已加载
+     * @param {string} dependency - 依赖名称
+     * @returns {boolean} 是否已加载
+     */
+    isDependencyLoaded(dependency) {
+        // 检查全局对象
+        if (typeof window[dependency] !== 'undefined') {
+            // 对于类，检查是否为函数
+            if (typeof window[dependency] === 'function') {
+                return true;
+            }
+
+            // 对于实例，检查是否存在且不为null
+            if (window[dependency] !== null && typeof window[dependency] === 'object') {
+                return true;
+            }
+
+            // 其他类型也认为已加载
+            return true;
+        }
+
+        // 特殊检查规则
+        switch (dependency.toLowerCase()) {
+            case 'utils':
+                return typeof Utils !== 'undefined' && typeof Utils.checkDependencies === 'function';
+
+            case 'api':
+                return typeof API !== 'undefined' && typeof API.request === 'function';
+
+            case 'sceneapp':
+                return typeof SceneApp !== 'undefined' && window.app instanceof SceneApp;
+
+            case 'storymanager':
+                // 检查类和实例
+                return (typeof StoryManager !== 'undefined') ||
+                    (typeof window.storyManager !== 'undefined' && window.storyManager !== null);
+
+            case 'emotiondisplay':
+                return typeof EmotionDisplay !== 'undefined';
+
+            case 'exportmanager':
+                return typeof ExportManager !== 'undefined';
+
+            case 'realtimemanager':
+                return typeof RealtimeManager !== 'undefined' ||
+                    typeof window.realtimeManager !== 'undefined';
+
+            case 'userprofilemanager':
+                return typeof UserProfileManager !== 'undefined';
+
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * 等待多个依赖组加载完成
+     * @param {Object} dependencyGroups - 依赖组对象 {groupName: [dependencies]}
+     * @param {number} timeout - 超时时间
+     * @returns {Promise<Object>} 加载结果 {groupName: success}
+     */
+    async waitForDependencyGroups(dependencyGroups, timeout = 15000) {
+        const results = {};
+        const promises = [];
+
+        for (const [groupName, deps] of Object.entries(dependencyGroups)) {
+            const promise = this.waitForDependencies(deps, timeout, false)
+                .then(success => {
+                    results[groupName] = success;
+                    return success;
+                })
+                .catch(error => {
+                    console.warn(`依赖组 ${groupName} 加载失败:`, error);
+                    results[groupName] = false;
+                    return false;
+                });
+
+            promises.push(promise);
+        }
+
+        await Promise.all(promises);
+
+        console.log('📊 依赖组加载结果:', results);
+        return results;
+    }
+
+    /**
+     * 检查核心依赖是否就绪
+     * @returns {Promise<boolean>} 核心依赖是否就绪
+     */
+    async waitForCoreDependencies(timeout = 10000) {
+        const coreDeps = ['Utils', 'API', 'SceneApp'];
+
+        try {
+            await this.waitForDependencies(coreDeps, timeout, true);
+            console.log('✅ 核心依赖已就绪');
+            return true;
+        } catch (error) {
+            console.error('❌ 核心依赖加载失败:', error);
+            return false;
+        }
+    }
+
+    /**
+     * 检查扩展依赖是否就绪（可选）
+     * @returns {Promise<Object>} 扩展依赖加载结果
+     */
+    async waitForExtensionDependencies(timeout = 8000) {
+        const extensionGroups = {
+            story: ['StoryManager'],
+            emotion: ['EmotionDisplay'],
+            export: ['ExportManager'],
+            realtime: ['RealtimeManager'],
+            profile: ['UserProfileManager']
+        };
+
+        console.log('🔧 检查扩展依赖...');
+        const results = await this.waitForDependencyGroups(extensionGroups, timeout);
+
+        const loadedCount = Object.values(results).filter(Boolean).length;
+        const totalCount = Object.keys(results).length;
+
+        console.log(`📈 扩展依赖加载完成: ${loadedCount}/${totalCount}`);
+
+        return results;
+    }
+
+    /**
+     * 智能依赖检查 - 根据页面类型检查相应依赖
+     * @param {string} pageType - 页面类型
+     * @returns {Promise<boolean>} 依赖是否满足要求
+     */
+    async waitForPageSpecificDependencies(pageType = null, timeout = 8000) {
+        if (!pageType) {
+            pageType = this.getPageType();
+        }
+
+        let requiredDeps = ['Utils', 'API']; // 基础依赖
+
+        switch (pageType) {
+            case 'scene-view':
+                requiredDeps.push('SceneApp', 'RealtimeManager');
+                break;
+
+            case 'story-view':
+                requiredDeps.push('SceneApp', 'StoryManager');
+                break;
+
+            case 'scene-create':
+                requiredDeps.push('SceneApp');
+                break;
+
+            case 'user-profile':
+                requiredDeps.push('UserProfileManager');
+                break;
+
+            case 'settings':
+                requiredDeps.push('SceneApp');
+                break;
+
+            case 'dashboard':
+                requiredDeps.push('SceneApp');
+                break;
+
+            default:
+                requiredDeps.push('SceneApp');
+        }
+
+        console.log(`🎯 页面类型 "${pageType}" 需要依赖:`, requiredDeps);
+
+        try {
+            await this.waitForDependencies(requiredDeps, timeout, false);
+            return true;
+        } catch (error) {
+            console.warn(`页面依赖检查失败:`, error);
+            return false;
+        }
+    }
+
+    /**
+     * 依赖加载重试机制
+     * @param {string|Array} dependencies - 依赖列表
+     * @param {Object} options - 重试选项
+     * @returns {Promise<boolean>} 是否成功
+     */
+    async retryDependencyLoading(dependencies, options = {}) {
+        const {
+            maxRetries = 3,
+            retryDelay = 1000,
+            timeout = 5000,
+            onRetry = null
+        } = options;
+
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                console.log(`🔄 依赖加载尝试 ${attempt}/${maxRetries}:`, dependencies);
+
+                const success = await this.waitForDependencies(dependencies, timeout, false);
+
+                if (success) {
+                    if (attempt > 1) {
+                        console.log(`✅ 依赖在第 ${attempt} 次尝试时加载成功`);
+                    }
+                    return true;
+                }
+
+                if (attempt < maxRetries) {
+                    console.log(`⏳ 第 ${attempt} 次尝试失败，${retryDelay}ms 后重试...`);
+
+                    if (onRetry) {
+                        onRetry(attempt, maxRetries);
+                    }
+
+                    await new Promise(resolve => setTimeout(resolve, retryDelay));
+                }
+
+            } catch (error) {
+                console.warn(`第 ${attempt} 次依赖加载尝试出错:`, error);
+
+                if (attempt === maxRetries) {
+                    throw error;
+                }
+
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+            }
+        }
+
+        console.error(`❌ 依赖加载在 ${maxRetries} 次尝试后仍然失败:`, dependencies);
+        return false;
+    }
+
+    /**
+     * 获取依赖加载状态报告
+     * @returns {Object} 依赖状态报告
+     */
+    getDependencyReport() {
+        const allDependencies = [
+            'Utils', 'API', 'SceneApp',
+            'StoryManager', 'EmotionDisplay', 'ExportManager',
+            'RealtimeManager', 'UserProfileManager'
+        ];
+
+        const report = {
+            timestamp: new Date().toISOString(),
+            total: allDependencies.length,
+            loaded: 0,
+            missing: [],
+            details: {}
+        };
+
+        allDependencies.forEach(dep => {
+            const isLoaded = this.isDependencyLoaded(dep);
+            report.details[dep] = {
+                loaded: isLoaded,
+                type: typeof window[dep],
+                available: window[dep] !== undefined
+            };
+
+            if (isLoaded) {
+                report.loaded++;
+            } else {
+                report.missing.push(dep);
+            }
+        });
+
+        report.loadedPercentage = Math.round((report.loaded / report.total) * 100);
+
+        return report;
+    }
+
+    /**
+     * 监视依赖加载状态
+     * @param {Array} dependencies - 要监视的依赖
+     * @param {Function} callback - 状态变化回调
+     * @param {number} interval - 检查间隔（毫秒）
+     * @returns {Function} 停止监视的函数
+     */
+    watchDependencies(dependencies, callback, interval = 1000) {
+        const deps = Array.isArray(dependencies) ? dependencies : [dependencies];
+        let lastState = {};
+
+        const checkState = () => {
+            const currentState = {};
+            let hasChanges = false;
+
+            deps.forEach(dep => {
+                const isLoaded = this.isDependencyLoaded(dep);
+                currentState[dep] = isLoaded;
+
+                if (lastState[dep] !== isLoaded) {
+                    hasChanges = true;
+                }
+            });
+
+            if (hasChanges) {
+                callback(currentState, lastState);
+                lastState = { ...currentState };
+            }
+        };
+
+        // 立即检查一次
+        deps.forEach(dep => {
+            lastState[dep] = this.isDependencyLoaded(dep);
+        });
+        callback(lastState, {});
+
+        // 定期检查
+        const intervalId = setInterval(checkState, interval);
+
+        // 返回停止函数
+        return () => {
+            clearInterval(intervalId);
+            console.log('🛑 停止监视依赖:', deps);
+        };
+    }
+
+    /**
+     * 预加载依赖（如果需要）
+     * @param {Array} dependencies - 需要预加载的依赖
+     * @returns {Promise<void>}
+     */
+    async preloadDependencies(dependencies) {
+        const deps = Array.isArray(dependencies) ? dependencies : [dependencies];
+
+        console.log('🚀 开始预加载依赖:', deps);
+
+        const loadPromises = deps.map(async (dep) => {
+            if (this.isDependencyLoaded(dep)) {
+                console.log(`✅ 依赖 ${dep} 已存在，跳过预加载`);
+                return true;
+            }
+
+            // 根据依赖名称确定脚本路径
+            const scriptPath = this.getScriptPathForDependency(dep);
+            if (!scriptPath) {
+                console.warn(`⚠️ 未找到依赖 ${dep} 的脚本路径`);
+                return false;
+            }
+
+            try {
+                await this.loadScript(scriptPath);
+                console.log(`✅ 预加载依赖 ${dep} 成功`);
+                return true;
+            } catch (error) {
+                console.error(`❌ 预加载依赖 ${dep} 失败:`, error);
+                return false;
+            }
+        });
+
+        const results = await Promise.all(loadPromises);
+        const successCount = results.filter(Boolean).length;
+
+        console.log(`📊 预加载完成: ${successCount}/${deps.length} 个依赖成功加载`);
+    }
+
+    /**
+     * 根据依赖名称获取脚本路径
+     * @param {string} dependency - 依赖名称
+     * @returns {string|null} 脚本路径
+     */
+    getScriptPathForDependency(dependency) {
+        const dependencyMap = {
+            'Utils': '/static/js/utils.js',
+            'API': '/static/js/api.js',
+            'SceneApp': '/static/js/app.js',
+            'StoryManager': '/static/js/story.js',
+            'EmotionDisplay': '/static/js/emotions.js',
+            'ExportManager': '/static/js/export.js',
+            'RealtimeManager': '/static/js/realtime.js',
+            'UserProfileManager': '/static/js/user-profile.js'
+        };
+
+        return dependencyMap[dependency] || null;
+    }
+
+    /**
+     * 清理失败的依赖加载
+     * @param {Array} dependencies - 要清理的依赖
+     */
+    cleanupFailedDependencies(dependencies) {
+        const deps = Array.isArray(dependencies) ? dependencies : [dependencies];
+
+        deps.forEach(dep => {
+            // 移除全局引用
+            if (window[dep]) {
+                try {
+                    delete window[dep];
+                    console.log(`🧹 已清理失败的依赖: ${dep}`);
+                } catch (error) {
+                    console.warn(`清理依赖 ${dep} 时出错:`, error);
                 }
             }
 
-        } catch (error) {
-            console.error('故事视图初始化失败:', error);
-            this.showStoryLoadError(error.message);
-        }
+            // 移除对应的script标签（如果存在且标记为失败）
+            const scriptPath = this.getScriptPathForDependency(dep);
+            if (scriptPath) {
+                const scripts = document.querySelectorAll(`script[src="${scriptPath}"]`);
+                scripts.forEach(script => {
+                    if (script.dataset.loadFailed === 'true') {
+                        script.remove();
+                        console.log(`🧹 已移除失败的脚本标签: ${scriptPath}`);
+                    }
+                });
+            }
+        });
     }
 
     /**
@@ -335,7 +958,7 @@ class AppLoader {
         try {
             // 初始化故事管理器
             if (typeof StoryManager !== 'undefined') {
-                await StoryManager.loadSceneStory(sceneId);
+                await StoryManager.loadStory(sceneId);
             }
 
             // 初始化情绪显示
@@ -345,8 +968,8 @@ class AppLoader {
 
             // 初始化导出管理器
             if (typeof ExportManager !== 'undefined') {
-                if (!window.exportManager) {
-                    window.exportManager = new ExportManager();
+                if (!window.ExportManager) {
+                    window.ExportManager = new ExportManager();
                 }
             }
 
@@ -356,9 +979,7 @@ class AppLoader {
             }
 
             // 初始化场景应用
-            if (window.SceneApp?.initSceneView) {
-                window.SceneApp.initSceneView(sceneId);
-            } else if (window.SceneApp?.initScene) {
+            if (window.SceneApp?.initScene) {
                 window.SceneApp.initScene();
             }
 
@@ -587,3 +1208,110 @@ document.addEventListener('visibilitychange', () => {
         }
     }
 });
+
+// 在开发环境中添加依赖管理调试工具
+if (typeof window !== 'undefined' && 
+    (window.location?.hostname === 'localhost' || window.location?.search.includes('debug=1'))) {
+
+    window.DEPENDENCY_DEBUG = {
+        // 检查所有依赖状态
+        checkAll: () => {
+            if (window.AppLoader && window.AppLoader.getDependencyReport) {
+                const report = window.AppLoader.getDependencyReport();
+                console.table(report.details);
+                return report;
+            }
+            return null;
+        },
+
+        // 等待特定依赖
+        wait: async (deps, timeout = 5000) => {
+            if (window.AppLoader && window.AppLoader.waitForDependencies) {
+                try {
+                    const result = await window.AppLoader.waitForDependencies(deps, timeout, false);
+                    console.log(`依赖等待结果: ${result}`);
+                    return result;
+                } catch (error) {
+                    console.error('依赖等待失败:', error);
+                    return false;
+                }
+            }
+            return false;
+        },
+
+        // 重试加载依赖
+        retry: async (deps, options = {}) => {
+            if (window.AppLoader && window.AppLoader.retryDependencyLoading) {
+                return await window.AppLoader.retryDependencyLoading(deps, options);
+            }
+            return false;
+        },
+
+        // 监视依赖变化
+        watch: (deps, interval = 1000) => {
+            if (window.AppLoader && window.AppLoader.watchDependencies) {
+                return window.AppLoader.watchDependencies(deps, (current, previous) => {
+                    console.log('依赖状态变化:', { current, previous });
+                }, interval);
+            }
+            return null;
+        },
+
+        // 清理失败的依赖
+        cleanup: (deps) => {
+            if (window.AppLoader && window.AppLoader.cleanupFailedDependencies) {
+                window.AppLoader.cleanupFailedDependencies(deps);
+            }
+        },
+
+        // 获取依赖详情
+        getInfo: (dep) => {
+            if (window.AppLoader && window.AppLoader.isDependencyLoaded) {
+                return {
+                    name: dep,
+                    loaded: window.AppLoader.isDependencyLoaded(dep),
+                    type: typeof window[dep],
+                    available: window[dep] !== undefined,
+                    value: window[dep]
+                };
+            }
+            return null;
+        },
+
+        // 运行完整依赖测试
+        runTests: async () => {
+            console.log('🔧 运行依赖管理测试...');
+            
+            const tests = [
+                {
+                    name: '核心依赖检查',
+                    fn: () => window.DEPENDENCY_DEBUG.checkAll()
+                },
+                {
+                    name: '等待测试',
+                    fn: () => window.DEPENDENCY_DEBUG.wait(['Utils'], 1000)
+                },
+                {
+                    name: '依赖信息',
+                    fn: () => window.DEPENDENCY_DEBUG.getInfo('Utils')
+                }
+            ];
+            
+            const results = [];
+            for (const test of tests) {
+                try {
+                    const result = await test.fn();
+                    results.push({ name: test.name, success: !!result, result });
+                } catch (error) {
+                    results.push({ name: test.name, success: false, error: error.message });
+                }
+            }
+            
+            console.table(results);
+            return results;
+        }
+    };
+
+    console.log('🔧 依赖管理调试工具已加载');
+    console.log('使用 window.DEPENDENCY_DEBUG 进行调试');
+}
