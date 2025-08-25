@@ -287,6 +287,57 @@ class API {
     }
 
     /**
+     * 获取场景统计数据
+     */
+    async getSceneStats(sceneId) {
+        return this.request(`/api/scenes/${sceneId}/stats`, {
+            method: 'GET'
+        });
+    }
+
+    /**
+     * 获取场景对话列表
+     */
+    async getSceneConversations(sceneId, limit = 50) {
+        return this.request(`/api/scenes/${sceneId}/conversations`, {
+            method: 'GET',
+            params: { limit }
+        });
+    }
+
+    /**
+     * 更新故事进度
+     */
+    async updateStoryProgress(sceneId, progressData) {
+        return this.request(`/api/scenes/${sceneId}/story/progress`, {
+            method: 'PUT',
+            body: progressData
+        });
+    }
+
+    /**
+     * 创建场景对话
+     */
+    async createSceneConversation(sceneId, conversationData) {
+        return this.request(`/api/scenes/${sceneId}/conversations`, {
+            method: 'POST',
+            data: conversationData
+        });
+    }
+
+    static getStoryProgress(sceneId) {
+        return this.request(`/scenes/${sceneId}/story/progress`);
+    }
+
+    static getSceneMetrics(sceneId) {
+        return this.request(`/scenes/${sceneId}/metrics`);
+    }
+
+    static getSceneAnalytics(sceneId, timeRange = '7d') {
+        return this.request(`/scenes/${sceneId}/analytics?time_range=${timeRange}`);
+    }
+
+    /**
     * 回溯故事到指定节点
     * @param {string} sceneId - 场景ID
     * @param {string|null} nodeId - 目标节点ID，null表示回溯到开始
@@ -646,7 +697,7 @@ class API {
         if (!userId || !itemId) {
             throw new Error('删除道具需要 userId 和 itemId 参数');
         }
-        
+
         return this.request(`/users/${userId}/items/${itemId}`, {
             method: 'DELETE'
         });
