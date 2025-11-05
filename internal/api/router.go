@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
@@ -118,13 +119,14 @@ func SetupRouter() (*gin.Engine, error) {
 	r.GET("/ws/user/status", handler.UserStatusWebSocket)
 
 	// ===============================
-	// API路由组
+	// API路由组 - 添加默认速率限制
 	// ===============================
 	api := r.Group("/api")
+	api.Use(DefaultRateLimit()) // Apply default rate limiting to all API routes
 	{
 		// 聚合API端点
-		api.GET("/scenes/:id/aggregate", handler.GetSceneAggregate)
-		api.POST("/interactions/aggregate", handler.ProcessInteractionAggregate)
+		api.GET("/scenes/:id/aggregate", RequireAuthForScene(), handler.GetSceneAggregate)
+		api.POST("/interactions/aggregate", AuthMiddleware(), handler.ProcessInteractionAggregate)
 
 		// ===============================
 		// 设置相关路由
@@ -132,8 +134,8 @@ func SetupRouter() (*gin.Engine, error) {
 		settingsGroup := api.Group("/settings")
 		{
 			settingsGroup.GET("", handler.GetSettings)
-			settingsGroup.POST("", handler.SaveSettings)
-			settingsGroup.POST("/test-connection", handler.TestConnection)
+			settingsGroup.POST("", AuthMiddleware(), handler.SaveSettings)
+			settingsGroup.POST("/test-connection", AuthMiddleware(), handler.TestConnection)
 		}
 
 		// ===============================
@@ -143,7 +145,7 @@ func SetupRouter() (*gin.Engine, error) {
 		{
 			llmGroup.GET("/status", handler.GetLLMStatus)
 			llmGroup.GET("/models", handler.GetLLMModels)
-			llmGroup.PUT("/config", handler.UpdateLLMConfig)
+			llmGroup.PUT("/config", AuthMiddleware(), handler.UpdateLLMConfig)
 		}
 
 		// ===============================
@@ -152,49 +154,51 @@ func SetupRouter() (*gin.Engine, error) {
 		scenesGroup := api.Group("/scenes")
 		{
 			scenesGroup.GET("", handler.GetScenes)
-			scenesGroup.POST("", handler.CreateScene)
-			scenesGroup.GET("/:id", handler.GetScene)
-			scenesGroup.GET("/:id/characters", handler.GetCharacters)
-			scenesGroup.GET("/:id/conversations", handler.GetConversations)
+			scenesGroup.POST("", AuthMiddleware(), handler.CreateScene)
+			scenesGroup.GET("/:id", RequireAuthForScene(), handler.GetScene)
+			scenesGroup.GET("/:id/characters", RequireAuthForScene(), handler.GetCharacters)
+			scenesGroup.GET("/:id/conversations", RequireAuthForScene(), handler.GetConversations)
 
 			// 故事相关路由
 			storyGroup := scenesGroup.Group("/:id/story")
 			{
-				storyGroup.GET("", handler.GetStoryData)
-				storyGroup.POST("/choice", handler.MakeStoryChoice)
-				storyGroup.POST("/advance", handler.AdvanceStory)
-				storyGroup.POST("/rewind", handler.RewindStory)
-				storyGroup.GET("/branches", handler.GetStoryBranches)
-				storyGroup.POST("/batch", handler.BatchStoryOperations)
+				storyGroup.GET("", RequireAuthForScene(), handler.GetStoryData)
+				storyGroup.POST("/choice", RequireAuthForScene(), handler.MakeStoryChoice)
+				storyGroup.POST("/advance", RequireAuthForScene(), handler.AdvanceStory)
+				storyGroup.POST("/rewind", RequireAuthForScene(), handler.RewindStory)
+				storyGroup.GET("/branches", RequireAuthForScene(), handler.GetStoryBranches)
+				storyGroup.POST("/batch", RequireAuthForScene(), handler.BatchStoryOperations)
 			}
 
-			// 导出相关路由
+			// 导出相关路由 - 保持默认 rate limit
 			exportGroup := scenesGroup.Group("/:id/export")
 			{
-				exportGroup.GET("/scene", handler.ExportScene)
-				exportGroup.GET("/interactions", handler.ExportInteractions)
-				exportGroup.GET("/story", handler.ExportStory)
+				exportGroup.GET("/scene", RequireAuthForScene(), handler.ExportScene)
+				exportGroup.GET("/interactions", RequireAuthForScene(), handler.ExportInteractions)
+				exportGroup.GET("/story", RequireAuthForScene(), handler.ExportStory)
 			}
 		}
 
 		// ===============================
-		// 聊天相关路由
+		// 聊天相关路由 - 更严格的限流
 		// ===============================
 		chatGroup := api.Group("/chat")
+		chatGroup.Use(ChatRateLimit()) // Apply stricter rate limiting for chat endpoints
 		{
-			chatGroup.POST("", handler.Chat)
-			chatGroup.POST("/emotion", handler.ChatWithEmotion)
+			chatGroup.POST("", AuthMiddleware(), handler.Chat)
+			chatGroup.POST("/emotion", AuthMiddleware(), handler.ChatWithEmotion)
 		}
 
 		// ===============================
-		// 角色互动相关路由
+		// 角色互动相关路由 - 使用聊天限流
 		// ===============================
 		interactions := api.Group("/interactions")
+		interactions.Use(ChatRateLimit()) // Apply chat rate limiting
 		{
-			interactions.POST("/trigger", handler.TriggerCharacterInteraction)
-			interactions.POST("/simulate", handler.SimulateCharactersConversation)
-			interactions.GET("/:scene_id", handler.GetCharacterInteractions)
-			interactions.GET("/:scene_id/:character1_id/:character2_id", handler.GetCharacterToCharacterInteractions)
+			interactions.POST("/trigger", AuthMiddleware(), handler.TriggerCharacterInteraction)
+			interactions.POST("/simulate", AuthMiddleware(), handler.SimulateCharactersConversation)
+			interactions.GET("/:scene_id", RequireAuthForScene(), handler.GetCharacterInteractions)
+			interactions.GET("/:scene_id/:character1_id/:character2_id", RequireAuthForScene(), handler.GetCharacterToCharacterInteractions)
 		}
 
 		// ===============================
@@ -202,26 +206,27 @@ func SetupRouter() (*gin.Engine, error) {
 		// ===============================
 		configGroup := api.Group("/config")
 		{
-			configGroup.GET("/health", handler.GetConfigHealth)
-			configGroup.GET("/metrics", handler.GetConfigMetrics)
+			configGroup.GET("/health", AuthMiddleware(), handler.GetConfigHealth)
+			configGroup.GET("/metrics", AuthMiddleware(), handler.GetConfigMetrics)
 		}
 
 		// ===============================
-		// 文件上传
+		// 文件上传 - use analysis rate limit as it's resource-intensive
 		// ===============================
-		api.POST("/upload", handler.UploadFile)
+		api.POST("/upload", AuthMiddleware(), AnalysisRateLimit(), handler.UploadFile)
 
 		// ===============================
-		// 分析和进度相关
+		// 分析和进度相关 - stricter rate limiting as these are resource-intensive
 		// ===============================
-		api.POST("/analyze", handler.AnalyzeTextWithProgress)
-		api.GET("/progress/:taskID", handler.SubscribeProgress)
-		api.POST("/cancel/:taskID", handler.CancelAnalysisTask)
+		api.POST("/analyze", AuthMiddleware(), AnalysisRateLimit(), handler.AnalyzeTextWithProgress)
+		api.GET("/progress/:taskID", handler.SubscribeProgress) // No rate limiting for progress since it's SSE
+		api.POST("/cancel/:taskID", AuthMiddleware(), handler.CancelAnalysisTask)
 
 		// ===============================
 		// 用户管理路由
 		// ===============================
 		usersGroup := api.Group("/users/:user_id")
+		usersGroup.Use(RequireAuthForUser()) // Require user authentication for user-specific routes
 		{
 			// 用户档案
 			usersGroup.GET("", handler.GetUserProfile)
@@ -251,13 +256,13 @@ func SetupRouter() (*gin.Engine, error) {
 		}
 
 		// 调试路由
-		api.GET("/ws/status", handler.GetWebSocketStatus)
+		api.GET("/ws/status", AuthMiddleware(), handler.GetWebSocketStatus)
 
 		// WebSocket 管理路由
 		wsGroup := api.Group("/ws")
 		{
-			wsGroup.GET("/status", handler.GetWebSocketStatus)
-			wsGroup.POST("/cleanup", handler.CleanupWebSocketConnections)
+			wsGroup.GET("/status", AuthMiddleware(), handler.GetWebSocketStatus)
+			wsGroup.POST("/cleanup", AuthMiddleware(), handler.CleanupWebSocketConnections)
 		}
 	}
 
@@ -267,10 +272,27 @@ func SetupRouter() (*gin.Engine, error) {
 // corsMiddleware 实现跨域资源共享
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		// In production, limit to specific origins rather than wildcard
+		allowedOrigin := getEnv("ALLOWED_ORIGIN", "")
+		if allowedOrigin == "" {
+			// For development environments, allow current origin or localhost
+			origin := c.GetHeader("Origin")
+			
+			// Improved origin validation for security
+			if isValidOrigin(origin) {
+				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			} else {
+				// Default to allowing only from the same origin in production
+				c.Writer.Header().Set("Access-Control-Allow-Origin", "null")
+			}
+		} else {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+		}
+
 		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With, X-API-Key")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		c.Writer.Header().Set("Access-Control-Max-Age", "86400") // 24 hours
 
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(http.StatusNoContent)
@@ -279,4 +301,32 @@ func corsMiddleware() gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// isValidOrigin validates the origin for security
+func isValidOrigin(origin string) bool {
+	// List of valid origins (add yours here for production)
+	validOrigins := []string{
+		"http://localhost",
+		"https://localhost", 
+		"http://127.0.0.1",
+		"http://0.0.0.0",
+		"https://127.0.0.1",
+	}
+
+	for _, validOrigin := range validOrigins {
+		if strings.HasPrefix(origin, validOrigin) {
+			return true
+		}
+	}
+	return false
+}
+
+// Helper function to get environment variables (this needs to be added to the file)
+func getEnv(key, defaultValue string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		return defaultValue
+	}
+	return value
 }
