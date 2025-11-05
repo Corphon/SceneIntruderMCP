@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/gin-gonic/gin"
 )
 
@@ -72,83 +73,34 @@ func ErrorHandler() gin.HandlerFunc {
 // Auth 中间件验证请求身份
 func Auth() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 这里简化处理，实际应用中应该有更复杂的认证逻辑
+		// 获取API密钥
 		apiKey := c.GetHeader("X-API-Key")
+		if apiKey == "" {
+			apiKey = c.Query("api_key") // Also check query parameter as fallback
+		}
+
 		if apiKey == "" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "API密钥缺失"})
 			return
 		}
 
-		// 这里可以添加API密钥验证逻辑
-		// 示例中简单使用固定值，实际应用应使用安全存储
-		if apiKey != "dev_api_key" {
+		// 从配置中获取有效的API密钥进行验证
+		cfg := config.GetCurrentConfig()
+		if cfg == nil {
+			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "配置系统未初始化"})
+			return
+		}
+
+		// 获取解密后的API密钥进行比较
+		// The LLMConfig field in the config returned by GetCurrentConfig already contains decrypted values
+		validAPIKey := ""
+		if cfg.LLMConfig != nil {
+			validAPIKey = cfg.LLMConfig["api_key"]
+		}
+		if validAPIKey == "" || apiKey != validAPIKey {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "无效的API密钥"})
 			return
 		}
-
-		c.Next()
-	}
-}
-
-// RateLimiter 简单的请求限流中间件
-func RateLimiter() gin.HandlerFunc {
-	// 使用简单的计数器实现，实际应用应使用更复杂的算法如令牌桶
-	type client struct {
-		lastSeen time.Time
-		count    int
-	}
-
-	// 存储客户端访问记录
-	clients := make(map[string]*client)
-
-	// 清理旧记录的goroutine
-	ctx, cancel := context.WithCancel(context.Background())
-	go func(ctx context.Context) {
-		defer cancel()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(time.Minute):
-				// 清理5分钟前的记录
-				threshold := time.Now().Add(-5 * time.Minute)
-				for ip, c := range clients {
-					if c.lastSeen.Before(threshold) {
-						delete(clients, ip)
-					}
-				}
-			}
-		}
-	}(ctx)
-
-	return func(c *gin.Context) {
-		ip := c.ClientIP()
-
-		// 获取或创建客户端记录
-		cl, exists := clients[ip]
-		if !exists {
-			clients[ip] = &client{
-				lastSeen: time.Now(),
-				count:    1,
-			}
-			c.Next()
-			return
-		}
-
-		// 检查是否在1分钟内超过100次请求
-		if cl.count > 100 && time.Since(cl.lastSeen) < time.Minute {
-			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{
-				"error": "请求过于频繁，请稍后再试",
-			})
-			return
-		}
-
-		// 更新记录
-		if time.Since(cl.lastSeen) >= time.Minute {
-			cl.count = 0
-		}
-		cl.lastSeen = time.Now()
-		cl.count++
 
 		c.Next()
 	}
