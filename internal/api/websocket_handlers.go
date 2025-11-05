@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"log"
+	"net/http"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
@@ -35,14 +36,21 @@ func NewWebSocketHandler() *WebSocketHandler {
 
 // SceneWebSocket 处理场景 WebSocket 连接
 func (wh *WebSocketHandler) SceneWebSocket(c *gin.Context) {
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		log.Printf("❌ WebSocket 连接失败：场景ID缺失")
+		http.Error(c.Writer, "场景ID缺失", http.StatusBadRequest)
+		return
+	}
+
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("❌ 场景 WebSocket 升级失败: %v", err)
 		return
 	}
+	defer conn.Close()
 
 	// 获取参数
-	sceneID := c.Param("id")
 	userID := c.DefaultQuery("user_id", "anonymous")
 
 	// 创建客户端
@@ -57,9 +65,29 @@ func (wh *WebSocketHandler) SceneWebSocket(c *gin.Context) {
 	}
 
 	// 注册客户端
-	wsManager.register <- client
+	select {
+	case wsManager.register <- client:
+		// Success
+	default:
+		log.Printf("❌ 无法注册 WebSocket 客户端，注册通道已满")
+		return
+	}
+	
 	defer func() {
-		wsManager.unregister <- client
+		// Unregister with timeout to prevent blocking
+		done := make(chan bool, 1)
+		go func() {
+			wsManager.unregister <- client
+			done <- true
+		}()
+		
+		select {
+		case <-done:
+			// Successfully unregistered
+		case <-time.After(5 * time.Second):
+			// Timeout - client might not be properly unregistered
+			log.Printf("⚠️ WebSocket 客户端注销超时")
+		}
 	}()
 
 	// 启动读写协程
@@ -82,9 +110,15 @@ func (wh *WebSocketHandler) UserStatusWebSocket(c *gin.Context) {
 		log.Printf("❌ 用户状态 WebSocket 升级失败: %v", err)
 		return
 	}
+	defer conn.Close()
 
 	// 获取用户ID
 	userID := c.DefaultQuery("user_id", "anonymous")
+	if userID == "" {
+		log.Printf("❌ 用户状态 WebSocket 连接失败：用户ID缺失")
+		http.Error(c.Writer, "用户ID缺失", http.StatusBadRequest)
+		return
+	}
 
 	// 创建客户端 - 修复：需要包装连接
 	client := &WebSocketClient{
@@ -98,9 +132,29 @@ func (wh *WebSocketHandler) UserStatusWebSocket(c *gin.Context) {
 	}
 
 	// 注册客户端
-	wsManager.register <- client
+	select {
+	case wsManager.register <- client:
+		// Success
+	default:
+		log.Printf("❌ 无法注册用户状态 WebSocket 客户端，注册通道已满")
+		return
+	}
+	
 	defer func() {
-		wsManager.unregister <- client
+		// Unregister with timeout to prevent blocking
+		done := make(chan bool, 1)
+		go func() {
+			wsManager.unregister <- client
+			done <- true
+		}()
+		
+		select {
+		case <-done:
+			// Successfully unregistered
+		case <-time.After(5 * time.Second):
+			// Timeout - client might not be properly unregistered
+			log.Printf("⚠️ 用户状态 WebSocket 客户端注销超时")
+		}
 	}()
 
 	// 启动读写协程
@@ -118,7 +172,11 @@ func (wh *WebSocketHandler) UserStatusWebSocket(c *gin.Context) {
 func (wh *WebSocketHandler) handleWebSocketReads(client *WebSocketClient) {
 	defer func() {
 		if !client.IsClosed() {
-			wsManager.unregister <- client
+			select {
+			case wsManager.unregister <- client:
+			case <-time.After(1 * time.Second):
+				log.Printf("⚠️ 读取协程关闭时注销超时")
+			}
 		}
 	}()
 
@@ -134,6 +192,9 @@ func (wh *WebSocketHandler) handleWebSocketReads(client *WebSocketClient) {
 		if client.IsClosed() {
 			break
 		}
+
+		// 设置当前读取超时
+		client.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 		// 修复：安全的类型断言
 		_, messageBytes, err := client.conn.ReadMessage()
@@ -164,7 +225,15 @@ func (wh *WebSocketHandler) handleWebSocketWrites(client *WebSocketClient) {
 	ticker := time.NewTicker(54 * time.Second)
 	defer func() {
 		ticker.Stop()
-		close(client.send)
+		// Close send channel gracefully if not already closed
+		func() {
+			defer func() {
+				if recover() != nil {
+					// Channel was already closed, which is fine
+				}
+			}()
+			close(client.send)
+		}()
 		if !client.IsClosed() {
 			client.Close()
 		}
@@ -179,6 +248,7 @@ func (wh *WebSocketHandler) handleWebSocketWrites(client *WebSocketClient) {
 
 			client.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if !ok {
+				// Channel closed, send close message
 				client.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
@@ -199,6 +269,12 @@ func (wh *WebSocketHandler) handleWebSocketWrites(client *WebSocketClient) {
 				return
 			}
 			client.UpdatePing()
+
+		case <-time.After(60 * time.Second):
+			// Emergency timeout check - if nothing received in 60 seconds, close connection
+			if client.IsClosed() {
+				return
+			}
 		}
 	}
 }
