@@ -10,6 +10,7 @@ import (
 	"slices"
 	"sync"
 
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 	"github.com/joho/godotenv"
 )
 
@@ -18,22 +19,26 @@ var (
 	currentConfig *AppConfig
 	configMutex   sync.RWMutex
 	configFile    string
+	encryptionKey string // Encryption key for API keys
 )
 
 // AppConfig 包含应用程序的所有配置
 type AppConfig struct {
 	// 基础配置
-	Port         string `json:"port"`
-	OpenAIAPIKey string `json:"openai_api_key,omitempty"`
-	DataDir      string `json:"data_dir"`
-	StaticDir    string `json:"static_dir"`
-	TemplatesDir string `json:"templates_dir"`
-	LogDir       string `json:"log_dir"`
-	DebugMode    bool   `json:"debug_mode"`
+	Port         string            `json:"port"`
+	OpenAIAPIKey string            `json:"-"` // Don't serialize to JSON to avoid plain text storage
+	DataDir      string            `json:"data_dir"`
+	StaticDir    string            `json:"static_dir"`
+	TemplatesDir string            `json:"templates_dir"`
+	LogDir       string            `json:"log_dir"`
+	DebugMode    bool              `json:"debug_mode"`
 
 	// LLM相关配置
 	LLMProvider string            `json:"llm_provider"`
 	LLMConfig   map[string]string `json:"llm_config"`
+	
+	// Encrypted API key storage (stored as encrypted string)
+	EncryptedLLMConfig map[string]string `json:"encrypted_llm_config,omitempty"`
 }
 
 // Config 存储应用配置
@@ -47,10 +52,37 @@ type Config struct {
 	DebugMode    bool
 }
 
+// generateEncryptionKey generates a secure encryption key
+func generateEncryptionKey() string {
+	key := getEnv("CONFIG_ENCRYPTION_KEY", "")
+	if key == "" {
+		// In production, this should be a fatal error rather than using a default key
+		log.Println("警告: 未设置 CONFIG_ENCRYPTION_KEY 环境变量。")
+		log.Println("建议: 在生产环境中设置一个安全的32字符加密密钥")
+		
+		// For development only, we'll warn and use a default, but in production this should be an error
+		if getEnv("DEBUG_MODE", "true") == "true" {
+			key = "SceneIntruderMCP_default_encryption_key_32_chars!"
+		} else {
+			log.Fatal("生产环境中必须设置 CONFIG_ENCRYPTION_KEY 环境变量")
+		}
+	}
+	
+	// Validate key length
+	if len(key) < 32 {
+		log.Fatalf("加密密钥长度不足。请使用至少32字符的密钥")
+	}
+	
+	return key
+}
+
 // Load 从环境变量加载配置
 func Load() (*Config, error) {
 	// 尝试加载.env文件（可选）
 	godotenv.Load()
+
+	// Initialize encryption key
+	encryptionKey = generateEncryptionKey()
 
 	// 创建配置
 	config := &Config{
@@ -106,6 +138,77 @@ func getEnvBool(key string, defaultValue bool) bool {
 	return value == "true" || value == "1" || value == "yes"
 }
 
+// encryptAPIKey encrypts an API key
+func encryptAPIKey(plaintext string) (string, error) {
+	if encryptionKey == "" {
+		return "", fmt.Errorf("encryption key not initialized")
+	}
+	return utils.Encrypt(plaintext, encryptionKey)
+}
+
+// decryptAPIKey decrypts an API key
+func decryptAPIKey(ciphertext string) (string, error) {
+	if encryptionKey == "" {
+		return "", fmt.Errorf("encryption key not initialized")
+	}
+	return utils.Decrypt(ciphertext, encryptionKey)
+}
+
+// getDecryptedAPIKey gets the decrypted API key from LLMConfig
+func (c *AppConfig) getDecryptedAPIKey() string {
+	if c.EncryptedLLMConfig != nil {
+		encryptedKey, exists := c.EncryptedLLMConfig["api_key"]
+		if exists && encryptedKey != "" {
+			decryptedKey, err := decryptAPIKey(encryptedKey)
+			if err == nil {
+				return decryptedKey
+			}
+			log.Printf("警告: 无法解密API密钥: %v", err)
+		}
+	}
+	// For backward compatibility, check the unencrypted config
+	if c.LLMConfig != nil {
+		return c.LLMConfig["api_key"]
+	}
+	return ""
+}
+
+// setEncryptedAPIKey sets the encrypted API key in LLMConfig
+func (c *AppConfig) setEncryptedAPIKey(apiKey string) error {
+	if c.EncryptedLLMConfig == nil {
+		c.EncryptedLLMConfig = make(map[string]string)
+	}
+	
+	encryptedKey, err := encryptAPIKey(apiKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt API key: %w", err)
+	}
+	c.EncryptedLLMConfig["api_key"] = encryptedKey
+	return nil
+}
+
+// getLLMConfig returns the current LLM config with decrypted API key
+func (c *AppConfig) getLLMConfig() map[string]string {
+	config := make(map[string]string)
+	
+	// Copy non-sensitive fields from LLMConfig
+	if c.LLMConfig != nil {
+		for k, v := range c.LLMConfig {
+			if k != "api_key" { // Don't copy the api_key from unencrypted config
+				config[k] = v
+			}
+		}
+	}
+	
+	// Add decrypted API key
+	decryptedAPIKey := c.getDecryptedAPIKey()
+	if decryptedAPIKey != "" {
+		config["api_key"] = decryptedAPIKey
+	}
+	
+	return config
+}
+
 // InitConfig 初始化配置管理器
 func InitConfig(dataDir string) error {
 	configFile = filepath.Join(dataDir, "config.json")
@@ -130,9 +233,17 @@ func InitConfig(dataDir string) error {
 		DebugMode:    baseConfig.DebugMode,
 		LLMProvider:  "openai", // 默认使用OpenAI
 		LLMConfig: map[string]string{
-			"api_key":       baseConfig.OpenAIAPIKey,
 			"default_model": "gpt-4o",
 		},
+		EncryptedLLMConfig: make(map[string]string),
+	}
+
+	// Set encrypted API key from base config if available
+	if baseConfig.OpenAIAPIKey != "" {
+		err := currentConfig.setEncryptedAPIKey(baseConfig.OpenAIAPIKey)
+		if err != nil {
+			log.Printf("警告: 无法加密API密钥: %v", err)
+		}
 	}
 
 	// 尝试从文件加载已保存的配置
@@ -149,9 +260,18 @@ func InitConfig(dataDir string) error {
 				savedConfig.LogDir = baseConfig.LogDir
 				savedConfig.DebugMode = baseConfig.DebugMode
 
-				// 如果文件中没有API密钥，使用环境变量的密钥
-				if savedConfig.LLMConfig != nil && savedConfig.LLMConfig["api_key"] == "" {
-					savedConfig.LLMConfig["api_key"] = baseConfig.OpenAIAPIKey
+				// Handle backward compatibility with unencrypted API keys in old configs
+				if savedConfig.LLMConfig != nil {
+					// If there's an unencrypted API key in the old config, encrypt it
+					if apiKey := savedConfig.LLMConfig["api_key"]; apiKey != "" {
+						// Set the encrypted version and clear the unencrypted one
+						err := savedConfig.setEncryptedAPIKey(apiKey)
+						if err != nil {
+							log.Printf("警告: 无法加密从旧配置中发现的API密钥: %v", err)
+						}
+						// Remove api_key from the unencrypted config
+						delete(savedConfig.LLMConfig, "api_key")
+					}
 				}
 
 				currentConfig = &savedConfig
@@ -171,7 +291,7 @@ func GetCurrentConfig() *AppConfig {
 	if currentConfig == nil {
 		// 紧急情况，返回一个基本配置
 		baseConfig, _ := Load()
-		return &AppConfig{
+		appConfig := &AppConfig{
 			Port:         baseConfig.Port,
 			OpenAIAPIKey: baseConfig.OpenAIAPIKey,
 			DataDir:      baseConfig.DataDir,
@@ -181,13 +301,23 @@ func GetCurrentConfig() *AppConfig {
 			DebugMode:    baseConfig.DebugMode,
 			LLMProvider:  "openai",
 			LLMConfig: map[string]string{
-				"api_key": baseConfig.OpenAIAPIKey,
+				"default_model": "gpt-4o",
 			},
+			EncryptedLLMConfig: make(map[string]string),
 		}
+		
+		// Set encrypted API key if available
+		if baseConfig.OpenAIAPIKey != "" {
+			appConfig.setEncryptedAPIKey(baseConfig.OpenAIAPIKey)
+		}
+		
+		return appConfig
 	}
 
-	// 返回配置的副本
+	// 返回配置的副本 with decrypted values where needed
 	configCopy := *currentConfig
+	// Return a copy with decrypted LLM config
+	configCopy.LLMConfig = currentConfig.getLLMConfig()
 	return &configCopy
 }
 
@@ -211,7 +341,20 @@ func UpdateLLMConfig(provider string, config map[string]string) error {
 	}
 
 	currentConfig.LLMProvider = provider
-	currentConfig.LLMConfig = config
+	
+	// Handle API key encryption
+	currentConfig.LLMConfig = make(map[string]string)
+	for k, v := range config {
+		if k == "api_key" {
+			// Encrypt the API key
+			err := currentConfig.setEncryptedAPIKey(v)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt API key: %w", err)
+			}
+		} else {
+			currentConfig.LLMConfig[k] = v
+		}
+	}
 
 	return SaveConfig()
 }
@@ -233,11 +376,12 @@ func validateLLMProvider(provider string) error {
 // validateLLMConfig 验证 LLM 配置
 func validateLLMConfig(provider string, config map[string]string) error {
 	// 验证必需的配置项
-	if _, ok := config["api_key"]; !ok {
+	apiKey, exists := config["api_key"]
+	if !exists {
 		return fmt.Errorf("缺少 api_key 配置")
 	}
 
-	if config["api_key"] == "" {
+	if apiKey == "" {
 		return fmt.Errorf("api_key 不能为空")
 	}
 
@@ -269,8 +413,20 @@ func SaveConfig() error {
 		}
 	}
 
+	// Create a copy of the config for serialization that excludes the plain API key
+	configToSave := *currentConfig
+	
+	// Store the decrypted LLM config temporarily to avoid storing plain text API key
+	originalLLMConfig := configToSave.LLMConfig
+	configToSave.LLMConfig = make(map[string]string)
+	for k, v := range originalLLMConfig {
+		if k != "api_key" {
+			configToSave.LLMConfig[k] = v
+		}
+	}
+
 	// 序列化并保存
-	data, err := json.MarshalIndent(currentConfig, "", "  ")
+	data, err := json.MarshalIndent(configToSave, "", "  ")
 	if err != nil {
 		return fmt.Errorf("序列化配置失败: %w", err)
 	}
