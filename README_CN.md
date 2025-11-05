@@ -7,7 +7,7 @@
 **🎭 AI驱动的沉浸式互动叙事平台**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
@@ -41,12 +41,26 @@ SceneIntruderMCP 是一个革命性的AI驱动互动叙事平台，它将传统�
 - **创意控制**: 3级创意程度控制 (严格/平衡/扩展)
 - **进度追踪**: 实时故事完成度和统计分析
 
+#### 🎒 **用户道具与技能管理**
+- **自定义道具**: 用户可以定义具有可自定义属性的独特道具
+- **自定义技能**: 用户可以创建和管理具有不同效果和等级的技能
+- **属性系统**: 遏品可以有多个属性（攻击力、防御力、魔力、耐久度等）
+- **稀有度等级**: 遏品支持不同的稀有度等级：普通、罕见、史诗、传说
+- **技能树**: 层级化技能系统，带有前置要求和条件
+- **角色互动**: 遏品和技能可以影响角色互动和故事情节
+- **API集成**: 通过API提供完整的CRUD操作来管理用户定义的内容
+
 #### 🔗 **多LLM支持**
-- **OpenAI GPT**: GPT-3.5/4/4o 系列
-- **Anthropic Claude**: Claude-3/3.5 系列
-- **DeepSeek**: 中文优化模型
-- **Google Gemini**: Gemini-2.0 系列
-- **开源模型**: 通过 OpenRouter/GitHub Models 支持
+- **OpenAI GPT**: GPT-3.5/4/4o/5-chat 系列
+- **Anthropic Claude**: Claude-3/3.5/3.7 系列
+- **DeepSeek**: DeepSeek-R1/Coder 系列
+- **Google Gemini**: Gemini-2.0/1.5 系列 (包含思维模型)
+- **Grok**: xAI 的 Grok-2/2-mini/3 系列
+- **Mistral**: Mistral-large/small 系列
+- **Qwen**: 阿里云 Qwen2.5/32b 系列 (包含 qwq 模型)
+- **GitHub Models**: 通过 GitHub Models 平台 (GPT-4o, o1 系列, Phi-4 等)
+- **OpenRouter**: 开源模型聚合平台，提供免费层级
+- **GLM**: 智谱AI的 GLM-4/4-plus 系列
 
 ## 🏗️ 技术架构
 
@@ -226,6 +240,63 @@ GET    /api/scenes/{id}/export/interactions # 导出互动记录
 GET    /api/scenes/{id}/export/story        # 导出故事文档
 ```
 
+#### 互动聚合
+```http
+POST   /api/interactions/aggregate         # 处理聚合互动
+GET    /api/interactions/{scene_id}        # 获取角色互动
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # 获取角色间互动
+```
+
+#### 场景聚合
+```http
+GET    /api/scenes/{id}/aggregate          # 获取综合场景数据（含选项）
+```
+
+#### 批量操作
+```http
+POST   /api/scenes/{id}/story/batch        # 批量故事操作
+```
+
+#### 用户管理
+```http
+GET    /api/users/{user_id}                # 获取用户档案
+PUT    /api/users/{user_id}                # 更新用户档案
+GET    /api/users/{user_id}/preferences    # 获取用户偏好
+PUT    /api/users/{user_id}/preferences    # 更新用户偏好
+```
+
+#### 用户道具和技能管理
+```http
+# 用户道具
+GET    /api/users/{user_id}/items           # 获取用户道具
+POST   /api/users/{user_id}/items           # 添加用户道具
+GET    /api/users/{user_id}/items/{item_id} # 获取特定道具
+PUT    /api/users/{user_id}/items/{item_id} # 更新用户道具
+DELETE /api/users/{user_id}/items/{item_id} # 删除用户道具
+
+# 用户技能
+GET    /api/users/{user_id}/skills           # 获取用户技能
+POST   /api/users/{user_id}/skills           # 添加用户技能
+GET    /api/users/{user_id}/skills/{skill_id} # 获取特定技能
+PUT    /api/users/{user_id}/skills/{skill_id} # 更新用户技能
+DELETE /api/users/{user_id}/skills/{skill_id} # 删除用户技能
+```
+
+#### 配置和健康检查
+```http
+GET    /api/config/health                   # 获取配置健康状态
+GET    /api/config/metrics                  # 获取配置指标
+GET    /api/settings                        # 获取系统设置
+POST   /api/settings                        # 更新系统设置
+POST   /api/settings/test-connection        # 测试连接
+```
+
+#### WebSocket 管理
+```http
+GET    /api/ws/status                       # 获取 WebSocket 连接状态
+POST   /api/ws/cleanup                      # 清理过期 WebSocket 连接
+```
+
 #### 文本分析与文件上传
 ```http
 POST   /api/analyze                     # 分析文本内容
@@ -381,6 +452,17 @@ sceneWs.send(JSON.stringify({
     character_id: 'char123',
     message: '大家好！'
 }));
+
+// 发送故事选择
+sceneWs.send(JSON.stringify({
+    type: 'story_choice',
+    node_id: 'story_node_1',
+    choice_id: 'choice_a',
+    user_preferences: {
+        creativity_level: 'balanced',
+        allow_plot_twists: true
+    }
+}));
 ```
 
 #### 用户状态 WebSocket
@@ -390,10 +472,49 @@ const statusWs = new WebSocket(`ws://localhost:8080/ws/user/status?user_id=user4
 
 statusWs.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    if (data.type === 'heartbeat') {
-        console.log('连接保持活跃');
+    switch(data.type) {
+        case 'heartbeat':
+            console.log('连接保持活跃');
+            break;
+        case 'user_status_update':
+            console.log('用户状态改变:', data.status);
+            break;
+        case 'error':
+            console.error('WebSocket错误:', data.error);
+            break;
+        default:
+            console.log('接收到:', data);
     }
 };
+```
+
+#### 支持的 WebSocket 消息类型
+- **character_interaction**: 角色间互动
+- **story_choice**: 故事决策事件
+- **user_status_update**: 用户在线状态和状态更新
+- **conversation:new**: 新对话事件
+- **heartbeat**: 连接健康检查
+- **pong**: 心跳响应消息
+- **error**: 错误通知
+
+#### 前端实时管理
+应用程序使用 RealtimeManager 类处理 WebSocket 通信：
+```javascript
+// 初始化场景实时功能
+await window.realtimeManager.initSceneRealtime('scene_123');
+
+// 发送角色互动
+window.realtimeManager.sendCharacterInteraction('scene_123', 'character_456', '你好！');
+
+// 订阅故事事件
+window.realtimeManager.on('story:event', (data) => {
+    // 处理故事更新
+    console.log('故事事件:', data);
+});
+
+// 获取连接状态
+const status = window.realtimeManager.getConnectionStatus();
+console.log('WebSocket状态:', status);
 ```
 
 ### 📊 **响应格式**
@@ -582,6 +703,18 @@ go test ./internal/services/...
 - **CORS配置**: 跨域资源共享安全配置
 - **输入验证**: 严格的用户输入验证和清理
 
+### 🔐 数据安全与API密钥加密
+
+- **AES-GCM加密**: API密钥在存储前使用AES-GCM算法安全加密
+- **环境变量优先**: API密钥主要从环境变量加载（例如，`OPENAI_API_KEY`）
+- **加密存储**: 存储在配置文件中的API密钥以加密形式保存在`EncryptedLLMConfig`字段中
+- **运行时解密**: 仅在需要进行API调用时才解密API密钥
+- **自动迁移**: 旧的未加密API密钥自动迁移到加密存储
+- **向后兼容性**: 系统处理从未加密到加密API密钥存储的转换
+- **配置安全**: 加密密钥应设置为`CONFIG_ENCRYPTION_KEY`环境变量以获得最佳安全性
+- **降级保护**: 包含降级机制以防止以明文形式存储API密钥
+- **密钥派生**: 在缺少环境提供的加密密钥时，系统安全地从多个熵源派生加密密钥
+
 ## 🤝 贡献指南
 
 我们欢迎各种形式的贡献！
@@ -610,7 +743,7 @@ go test ./internal/services/...
 
 ## 📄 许可证
 
-本项目采用 MIT 许可证 - 详见 [LICENSE](LICENSE) 文件
+本项目采用 Apache 2.0 许可证 - 详见 [LICENSE](LICENSE) 文件
 
 ## 🙏 致谢
 
