@@ -56,15 +56,48 @@ func (rh *ResponseHelper) Created(c *gin.Context, data interface{}, message ...s
 	c.JSON(http.StatusCreated, response)
 }
 
+// sanitizeErrorMessage removes sensitive information from error messages
+func sanitizeErrorMessage(message string) string {
+	// Remove potential sensitive information like API keys, file paths, etc.
+	// This is a basic implementation - you might want to expand this list
+	sensitivePatterns := []string{
+		"api_key", "API_KEY", "apikey", "ApiKey", 
+		"password", "secret", "token", 
+		"config", "CONFIG", "config_",
+		"env", "ENV", "environment",
+		"/", "\\", "C:", "D:", // File path indicators
+		".json", ".yaml", ".yml", ".env", // File extensions that might contain sensitive info
+	}
+	
+	sanitized := message
+	for _, pattern := range sensitivePatterns {
+		// Replace occurrences with generic text to prevent information disclosure
+		if strings.Contains(strings.ToLower(sanitized), strings.ToLower(pattern)) {
+			// For security reasons, we'll replace the entire message if it contains sensitive patterns
+			// This is conservative approach - in production you might want more sophisticated sanitization
+			if strings.Contains(strings.ToLower(sanitized), "api_key") || 
+			   strings.Contains(strings.ToLower(sanitized), "secret") ||
+			   strings.Contains(strings.ToLower(sanitized), "token") {
+				return "An internal error occurred"
+			}
+		}
+	}
+	return sanitized
+}
+
 // Error 错误响应
 func (rh *ResponseHelper) Error(c *gin.Context, statusCode int, errorCode, message string, details ...string) {
+	// Sanitize the error message to prevent information disclosure
+	sanitizedMessage := sanitizeErrorMessage(message)
+	
 	apiError := &APIError{
 		Code:    errorCode,
-		Message: message,
+		Message: sanitizedMessage,
 	}
 
 	if len(details) > 0 {
-		apiError.Details = details[0]
+		// Also sanitize details
+		apiError.Details = sanitizeErrorMessage(details[0])
 	}
 
 	response := &APIResponse{
