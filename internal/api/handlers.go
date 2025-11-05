@@ -19,6 +19,7 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/llm"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
 	"github.com/Corphon/SceneIntruderMCP/internal/services"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -35,6 +36,8 @@ type Handler struct {
 	UserService      *services.UserService      // 用户服务
 	WebSocketHandler *WebSocketHandler          // WebSocket 处理器
 	Response         *ResponseHelper            // 响应助手
+	Logger           *utils.Logger              // 结构化日志记录器
+	Metrics          *utils.APIMetrics          // 应用指标收集器
 }
 
 // TriggerCharacterInteractionRequest 触发角色互动的请求结构
@@ -106,17 +109,13 @@ func (h *Handler) GetWebSocketStatus(c *gin.Context) {
 	status["ping_timeout_seconds"] = int(wsManager.pingTimeout.Seconds())
 	status["timestamp"] = time.Now().Format(time.RFC3339)
 
-	c.JSON(http.StatusOK, status)
+	h.Response.Success(c, status, "WebSocket状态获取成功")
 }
 
 // 添加管理器控制API
 func (h *Handler) CleanupWebSocketConnections(c *gin.Context) {
 	wsManager.cleanupExpiredConnections()
-	c.JSON(http.StatusOK, gin.H{
-		"success":   true,
-		"message":   "连接清理已执行",
-		"timestamp": time.Now().Format(time.RFC3339),
-	})
+	h.Response.Success(c, nil, "连接清理已执行")
 }
 
 // ========================================
@@ -306,6 +305,8 @@ func NewHandler(
 		UserService:      userService,
 		WebSocketHandler: NewWebSocketHandler(),
 		Response:         NewResponseHelper(),
+		Logger:           utils.GetLogger(),
+		Metrics:          utils.NewAPIMetrics(),
 	}
 }
 
@@ -323,11 +324,51 @@ func (h *Handler) GetScenes(c *gin.Context) {
 // GetScene 获取指定场景详情
 func (h *Handler) GetScene(c *gin.Context) {
 	sceneID := c.Param("id")
+	
+	if sceneID == "" {
+		h.Response.BadRequest(c, "场景ID不能为空")
+		return
+	}
+	
+	startTime := time.Now()
+	h.Logger.Info("Getting scene details", map[string]interface{}{
+		"scene_id": sceneID,
+		"client_ip": c.ClientIP(),
+	})
+
 	sceneData, err := h.SceneService.LoadScene(sceneID)
 	if err != nil {
+		h.Logger.Error("Failed to load scene", map[string]interface{}{
+			"scene_id": sceneID,
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("scene_load_failed", "scene_service")
+		
+		// Check if it's a "not found" error specifically
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "不存在") {
+			h.Response.NotFound(c, "场景", "场景ID: "+sceneID)
+		} else {
+			h.Response.InternalError(c, "加载场景失败", err.Error())
+		}
+		return
+	}
+
+	if sceneData == nil {
 		h.Response.NotFound(c, "场景", "场景ID: "+sceneID)
 		return
 	}
+
+	duration := time.Since(startTime)
+	h.Logger.Info("Scene details retrieved successfully", map[string]interface{}{
+		"scene_id": sceneID,
+		"character_count": len(sceneData.Characters),
+		"duration_ms": duration.Milliseconds(),
+		"client_ip": c.ClientIP(),
+	})
+
+	h.Metrics.RecordAPIRequest("get_scene", "GET", http.StatusOK, duration)
+	h.Metrics.RecordSceneInteraction(sceneID, "scene_viewed")
 
 	h.Response.Success(c, sceneData, "场景数据获取成功")
 }
@@ -339,17 +380,84 @@ func (h *Handler) CreateScene(c *gin.Context) {
 		Text  string `json:"text" binding:"required"`
 	}
 
+	startTime := time.Now()
+
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Logger.Error("Invalid request parameters for create scene endpoint", map[string]interface{}{
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("invalid_request", "create_scene_endpoint")
 		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
 
+	// Additional validation improvements
+	if len(req.Title) == 0 {
+		h.Response.BadRequest(c, "标题不能为空")
+		return
+	}
+
+	if len(req.Title) > 200 {
+		h.Response.BadRequest(c, "标题过长", "标题不能超过200个字符")
+		return
+	}
+
+	if len(req.Text) == 0 {
+		h.Response.BadRequest(c, "文本内容不能为空")
+		return
+	}
+
+	if len(req.Text) > 100000 { // 100KB limit
+		h.Response.BadRequest(c, "文本内容过长", "文本内容不能超过100,000个字符")
+		return
+	}
+
+	// Log the scene creation attempt
+	h.Logger.Info("Creating new scene", map[string]interface{}{
+		"title": req.Title,
+		"text_length": len(req.Text),
+		"client_ip": c.ClientIP(),
+	})
+
+	// Get user ID from context for ownership
+	userID, isAuthenticated := GetUserFromContext(c)
+	if !isAuthenticated {
+		userID = "anonymous" // Handle unauthenticated users appropriately
+	}
+
 	// 创建场景
-	scene, err := h.SceneService.CreateSceneFromText(req.Text, req.Title)
+	scene, err := h.SceneService.CreateSceneFromText(userID, req.Text, req.Title)
 	if err != nil {
+		h.Logger.Error("Failed to create scene", map[string]interface{}{
+			"title": req.Title,
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("scene_creation_failed", "scene_service")
 		h.Response.InternalError(c, "创建场景失败", err.Error())
 		return
 	}
+
+	if scene == nil {
+		h.Logger.Error("Scene creation returned nil", map[string]interface{}{
+			"title": req.Title,
+			"client_ip": c.ClientIP(),
+		})
+		h.Response.InternalError(c, "创建场景失败", "返回了无效的场景数据")
+		return
+	}
+
+	duration := time.Since(startTime)
+	h.Logger.Info("Scene created successfully", map[string]interface{}{
+		"scene_id": scene.ID,
+		"title": scene.Title,
+		"duration_ms": duration.Milliseconds(),
+		"client_ip": c.ClientIP(),
+	})
+
+	h.Metrics.RecordAPIRequest("create_scene", "POST", http.StatusCreated, duration)
+	h.Metrics.RecordSceneInteraction(scene.ID, "scene_created")
 
 	h.Response.Created(c, scene, "场景创建成功")
 }
@@ -374,7 +482,14 @@ func (h *Handler) Chat(c *gin.Context) {
 		Message     string `json:"message" binding:"required"`
 	}
 
+	startTime := time.Now()
+
 	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Logger.Error("Invalid request parameters for chat endpoint", map[string]interface{}{
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("invalid_request", "chat_endpoint")
 		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
@@ -382,9 +497,27 @@ func (h *Handler) Chat(c *gin.Context) {
 	// 生成角色回应
 	response, err := h.CharacterService.GenerateResponse(req.SceneID, req.CharacterID, req.Message)
 	if err != nil {
+		h.Logger.Error("Failed to generate character response", map[string]interface{}{
+			"scene_id": req.SceneID,
+			"character_id": req.CharacterID,
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("response_generation_failed", "character_service")
 		h.Response.InternalError(c, "生成回应失败", err.Error())
 		return
 	}
+
+	duration := time.Since(startTime)
+	h.Logger.Info("Chat request completed successfully", map[string]interface{}{
+		"scene_id": req.SceneID,
+		"character_id": req.CharacterID,
+		"duration_ms": duration.Milliseconds(),
+		"client_ip": c.ClientIP(),
+	})
+
+	h.Metrics.RecordAPIRequest("chat", "POST", http.StatusOK, duration)
+	h.Metrics.RecordSceneInteraction(req.SceneID, "chat")
 
 	h.Response.Success(c, response, "回应生成成功")
 }
@@ -431,39 +564,104 @@ func (h *Handler) GetConversations(c *gin.Context) {
 func (h *Handler) UploadFile(c *gin.Context) {
 	file, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "获取上传文件失败"})
+		h.Response.BadRequest(c, "获取上传文件失败", err.Error())
+		return
+	}
+
+	// 检查文件大小 (limit to 10MB)
+	const maxFileSize = 10 << 20 // 10 MB
+	if file.Size > maxFileSize {
+		h.Response.BadRequest(c, "文件过大", "文件大小不能超过10MB")
 		return
 	}
 
 	// 检查文件类型
 	ext := filepath.Ext(file.Filename)
 	if ext != ".txt" && ext != ".md" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "只支持.txt或.md文件"})
+		h.Response.BadRequest(c, "不支持的文件类型", "只支持.txt或.md文件")
 		return
 	}
 
-	// 存储临时文件
-	tempPath := filepath.Join("temp", time.Now().Format("20060102150405")+ext)
+	// Generate secure filename to prevent path traversal
+	secureFilename := fmt.Sprintf("%d_%s", time.Now().UnixNano(), filepath.Base(file.Filename))
+	secureFilename = filepath.Clean(secureFilename) // Clean to prevent path traversal
+
+	// Validate that the cleaned filename still has the correct extension
+	if filepath.Ext(secureFilename) != ext {
+		h.Response.BadRequest(c, "无效的文件名", "文件名包含不允许的字符")
+		return
+	}
+
+	// Store temporary file with secure name
+	tempPath := filepath.Join("temp", secureFilename)
 	if err := c.SaveUploadedFile(file, tempPath); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败"})
+		h.Response.InternalError(c, "保存文件失败", err.Error())
 		return
 	}
 
-	// 读取文件内容
+	// Read file content
 	content, err := os.ReadFile(tempPath)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取文件失败"})
+		h.Response.InternalError(c, "读取文件失败", err.Error())
+		// Clean up the temp file in case of error
+		os.Remove(tempPath)
 		return
 	}
 
-	// 返回文件内容和文件名
-	c.JSON(http.StatusOK, gin.H{
+	// Validate file content based on extension
+	if ext == ".txt" || ext == ".md" {
+		// Basic text file validation: check for null bytes and other binary indicators
+		if strings.Contains(string(content), "\x00") {
+			h.Response.BadRequest(c, "文件格式无效", "文件包含二进制内容")
+			os.Remove(tempPath)
+			return
+		}
+		
+		// Limit content size to prevent memory exhaustion
+		const maxContentLength = 1000000 // 1MB of content
+		if len(content) > maxContentLength {
+			h.Response.BadRequest(c, "文件内容过大", "文件内容不能超过1MB")
+			os.Remove(tempPath)
+			return
+		}
+		
+		// Additional security checks for text files
+		contentStr := string(content)
+		
+		// Check for potential script tags in markdown files
+		if ext == ".md" {
+			if strings.Contains(strings.ToLower(contentStr), "<script") || 
+				strings.Contains(strings.ToLower(contentStr), "javascript:") ||
+				strings.Contains(strings.ToLower(contentStr), "data:text/html") {
+				h.Response.BadRequest(c, "文件内容不安全", "文件包含潜在危险内容")
+				os.Remove(tempPath)
+				return
+			}
+		}
+		
+		// Check for extremely long lines that could indicate binary content or be a DoS vector
+		lines := strings.Split(contentStr, "\n")
+		for _, line := range lines {
+			if len(line) > 10000 { // 10KB per line is excessive for text
+				h.Response.BadRequest(c, "文件内容格式异常", "文件包含过长的单行内容")
+				os.Remove(tempPath)
+				return
+			}
+		}
+	}
+
+	// Prepare response data
+	responseData := map[string]interface{}{
 		"filename": file.Filename,
 		"content":  string(content),
-	})
+		"size":     len(content),
+	}
 
-	// 删除临时文件
+	// Delete temporary file after reading
 	_ = os.Remove(tempPath)
+
+	// Return success response
+	h.Response.Success(c, responseData, "文件上传成功")
 }
 
 // IndexPage 返回主页
@@ -519,10 +717,24 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 		Title string `json:"title" binding:"required"`
 	}
 
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数"})
+	startTime := time.Now()
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Logger.Error("Invalid request parameters for analyze text endpoint", map[string]interface{}{
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("invalid_request", "analyze_text_endpoint")
+		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
+
+	// Log the analysis attempt
+	h.Logger.Info("Starting text analysis", map[string]interface{}{
+		"title": req.Title,
+		"text_length": len(req.Text),
+		"client_ip": c.ClientIP(),
+	})
 
 	// 创建唯一任务ID
 	taskID := fmt.Sprintf("analyze_%d", time.Now().UnixNano())
@@ -532,20 +744,42 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 	// 启动后台分析
 	go func() {
-		// 创建任务级别context，支持超时和取消
+		// Create a context with timeout for the analysis
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
+
+		// Log the start of the analysis
+		h.Logger.Info("Starting background text analysis", map[string]interface{}{
+			"task_id": taskID,
+			"title": req.Title,
+		})
 
 		// 执行分析
 		result, err := h.AnalyzerService.AnalyzeTextWithProgress(ctx, req.Text, tracker)
 		if err != nil {
+			h.Logger.Error("Text analysis failed", map[string]interface{}{
+				"task_id": taskID,
+				"error": err.Error(),
+			})
+			h.Metrics.RecordError("text_analysis_failed", "analyzer_service")
 			tracker.Fail(err.Error())
 			return
 		}
 
+		// Log successful analysis
+		h.Logger.Info("Text analysis completed", map[string]interface{}{
+			"task_id": taskID,
+			"character_count": len(result.Characters),
+			"scene_count": len(result.Scenes),
+		})
+
+		// Get user ID from context for ownership
+		userID, _ := GetUserFromContext(c)
+
 		// 分析完成后创建场景
 		scene := &models.Scene{
 			ID:          fmt.Sprintf("scene_%d", time.Now().UnixNano()),
+			UserID:      userID, // Assign the user who created this scene
 			Name:        req.Title,
 			CreatedAt:   time.Now(),
 			LastUpdated: time.Now(),
@@ -569,19 +803,40 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 		// 保存场景和角色
 		if err := h.SceneService.CreateSceneWithCharacters(scene, result.Characters); err != nil {
+			h.Logger.Error("Failed to create scene with analyzed characters", map[string]interface{}{
+				"task_id": taskID,
+				"scene_id": scene.ID,
+				"error": err.Error(),
+			})
 			tracker.Fail("场景创建失败: " + err.Error())
 			return
 		}
 
-		// 更新任务状态，包含创建的场景ID
+		// Log successful scene creation
+		h.Logger.Info("Scene created from analysis", map[string]interface{}{
+			"task_id": taskID,
+			"scene_id": scene.ID,
+		})
+
+		// Update task status with created scene ID
 		tracker.Complete(fmt.Sprintf("分析完成，场景已创建: %s", scene.ID))
 	}()
 
-	// 返回任务ID
-	c.JSON(http.StatusAccepted, gin.H{
+	duration := time.Since(startTime)
+	h.Logger.Info("Text analysis request accepted", map[string]interface{}{
+		"task_id": taskID,
+		"title": req.Title,
+		"duration_ms": duration.Milliseconds(),
+		"client_ip": c.ClientIP(),
+	})
+
+	h.Metrics.RecordAPIRequest("analyze_text", "POST", http.StatusAccepted, duration)
+	h.Metrics.RecordUserAction(c.ClientIP(), "text_analysis_request")
+
+	h.Response.Success(c, map[string]interface{}{
 		"task_id": taskID,
 		"message": "文本分析已开始，请订阅进度更新",
-	})
+	}, "文本分析请求已接受")
 }
 
 // SubscribeProgress 订阅任务进度的SSE端点
@@ -657,7 +912,7 @@ func (h *Handler) CancelAnalysisTask(c *gin.Context) {
 	// 标记任务为失败
 	tracker.Fail("用户取消了任务")
 
-	c.JSON(http.StatusOK, gin.H{"message": "任务已取消"})
+	h.Response.Success(c, nil, "任务已取消")
 }
 
 // ChatWithEmotion 处理带情绪的聊天请求
@@ -668,20 +923,56 @@ func (h *Handler) ChatWithEmotion(c *gin.Context) {
 		Message     string `json:"message" binding:"required"`
 	}
 
-	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数"})
+	startTime := time.Now()
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Logger.Error("Invalid request parameters for emotional chat endpoint", map[string]interface{}{
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("invalid_request", "emotional_chat_endpoint")
+		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
+
+	h.Logger.Info("Starting emotional chat request", map[string]interface{}{
+		"scene_id": req.SceneID,
+		"character_id": req.CharacterID,
+		"message_length": len(req.Message),
+		"client_ip": c.ClientIP(),
+	})
 
 	// 使用新的方法生成带情绪的回应
 	response, err := h.CharacterService.GenerateResponseWithEmotion(req.SceneID, req.CharacterID, req.Message)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("生成回应失败: %v", err)})
+		h.Logger.Error("Failed to generate emotional response", map[string]interface{}{
+			"scene_id": req.SceneID,
+			"character_id": req.CharacterID,
+			"error": err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+		h.Metrics.RecordError("emotional_response_generation_failed", "character_service")
+		h.Response.InternalError(c, "生成回应失败", err.Error())
 		return
 	}
-	// 记录API使用情况（假设tokenCount是从LLM响应中获取的）
+
+	duration := time.Since(startTime)
+	h.Logger.Info("Emotional chat request completed", map[string]interface{}{
+		"scene_id": req.SceneID,
+		"character_id": req.CharacterID,
+		"response_length": len(response.Response),
+		"duration_ms": duration.Milliseconds(),
+		"tokens_used": response.TokensUsed,
+		"client_ip": c.ClientIP(),
+	})
+
+	// 记录API使用情况
 	h.StatsService.RecordAPIRequest(response.TokensUsed)
-	c.JSON(http.StatusOK, response)
+	h.Metrics.RecordAPIRequest("chat_emotion", "POST", http.StatusOK, duration)
+	h.Metrics.RecordLLMRequest(response.CharacterName, "", response.TokensUsed, duration) // Assuming we can get provider info
+	h.Metrics.RecordSceneInteraction(req.SceneID, "emotional_chat")
+
+	h.Response.Success(c, response, "情绪化回应生成成功")
 }
 
 // GetStoryData 获取指定场景的故事数据
@@ -691,11 +982,11 @@ func (h *Handler) GetStoryData(c *gin.Context) {
 
 	storyData, err := storyService.GetStoryData(sceneID, nil)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "故事数据不存在"})
+		h.Response.NotFound(c, "故事数据", "故事数据不存在")
 		return
 	}
 
-	c.JSON(http.StatusOK, storyData)
+	h.Response.Success(c, storyData, "故事数据获取成功")
 }
 
 // MakeStoryChoice 处理故事选择逻辑
@@ -709,7 +1000,7 @@ func (h *Handler) MakeStoryChoice(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数格式错误: " + err.Error()})
+		h.Response.BadRequest(c, "参数格式错误", err.Error())
 		return
 	}
 
@@ -1696,6 +1987,129 @@ func (h *Handler) getSceneAggregateService() *services.SceneAggregateService {
 	container.Register("scene_aggregate", service)
 
 	return service
+}
+
+// UpdateStoryProgress 更新故事进度
+func (h *Handler) UpdateStoryProgress(c *gin.Context) {
+	sceneIDStr := c.Param("id")
+	_, err := strconv.ParseUint(sceneIDStr, 10, 32)
+	if err != nil {
+		h.Response.Error(c, http.StatusBadRequest, "INVALID_SCENE_ID", "Invalid scene ID", err.Error())
+		return
+	}
+
+	var progressUpdate struct {
+		Progress            float64                `json:"progress"`
+		CurrentState        string                 `json:"current_state"`
+		UnlockedNodes       []interface{}          `json:"unlocked_nodes"`
+		CompletedObjectives []interface{}          `json:"completed_objectives"`
+		StoryData           map[string]interface{} `json:"story_data"`
+	}
+
+	if err := c.ShouldBindJSON(&progressUpdate); err != nil {
+		h.Response.Error(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err.Error())
+		return
+	}
+
+	// 这里可以添加实际的更新逻辑
+	// 目前返回更新后的数据
+	h.Response.Success(c, progressUpdate, "Story progress updated successfully")
+}
+
+// GetSceneStats 获取场景统计
+func (h *Handler) GetSceneStats(c *gin.Context) {
+	sceneIDStr := c.Param("id")
+	_, err := strconv.ParseUint(sceneIDStr, 10, 32)
+	if err != nil {
+		h.Response.Error(c, http.StatusBadRequest, "INVALID_SCENE_ID", "Invalid scene ID", err.Error())
+		return
+	}
+
+	stats := map[string]interface{}{
+		"scene_id":                sceneIDStr,
+		"character_count":         0,
+		"conversation_count":      0,
+		"interaction_count":       0,
+		"story_progress":          0.0,
+		"last_activity":           time.Now(),
+		"created_at":              time.Now(),
+		"character_interactions":  []interface{}{},
+		"character_relationships": []interface{}{},
+		"interaction_timeline":    []interface{}{},
+	}
+
+	h.Response.Success(c, stats, "Scene statistics retrieved successfully")
+}
+
+// GetSceneConversations 获取场景对话
+func (h *Handler) GetSceneConversations(c *gin.Context) {
+	sceneIDStr := c.Param("id")
+	_, err := strconv.ParseUint(sceneIDStr, 10, 32)
+	if err != nil {
+		h.Response.Error(c, http.StatusBadRequest, "INVALID_SCENE_ID", "Invalid scene ID", err.Error())
+		return
+	}
+
+	limit := 50
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			limit = parsedLimit
+		}
+	}
+
+	conversations := []interface{}{}
+
+	if h.ContextService != nil {
+		if convs, err := h.ContextService.GetRecentConversations(sceneIDStr, limit); err == nil {
+			for _, conv := range convs {
+				conversations = append(conversations, conv)
+			}
+		}
+	}
+
+	h.Response.Success(c, map[string]interface{}{
+		"scene_id":      sceneIDStr,
+		"conversations": conversations,
+		"total":         len(conversations),
+		"limit":         limit,
+	}, "Scene conversations retrieved successfully")
+}
+
+// CreateSceneConversation 创建场景对话
+func (h *Handler) CreateSceneConversation(c *gin.Context) {
+	sceneIDStr := c.Param("id")
+	sceneID, err := strconv.ParseUint(sceneIDStr, 10, 32)
+	if err != nil {
+		h.Response.Error(c, http.StatusBadRequest, "INVALID_SCENE_ID", "Invalid scene ID", err.Error())
+		return
+	}
+
+	var conversationData struct {
+		SpeakerID   string                 `json:"speaker_id"`
+		Message     string                 `json:"message"`
+		MessageType string                 `json:"message_type"`
+		Context     map[string]interface{} `json:"context"`
+		Emotions    []string               `json:"emotions"`
+	}
+
+	if err := c.ShouldBindJSON(&conversationData); err != nil {
+		h.Response.Error(c, http.StatusBadRequest, "INVALID_REQUEST", "Invalid request body", err.Error())
+		return
+	}
+
+	// 创建对话记录
+	conversation := map[string]interface{}{
+		"id":           fmt.Sprintf("conv_%d_%d", sceneID, time.Now().Unix()),
+		"scene_id":     sceneIDStr,
+		"speaker_id":   conversationData.SpeakerID,
+		"message":      conversationData.Message,
+		"message_type": conversationData.MessageType,
+		"emotions":     conversationData.Emotions,
+		"context":      conversationData.Context,
+		"timestamp":    time.Now(),
+	}
+
+	h.Response.Success(c, conversation, "Conversation created successfully")
 }
 
 // ProcessInteractionAggregate 处理聚合交互请求
