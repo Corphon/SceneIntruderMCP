@@ -7,11 +7,11 @@
 **🎭 AI-Powered Immersive Interactive Storytelling Platform**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
-English | [简体中文](README_CN.md)
+English | [简体中文](README_EN.md)
 
 </div>
 
@@ -30,28 +30,52 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 - **Emotional Intelligence**: 8-dimensional emotional analysis (emotion, action, expression, tone, etc.)
 - **Character Consistency**: Maintain long-term memory and personality traits
 - **Dynamic Interaction**: Intelligently triggered automatic dialogues between characters
+- **Character Memory**: Persistent knowledge base that characters remember across interactions
+- **Relationship Mapping**: Dynamic relationship tracking between characters
+- **Personality Modeling**: Comprehensive personality profiles affecting dialogue and behavior
 
 #### 📖 **Dynamic Story Engine**
 - **Non-linear Narrative**: Support complex story branching and timeline management
 - **Intelligent Choice Generation**: AI dynamically creates 4 types of choices based on context (Action/Dialogue/Investigation/Strategy)
 - **Story Rewind**: Complete timeline rollback and state management
+- **Branch Visualization**: Visual representation of story branches and pathways
+- **Progressive Storytelling**: Continuous story development across sessions
+- **Context Preservation**: Maintain story context when returning to scenes
+- **Timeline Management**: Sophisticated handling of non-linear story timelines
+
+#### 🎲 **Interactive Game Mechanics**
+- **Inventory System**: Rich object management with interactive items
+- **Skill System**: User-defined abilities affecting story outcomes
+- **Character Relationships**: Track evolving relationships between characters
+- **World Building**: Dynamic scene and location management
+- **Quest Tracking**: Mission and objective management system
+- **Achievement System**: Recognition for story exploration and interaction milestones
 
 #### 🎮 **Gamified Experience**
 - **User Customization**: Custom items and skills system
 - **Creativity Control**: 3-level creativity control (Strict/Balanced/Expansive)
 - **Progress Tracking**: Real-time story completion and statistical analysis
 
+#### 🎒 **User Items & Skills Management**
+- **Custom Items**: Users can define unique items with customizable properties
+- **Custom Skills**: Users can create and manage skills with different effects and levels
+- **Property System**: Items can have multiple properties (attack, defense, magic, durability, etc.)
+- **Rarity Levels**: Items support different rarity tiers: common, rare, epic, legendary
+- **Skill Trees**: Hierarchical skill system with prerequisites and requirements
+- **Character Interaction**: Items and skills can affect character interactions and story outcomes
+- **API Integration**: Full CRUD operations available via API for managing user-defined content
+
 #### 🔗 **Multi-LLM Support**
-- **OpenAI GPT**: GPT-3.5/4/4o series
-- **Anthropic Claude**: Claude-3/3.5 series
-- **DeepSeek**: Chinese-optimized models
-- **Google Gemini**: Gemini-2.0 series
-- **Grok**: xAI's Grok models
-- **Mistral**: Mistral series models
-- **Qwen**: Alibaba Cloud Qwen series
-- **GitHub Models**: Via GitHub Models platform
-- **OpenRouter**: Open source model aggregation platform
-- **GLM**: Zhipu AI's GLM series
+- **OpenAI GPT**: GPT-3.5/4/4o/5-chat series
+- **Anthropic Claude**: Claude-3/3.5/3.7 series
+- **DeepSeek**: DeepSeek-R1/Coder series
+- **Google Gemini**: Gemini-2.0/1.5 series with thinking models
+- **Grok**: xAI's Grok-2/2-mini/3 series
+- **Mistral**: Mistral-large/small series
+- **Qwen**: Alibaba Cloud Qwen2.5/32b series including qwq models
+- **GitHub Models**: Via GitHub Models platform (GPT-4o, o1 series, Phi-4, etc.)
+- **OpenRouter**: Open source model aggregation platform with free tiers
+- **GLM**: Zhipu AI's GLM-4/4-plus series
 
 ## 🏗️ Technical Architecture
 
@@ -200,6 +224,25 @@ Open browser: http://localhost:8080
 2. **Story Documents**: Generate structured story documents
 3. **Statistical Analysis**: Character interaction and story progress statistics
 
+#### 📁 Export Functionality Details
+
+- **Multiple Formats**: Export data in JSON, Markdown, HTML, TXT, CSV, and PDF formats
+- **Comprehensive Scene Data**: Export full scene information including characters, locations, items, themes, atmosphere, and settings
+- **Character Interactions**: Export detailed interaction records between characters with timestamps and emotional context
+- **Story Branches**: Export complete story trees with all possible branches, choices, and outcomes
+- **Conversation History**: Export all character conversations with metadata
+- **Progress Statistics**: Export story progress metrics, interaction statistics, and timeline data
+- **User Preferences**: Export user customization settings, items, and skills
+- **Batch Export**: Support for exporting multiple scenes or stories simultaneously
+- **Scheduled Exports**: Option for automated periodic exports
+- **Filtered Exports**: Export based on time range, character participation, or interaction type
+- **Rich Metadata**: Include timestamps, version information, and export configuration
+- **Export Status Tracking**: Monitor ongoing export tasks with progress indicators
+- **Export History**: Maintain history of all performed exports
+- **File Organization**: Automatic organization of exported files in structured directories
+- **Export Quality Assurance**: Validation of exported data integrity
+- **Performance Optimization**: Efficient export processing for large datasets
+
 ## 🛠️ API Documentation
 
 ### 🔗 Actually Available API Endpoints
@@ -229,6 +272,63 @@ POST   /api/scenes/{id}/story/rewind    # Rewind story to specific node
 GET    /api/scenes/{id}/export/scene        # Export scene data
 GET    /api/scenes/{id}/export/interactions # Export interactions
 GET    /api/scenes/{id}/export/story        # Export story document
+```
+
+#### Interaction Aggregation
+```http
+POST   /api/interactions/aggregate         # Process aggregated interactions
+GET    /api/interactions/{scene_id}        # Get character interactions
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # Get character-to-character interactions
+```
+
+#### Scene Aggregation
+```http
+GET    /api/scenes/{id}/aggregate          # Get comprehensive scene data with options
+```
+
+#### Batch Operations
+```http
+POST   /api/scenes/{id}/story/batch        # Batch story operations
+```
+
+#### User Management
+```http
+GET    /api/users/{user_id}                # Get user profile
+PUT    /api/users/{user_id}                # Update user profile
+GET    /api/users/{user_id}/preferences    # Get user preferences
+PUT    /api/users/{user_id}/preferences    # Update user preferences
+```
+
+#### User Items and Skills Management
+```http
+# User Items
+GET    /api/users/{user_id}/items           # Get user items
+POST   /api/users/{user_id}/items           # Add user item
+GET    /api/users/{user_id}/items/{item_id} # Get specific item
+PUT    /api/users/{user_id}/items/{item_id} # Update user item
+DELETE /api/users/{user_id}/items/{item_id} # Delete user item
+
+# User Skills
+GET    /api/users/{user_id}/skills           # Get user skills
+POST   /api/users/{user_id}/skills           # Add user skill
+GET    /api/users/{user_id}/skills/{skill_id} # Get specific skill
+PUT    /api/users/{user_id}/skills/{skill_id} # Update user skill
+DELETE /api/users/{user_id}/skills/{skill_id} # Delete user skill
+```
+
+#### Configuration and Health Checks
+```http
+GET    /api/config/health                   # Get configuration health status
+GET    /api/config/metrics                  # Get configuration metrics
+GET    /api/settings                        # Get system settings
+POST   /api/settings                        # Update system settings
+POST   /api/settings/test-connection        # Test connection
+```
+
+#### WebSocket Management
+```http
+GET    /api/ws/status                       # Get WebSocket connection status
+POST   /api/ws/cleanup                      # Clean up expired WebSocket connections
 ```
 
 #### Text Analysis & File Upload
@@ -386,6 +486,17 @@ sceneWs.send(JSON.stringify({
     character_id: 'char123',
     message: 'Hello everyone!'
 }));
+
+// Send story choice
+sceneWs.send(JSON.stringify({
+    type: 'story_choice',
+    node_id: 'story_node_1',
+    choice_id: 'choice_a',
+    user_preferences: {
+        creativity_level: 'balanced',
+        allow_plot_twists: true
+    }
+}));
 ```
 
 #### User Status WebSocket
@@ -395,10 +506,49 @@ const statusWs = new WebSocket(`ws://localhost:8080/ws/user/status?user_id=user4
 
 statusWs.onmessage = (event) => {
     const data = JSON.parse(event.data);
-    if (data.type === 'heartbeat') {
-        console.log('Connection alive');
+    switch(data.type) {
+        case 'heartbeat':
+            console.log('Connection alive');
+            break;
+        case 'user_status_update':
+            console.log('User status changed:', data.status);
+            break;
+        case 'error':
+            console.error('WebSocket error:', data.error);
+            break;
+        default:
+            console.log('Received:', data);
     }
 };
+```
+
+#### Supported WebSocket Message Types
+- **character_interaction**: Character-to-character interactions
+- **story_choice**: Story decision-making events
+- **user_status_update**: User presence and status updates
+- **conversation:new**: New conversation events
+- **heartbeat**: Connection health checks
+- **pong**: Heartbeat response messages
+- **error**: Error notifications
+
+#### Client-Side Realtime Management
+The application uses RealtimeManager class for handling WebSocket communications:
+```javascript
+// Initialize scene realtime functionality
+await window.realtimeManager.initSceneRealtime('scene_123');
+
+// Send character interaction
+window.realtimeManager.sendCharacterInteraction('scene_123', 'character_456', 'Hello!');
+
+// Subscribe to story events
+window.realtimeManager.on('story:event', (data) => {
+    // Handle story updates
+    console.log('Story event:', data);
+});
+
+// Get connection status
+const status = window.realtimeManager.getConnectionStatus();
+console.log('WebSocket status:', status);
 ```
 
 ### 📊 **Response Formats**
@@ -507,6 +657,18 @@ go test ./internal/services/...
 - **CORS Configuration**: Secure cross-origin resource sharing configuration
 - **Input Validation**: Strict user input validation and sanitization
 
+### 🔐 Data Security & API Key Encryption
+
+- **AES-GCM Encryption**: API keys are securely encrypted using AES-GCM algorithm before storage
+- **Environment Variable Priority**: API keys are primarily loaded from environment variables (e.g., `OPENAI_API_KEY`) 
+- **Encrypted Storage**: When stored in configuration files, API keys are kept in encrypted form in `EncryptedLLMConfig` field
+- **Runtime Decryption**: API keys are decrypted only when needed for API calls
+- **Automatic Migration**: Legacy unencrypted API keys are automatically migrated to encrypted storage
+- **Secure Backward Compatibility**: The system handles transition from unencrypted to encrypted API key storage
+- **Configuration Security**: The encryption key should be set as `CONFIG_ENCRYPTION_KEY` environment variable for optimal security
+- **Fallback Protection**: Includes fallback mechanisms to prevent storing API keys as plain text
+- **Key Derivation**: In absence of environment-provided encryption keys, the system safely derives encryption keys from multiple entropy sources
+
 ## 🤝 Contributing
 
 We welcome all forms of contributions!
@@ -535,7 +697,7 @@ We welcome all forms of contributions!
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details
 
 ## 🙏 Acknowledgments
 
