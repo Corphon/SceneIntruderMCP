@@ -22,54 +22,99 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/app"
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
-	log.Println("🚀 启动 SceneIntruderMCP 服务器...")
+	// 初始化结构化日志
+	logFile := filepath.Join("logs", fmt.Sprintf("app_%s.log", time.Now().Format("2006-01-02")))
+	if err := utils.InitLogger(logFile); err != nil {
+		log.Printf("WARNING: 无法初始化结构化日志: %v", err)
+		log.Println("🚀 启动 SceneIntruderMCP 服务器...")
+	} else {
+		logger := utils.GetLogger()
+		logger.Info("SceneIntruderMCP server starting", nil)
+	}
 
 	// 1. 首先加载基础配置
 	baseConfig, err := config.Load()
 	if err != nil {
-		log.Fatalf("加载配置失败: %v", err)
+		utils.GetLogger().Fatal("Failed to load configuration", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
 	}
-	log.Printf("✅ 基础配置加载完成，端口: %s", baseConfig.Port)
+	utils.GetLogger().Info("Configuration loaded successfully", map[string]interface{}{
+		"port": baseConfig.Port,
+	})
 
 	// 2. 创建必要的目录
 	createDirectories(baseConfig)
-	log.Println("✅ 目录结构创建完成")
+	utils.GetLogger().Info("Directory structure created", nil)
 
 	// 3. 初始化配置系统
 	if err := config.InitConfig(baseConfig.DataDir); err != nil {
-		log.Fatalf("初始化配置系统失败: %v", err)
+		utils.GetLogger().Fatal("Failed to initialize configuration system", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
 	}
-	log.Println("✅ 配置系统初始化完成")
+	utils.GetLogger().Info("Configuration system initialized", nil)
 
 	// 4. 初始化依赖注入容器
 	container := di.GetContainer()
-	log.Printf("✅ 依赖注入容器初始化完成，服务数量: %d", len(container.GetNames()))
+	utils.GetLogger().Info("Dependency injection container initialized", map[string]interface{}{
+		"service_count": len(container.GetNames()),
+	})
 
 	// 5. 初始化所有服务（按依赖顺序）
 	if err := app.InitServices(); err != nil {
-		log.Fatalf("初始化服务失败: %v", err)
+		utils.GetLogger().Fatal("Failed to initialize services", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
 	}
-	log.Println("✅ 所有服务初始化完成")
+	utils.GetLogger().Info("All services initialized", nil)
 
 	// 6. 设置路由（只获取服务，不创建）
 	if err := performHealthCheck(); err != nil {
-		log.Printf("⚠️ 服务健康检查警告: %v", err)
+		utils.GetLogger().Warn("Service health check warning", map[string]interface{}{
+			"error": err.Error(),
+		})
 	}
 
 	router, err := api.SetupRouter()
 	if err != nil {
-		log.Fatalf("❌ 设置路由失败: %v", err)
+		utils.GetLogger().Fatal("Failed to setup router", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
 	}
-	log.Println("✅ 路由设置完成")
+	utils.GetLogger().Info("Router setup completed", nil)
+
+	// Start metrics collection in background
+	metrics := utils.NewAPIMetrics()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	metrics.StartMetricsCollection(ctx)
+
+	// Initialize authentication system
+	if err := api.InitializeAuth(); err != nil {
+		utils.GetLogger().Error("Failed to initialize authentication system", map[string]interface{}{
+			"error": err.Error(),
+		})
+		// Continue without auth for now (in production, this might be fatal)
+	} else {
+		utils.GetLogger().Info("Authentication system initialized", nil)
+	}
 
 	// 7. 启动服务器
-	log.Printf("🌐 服务器启动在端口 %s", baseConfig.Port)
-	log.Printf("🔗 访问地址: http://localhost:%s", baseConfig.Port)
-	log.Printf("🔗 设置页面: http://localhost:%s/settings", baseConfig.Port)
+	utils.GetLogger().Info("Server starting", map[string]interface{}{
+		"port": baseConfig.Port,
+		"url":  fmt.Sprintf("http://localhost:%s", baseConfig.Port),
+		"settings_url": fmt.Sprintf("http://localhost:%s/settings", baseConfig.Port),
+	})
 
 	setupGracefulShutdown(router, baseConfig.Port)
 }
