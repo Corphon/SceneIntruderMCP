@@ -139,6 +139,8 @@ func (s *ProgressService) StartAutoCleanup() {
 			select {
 			case <-s.cleanup.C:
 				s.CleanupCompletedTasks(30 * time.Minute)
+				// Also cleanup abandoned tasks that have been running too long (e.g., 2 hours)
+				s.CleanupAbandonedTrackers(2 * time.Hour)
 			case <-s.stopCleanup:
 				return
 			}
@@ -222,11 +224,15 @@ func (t *ProgressTracker) Unsubscribe(subscriber chan ProgressUpdate) {
 	if _, exists := t.Subscribers[subscriber]; exists {
 		delete(t.Subscribers, subscriber)
 
-		// 安全关闭通道
+		// 安全关闭通道 - only close if not already closed
 		select {
-		case <-subscriber:
-			// 通道已经关闭，不需要再次关闭
+		case _, ok := <-subscriber:
+			// Channel is already closed (ok will be false)
+			if !ok {
+				return
+			}
 		default:
+			// Channel is open, safe to close
 			close(subscriber)
 		}
 	}
@@ -263,6 +269,41 @@ func (s *ProgressService) CleanupCompletedTasks(maxAge time.Duration) {
 	}
 }
 
+// CleanupAbandonedTrackers 清理被遗弃的跟踪器（长时间未更新的运行中任务）
+func (s *ProgressService) CleanupAbandonedTrackers(maxAge time.Duration) {
+	now := time.Now()
+	var toDelete []string
+
+	// 第一阶段：只读取，避免嵌套锁
+	s.mutex.RLock()
+	for id, tracker := range s.trackers {
+		tracker.mutex.Lock()
+		isRunning := tracker.Status == "running"
+		isOld := now.Sub(tracker.UpdateTime) > maxAge
+		tracker.mutex.Unlock()
+
+		if isRunning && isOld {
+			// 标记为失败并将其加入删除列表
+			if t, exists := s.GetTracker(id); exists {
+				t.Fail("任务超时: 长时间未收到更新")
+			}
+			toDelete = append(toDelete, id)
+		}
+	}
+	s.mutex.RUnlock()
+
+	// 第二阶段：批量删除
+	if len(toDelete) > 0 {
+		s.mutex.Lock()
+		for _, id := range toDelete {
+			delete(s.trackers, id)
+		}
+		s.mutex.Unlock()
+
+		log.Printf("🧹 进度服务清理: 清理了 %d 个被遗弃的任务", len(toDelete))
+	}
+}
+
 // 提取通用通知方法
 func (t *ProgressTracker) notifySubscribers(update ProgressUpdate, closeChannels bool) {
 	droppedCount := 0
@@ -275,7 +316,17 @@ func (t *ProgressTracker) notifySubscribers(update ProgressUpdate, closeChannels
 		}
 
 		if closeChannels {
-			close(subscriber)
+			// Only close if not already closed
+			select {
+			case _, ok := <-subscriber:
+				// Channel already closed
+				if !ok {
+					continue
+				}
+			default:
+				// Channel is open, safe to close
+				close(subscriber)
+			}
 		}
 	}
 
