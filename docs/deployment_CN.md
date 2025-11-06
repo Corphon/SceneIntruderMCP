@@ -75,7 +75,6 @@ export DEBUG_MODE=true
 ```json
 {
   "port": "8080",
-  "openai_api_key": "your-api-key",
   "data_dir": "data",
   "static_dir": "static",
   "templates_dir": "web/templates",
@@ -83,11 +82,15 @@ export DEBUG_MODE=true
   "debug_mode": true,
   "llm_provider": "openai",
   "llm_config": {
-    "api_key": "your-openai-api-key",
     "default_model": "gpt-4o"
+  },
+  "encrypted_llm_config": {
+    "api_key": "<encrypted_api_key_here>"  // API 密钥在存储时会被加密
   }
 }
 ```
+
+**注意**: API 密钥在存储时会被加密，运行时仅在需要进行 API 调用时解密。
 
 ### 3. 启动开发服务器
 
@@ -459,7 +462,17 @@ RATE_LIMIT_ENABLED=true
 
 ## 🔐 安全配置
 
-### 1. Nginx 反向代理
+### 1. API 密钥加密
+
+该应用程序实现了 AES-GCM 加密来保护 API 密钥，确保传输和存储安全：
+- **AES-GCM 加密**: API 密钥在存储前使用 AES-GCM 算法安全加密
+- **环境变量优先**: API 密钥主要从环境变量加载（例如，`OPENAI_API_KEY`）
+- **加密存储**: 在配置文件中存储时，API 密钥保存在 `encrypted_llm_config` 字段的加密形式
+- **运行时解密**: API 密钥仅在需要进行 API 调用时解密
+- **自动迁移**: 遗留的未加密 API 密钥自动迁移到加密存储
+- **配置安全**: 加密密钥应设为 `CONFIG_ENCRYPTION_KEY` 环境变量以获得最佳安全性
+
+### 2. Nginx 反向代理
 
 ```nginx
 # /etc/nginx/sites-available/sceneintruder
