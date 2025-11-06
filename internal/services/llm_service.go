@@ -325,11 +325,10 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 
 	// 检查缓存
 	if s.cache != nil {
-		if cachedResponse, found := s.cache.getFromCache(cacheKey); found {
-			if resp, ok := cachedResponse.(ChatCompletionResponse); ok {
-				log.Printf("DEBUG:LLM聊天缓存命中: %s", cacheKey[:8])
-				return resp, nil
-			}
+		var cachedResult ChatCompletionResponse
+		if s.checkAndUseCache(cacheKey, &cachedResult) {
+			log.Printf("DEBUG:LLM聊天缓存命中: %s", cacheKey[:8])
+			return cachedResult, nil
 		}
 	}
 
@@ -370,7 +369,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 
 	// 保存到缓存
 	if s.cache != nil {
-		s.cache.saveToCache(cacheKey, result)
+		s.saveToCache(cacheKey, result)
 		log.Printf("DEBUG:保存到LLM聊天缓存: %s", cacheKey[:8])
 	}
 
@@ -1100,7 +1099,18 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 	}
 
 	if cachedResponse, found := s.cache.getFromCache(cacheKey); found {
-		// 尝试类型转换
+		// 直接将缓存响应作为 JSON 字节处理
+		if responseBytes, ok := cachedResponse.([]byte); ok {
+			if outputSchema != nil {
+				// 尝试将缓存的 JSON 字节反序列化到输出结构
+				err := json.Unmarshal(responseBytes, outputSchema)
+				if err == nil {
+					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+					return true
+				}
+			}
+		}
+		// 如果缓存项不是字节切片，则尝试其他类型转换（向后兼容）
 		if resp, ok := cachedResponse.(ChatCompletionResponse); ok {
 			if outputSchema != nil {
 				// 对于结构化输出，尝试 JSON 转换
@@ -1140,7 +1150,15 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 // 统一的缓存保存方法
 func (s *LLMService) saveToCache(cacheKey string, response interface{}) {
 	if s.cache != nil {
-		s.cache.saveToCache(cacheKey, response)
+		// 总是将响应序列化为JSON字节存储，以确保一致的类型处理
+		responseBytes, err := json.Marshal(response)
+		if err != nil {
+			log.Printf("ERROR:序列化缓存响应失败: %v", err)
+			// 仍然尝试保存原始响应以向后兼容
+			s.cache.saveToCache(cacheKey, response)
+		} else {
+			s.cache.saveToCache(cacheKey, responseBytes)
+		}
 		log.Printf("DEBUG:保存到LLM缓存: %s", cacheKey[:8])
 	}
 }
