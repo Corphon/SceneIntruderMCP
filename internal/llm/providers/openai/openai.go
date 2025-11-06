@@ -20,10 +20,9 @@ func init() {
 		return &Provider{
 			recommendedModels: []string{
 				"gpt-4o",
-				"o3-mini",
-				"gpt-4.5",
-				"o1",
-				"o1-mini",
+				"gpt-oss-120b",
+				"gpt-5-chat",
+				"gpt-4.1",
 			},
 			baseURL: "https://api.openai.com/v1",
 		}
@@ -338,8 +337,11 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 
 	// 检查错误
 	if httpResp.StatusCode != http.StatusOK {
-		httpResp.Body.Close()
-		body, _ := io.ReadAll(httpResp.Body)
+		body, readErr := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close() // Close the body after reading
+		if readErr != nil {
+			return nil, fmt.Errorf("OpenAI API错误(%d), 读取响应失败: %v", httpResp.StatusCode, readErr)
+		}
 		return nil, fmt.Errorf("OpenAI API错误(%d): %s", httpResp.StatusCode, string(body))
 	}
 
