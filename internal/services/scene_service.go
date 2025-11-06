@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,11 +33,12 @@ type SceneService struct {
 	ItemService *ItemService
 
 	// 并发控制
-	sceneLocks  sync.Map // sceneID -> *sync.RWMutex
-	cacheMutex  sync.RWMutex
-	sceneCache  map[string]*CachedSceneData
-	listCache   *CachedSceneList
-	cacheExpiry time.Duration
+	sceneLocks   sync.Map // sceneID -> *sync.RWMutex
+	cacheMutex   sync.RWMutex
+	sceneCache   map[string]*CachedSceneData
+	listCache    *CachedSceneList
+	cacheExpiry  time.Duration
+	maxCacheSize int // Maximum number of cached scenes
 }
 
 // CachedSceneList 缓存的场景列表
@@ -71,10 +73,11 @@ func NewSceneService(basePath string) *SceneService {
 	}
 
 	service := &SceneService{
-		BasePath:    basePath,
-		FileCache:   fileStorage,
-		sceneCache:  make(map[string]*CachedSceneData),
-		cacheExpiry: 5 * time.Minute,
+		BasePath:     basePath,
+		FileCache:    fileStorage,
+		sceneCache:   make(map[string]*CachedSceneData),
+		cacheExpiry:  5 * time.Minute,
+		maxCacheSize: 100, // Default to 100 cached scenes
 	}
 
 	// 启动缓存清理
@@ -90,7 +93,7 @@ func (s *SceneService) getSceneLock(sceneID string) *sync.RWMutex {
 }
 
 // 线程安全的场景创建
-func (s *SceneService) CreateScene(title, description, era, theme string) (*models.Scene, error) {
+func (s *SceneService) CreateScene(userID, title, description, era, theme string) (*models.Scene, error) {
 	// 验证输入参数
 	if strings.TrimSpace(title) == "" {
 		return nil, fmt.Errorf("场景标题不能为空")
@@ -127,6 +130,7 @@ func (s *SceneService) CreateScene(title, description, era, theme string) (*mode
 	// 创建场景对象
 	scene := &models.Scene{
 		ID:          sceneID,
+		UserID:      userID,
 		Title:       title,
 		Description: description,
 		Era:         era,
@@ -180,6 +184,7 @@ func (s *SceneService) CreateScene(title, description, era, theme string) (*mode
 	// 初始化场景设置
 	settings := models.SceneSettings{
 		SceneID:     sceneID,
+		UserID:      userID,
 		LastUpdated: time.Now(),
 	}
 
@@ -236,8 +241,45 @@ func (s *SceneService) startCacheCleanup() {
 
 		for range ticker.C {
 			s.cleanupExpiredCache()
+			s.enforceMaxCacheSize()
 		}
 	}()
+}
+
+// enforceMaxCacheSize enforces the maximum cache size by removing oldest entries
+func (s *SceneService) enforceMaxCacheSize() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	// Check if cache size exceeds maximum
+	if len(s.sceneCache) <= s.maxCacheSize {
+		return
+	}
+
+	// Find oldest entries to remove
+	type cacheEntryWithTime struct {
+		key       string
+		timestamp time.Time
+	}
+
+	var entries []cacheEntryWithTime
+	for key, entry := range s.sceneCache {
+		entries = append(entries, cacheEntryWithTime{key: key, timestamp: entry.Timestamp})
+	}
+
+	// Sort by timestamp (oldest first)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].timestamp.Before(entries[j].timestamp)
+	})
+
+	// Remove excess entries
+	removeCount := len(entries) - s.maxCacheSize
+	if removeCount > 0 {
+		for i := 0; i < removeCount; i++ {
+			delete(s.sceneCache, entries[i].key)
+		}
+		log.Printf("场景服务缓存大小限制执行: 移除了 %d 个最旧的缓存条目", removeCount)
+	}
 }
 
 // 生成唯一场景ID
@@ -458,17 +500,36 @@ func (s *SceneService) DeleteCharacter(sceneID, characterID string) error {
 	lock.Lock()
 	defer lock.Unlock()
 
-	// 构建角色文件路径
-	characterPath := filepath.Join(s.BasePath, sceneID, "characters", characterID+".json")
+	// 检查文件存储服务是否初始化
+	if s.FileCache == nil {
+		// Fallback to direct file operation if FileCache is not available
+		characterDirPath := filepath.Join(s.BasePath, sceneID, "characters")
+		characterFilePath := filepath.Join(characterDirPath, characterID+".json")
 
-	// 检查角色文件是否存在
-	if _, err := os.Stat(characterPath); os.IsNotExist(err) {
-		return fmt.Errorf("角色不存在: %s", characterID)
-	}
+		// 检查角色文件是否存在
+		if _, err := os.Stat(characterFilePath); os.IsNotExist(err) {
+			return fmt.Errorf("角色不存在: %s", characterID)
+		}
 
-	// 删除角色文件
-	if err := os.Remove(characterPath); err != nil {
-		return fmt.Errorf("删除角色文件失败: %w", err)
+		// 删除角色文件
+		if err := os.Remove(characterFilePath); err != nil {
+			return fmt.Errorf("删除角色文件失败: %w", err)
+		}
+	} else {
+		// Use FileCache DeleteFile method
+		characterDir := filepath.Join(sceneID, "characters")
+		characterFile := characterID + ".json"
+
+		// First check if file exists by trying to load it
+		var existingCharacter models.Character
+		if err := s.FileCache.LoadJSONFile(characterDir, characterFile, &existingCharacter); err != nil {
+			return fmt.Errorf("角色不存在: %s", characterID)
+		}
+
+		// Delete the file using FileCache
+		if err := s.FileCache.DeleteFile(characterDir, characterFile); err != nil {
+			return fmt.Errorf("删除角色文件失败: %w", err)
+		}
 	}
 
 	// 清除场景缓存
@@ -541,12 +602,17 @@ func (s *SceneService) UpdateCharacter(sceneID, characterID string, character *m
 	lock.Lock()
 	defer lock.Unlock()
 
-	// 构建角色文件路径
-	charactersDir := filepath.Join(s.BasePath, sceneID, "characters")
-	characterPath := filepath.Join(charactersDir, characterID+".json")
+	// 检查文件存储服务是否初始化
+	if s.FileCache == nil {
+		return fmt.Errorf("文件存储服务未初始化")
+	}
 
-	// 检查角色文件是否存在
-	if _, err := os.Stat(characterPath); os.IsNotExist(err) {
+	// 检查角色文件是否存在 by loading it first
+	characterDir := filepath.Join(sceneID, "characters")
+	characterFile := characterID + ".json"
+
+	var existingCharacter models.Character
+	if err := s.FileCache.LoadJSONFile(characterDir, characterFile, &existingCharacter); err != nil {
 		return fmt.Errorf("角色不存在: %s", characterID)
 	}
 
@@ -555,23 +621,8 @@ func (s *SceneService) UpdateCharacter(sceneID, characterID string, character *m
 	character.SceneID = sceneID
 	character.LastUpdated = time.Now()
 
-	// 序列化角色数据
-	characterDataJSON, err := json.MarshalIndent(character, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化角色数据失败: %w", err)
-	}
-
-	// 原子性文件写入
-	tempPath := characterPath + ".tmp"
-
-	// 先写入临时文件
-	if err := os.WriteFile(tempPath, characterDataJSON, 0644); err != nil {
-		return fmt.Errorf("保存角色数据失败: %w", err)
-	}
-
-	// 原子性重命名
-	if err := os.Rename(tempPath, characterPath); err != nil {
-		os.Remove(tempPath) // 清理临时文件
+	// 使用 FileStorage 保存更新后的角色数据
+	if err := s.FileCache.SaveJSONFile(characterDir, characterFile, character); err != nil {
 		return fmt.Errorf("保存角色数据失败: %w", err)
 	}
 
@@ -647,7 +698,7 @@ func (s *SceneService) GetAllScenes() ([]models.Scene, error) {
 }
 
 // CreateSceneFromText 从文本创建新场景
-func (s *SceneService) CreateSceneFromText(text, title string) (*models.Scene, error) {
+func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.Scene, error) {
 	// 检查参数有效性
 	if text == "" || title == "" {
 		return nil, fmt.Errorf("文本和标题不能为空")
@@ -708,6 +759,7 @@ func (s *SceneService) CreateSceneFromText(text, title string) (*models.Scene, e
 	// 创建场景对象
 	scene := &models.Scene{
 		ID:          sceneID,
+		UserID:      userID,
 		Title:       title,
 		Description: description,
 		Era:         era,
@@ -804,21 +856,34 @@ func (s *SceneService) CreateSceneFromText(text, title string) (*models.Scene, e
 
 // CreateSceneWithCharacters 创建带有角色的场景
 func (s *SceneService) CreateSceneWithCharacters(scene *models.Scene, characters []models.Character) error {
-	// 创建场景目录
-	scenePath := filepath.Join(s.BasePath, scene.ID)
-	if err := os.MkdirAll(scenePath, 0755); err != nil {
-		return fmt.Errorf("创建场景目录失败: %w", err)
-	}
+	// 使用 FileStorage 保存场景数据
+	if s.FileCache != nil {
+		if err := s.FileCache.SaveJSONFile(scene.ID, "scene.json", scene); err != nil {
+			return fmt.Errorf("保存场景数据失败: %w", err)
+		}
+	} else {
+		// 降级到直接文件操作
+		scenePath := filepath.Join(s.BasePath, scene.ID)
+		if err := os.MkdirAll(scenePath, 0755); err != nil {
+			return fmt.Errorf("创建场景目录失败: %w", err)
+		}
 
-	// 保存场景数据
-	sceneDataJSON, err := json.MarshalIndent(scene, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化场景数据失败: %w", err)
-	}
+		sceneDataJSON, err := json.MarshalIndent(scene, "", "  ")
+		if err != nil {
+			return fmt.Errorf("序列化场景数据失败: %w", err)
+		}
 
-	sceneFilePath := filepath.Join(scenePath, "scene.json")
-	if err := os.WriteFile(sceneFilePath, sceneDataJSON, 0644); err != nil {
-		return fmt.Errorf("保存场景数据失败: %w", err)
+		sceneFilePath := filepath.Join(scenePath, "scene.json")
+		tempPath := sceneFilePath + ".tmp"
+
+		if err := os.WriteFile(tempPath, sceneDataJSON, 0644); err != nil {
+			return fmt.Errorf("保存场景文件失败: %w", err)
+		}
+
+		if err := os.Rename(tempPath, sceneFilePath); err != nil {
+			os.Remove(tempPath)
+			return fmt.Errorf("保存场景文件失败: %w", err)
+		}
 	}
 
 	// 初始化上下文
@@ -835,6 +900,7 @@ func (s *SceneService) CreateSceneWithCharacters(scene *models.Scene, characters
 	// 初始化设置
 	settings := models.SceneSettings{
 		SceneID:     scene.ID,
+		UserID:      scene.UserID, // Use the scene's UserID if available
 		LastUpdated: time.Now(),
 	}
 
@@ -842,13 +908,7 @@ func (s *SceneService) CreateSceneWithCharacters(scene *models.Scene, characters
 		return fmt.Errorf("初始化场景设置失败: %w", err)
 	}
 
-	// 创建角色目录
-	charactersDir := filepath.Join(scenePath, "characters")
-	if err := os.MkdirAll(charactersDir, 0755); err != nil {
-		return fmt.Errorf("创建角色目录失败: %w", err)
-	}
-
-	// 保存角色数据
+	// 保存角色数据 using FileStorage
 	for i, character := range characters {
 		// 确保每个角色都有ID
 		if character.ID == "" {
@@ -856,16 +916,30 @@ func (s *SceneService) CreateSceneWithCharacters(scene *models.Scene, characters
 		}
 		character.SceneID = scene.ID
 
-		// 序列化角色数据
-		charDataJSON, err := json.MarshalIndent(character, "", "  ")
-		if err != nil {
-			return fmt.Errorf("序列化角色数据失败: %w", err)
-		}
+		// 使用 FileStorage 保存角色数据
+		characterDir := filepath.Join(scene.ID, "characters")
+		characterFile := character.ID + ".json"
 
-		// 保存角色数据文件
-		charPath := filepath.Join(charactersDir, character.ID+".json")
-		if err := os.WriteFile(charPath, charDataJSON, 0644); err != nil {
-			return fmt.Errorf("保存角色数据失败: %w", err)
+		if s.FileCache != nil {
+			if err := s.FileCache.SaveJSONFile(characterDir, characterFile, &character); err != nil {
+				return fmt.Errorf("保存角色数据失败: %w", err)
+			}
+		} else {
+			// 降级到直接文件操作
+			charactersDir := filepath.Join(s.BasePath, scene.ID, "characters")
+			if err := os.MkdirAll(charactersDir, 0755); err != nil {
+				return fmt.Errorf("创建角色目录失败: %w", err)
+			}
+
+			charDataJSON, err := json.MarshalIndent(character, "", "  ")
+			if err != nil {
+				return fmt.Errorf("序列化角色数据失败: %w", err)
+			}
+
+			charPath := filepath.Join(charactersDir, character.ID+".json")
+			if err := os.WriteFile(charPath, charDataJSON, 0644); err != nil {
+				return fmt.Errorf("保存角色数据失败: %w", err)
+			}
 		}
 	}
 
