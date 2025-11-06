@@ -2233,15 +2233,14 @@ body {
   font-size: 1.25rem;
 }
 
-  .item-card,
-  .skill-card {
+.item-card,.skill-card {
     margin-bottom: var(--space-3);
-  }
-
-  .user-stats .stat-value {
-    font-size: 1.25rem;
-  }
 }
+
+.user-stats .stat-value {
+    font-size: 1.25rem;
+}
+
 
 /* ========================================
      深色模式支持（预留）
