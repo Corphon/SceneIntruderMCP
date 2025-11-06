@@ -89,7 +89,8 @@ func (s *ExportService) loadSceneDataSafe(sceneID string, includeConversations, 
 	if includeConversations {
 		conversations, err := s.getInteractionHistory(sceneID)
 		if err != nil {
-			// 对话加载失败不阻止导出
+			// 对话加载失败不阻止导出，但记录详细错误信息
+			fmt.Printf("⚠️ 导出服务: 加载场景 %s 的对话历史失败(缓存加载): %v\n", sceneID, err)
 			conversations = []models.Conversation{}
 		}
 		cached.Conversations = conversations
@@ -3967,7 +3968,8 @@ func (s *ExportService) ExportSceneData(ctx context.Context, sceneID string, for
 	if includeConversations {
 		conversations, err = s.getInteractionHistory(sceneID)
 		if err != nil {
-			// 对话获取失败不阻止导出，仅记录日志
+			// 对话获取失败不阻止导出，但记录详细错误信息
+			fmt.Printf("⚠️ 导出服务: 加载场景 %s 的对话历史失败: %v\n", sceneID, err)
 			conversations = []models.Conversation{}
 		}
 	}
