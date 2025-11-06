@@ -39,11 +39,11 @@
                         <p class="text-muted mb-0">管理你的道具、技能和成就</p>
                     </div>
                     <div class="profile-actions">
-                        <button type="button" class="btn btn-outline-primary refresh-profile-btn">
+                        <button type="button" class="btn btn-outline-primary refresh-profile-btn" aria-label="刷新用户档案">
                             <i class="bi bi-arrow-clockwise"></i>
                             刷新
                         </button>
-                        <button type="button" class="btn btn-outline-secondary export-data-btn" data-type="profile">
+                        <button type="button" class="btn btn-outline-secondary export-data-btn" data-type="profile" aria-label="导出数据">
                             <i class="bi bi-download"></i>
                             导出
                         </button>
@@ -122,7 +122,7 @@
                                 <!-- 道具筛选 -->
                                 <div class="row mb-3">
                                     <div class="col-md-6">
-                                        <select class="form-select form-select-sm" id="item-category-filter">
+                                        <select class="form-select form-select-sm" id="item-category-filter" title="选择道具类别">
                                             <option value="">所有类别</option>
                                             <option value="weapon">武器</option>
                                             <option value="armor">防具</option>
@@ -135,7 +135,7 @@
                                         </select>
                                     </div>
                                     <div class="col-md-6">
-                                        <select class="form-select form-select-sm" id="item-rarity-filter">
+                                        <select class="form-select form-select-sm" id="item-rarity-filter" title="选择道具稀有度">
                                             <option value="">所有稀有度</option>
                                             <option value="common">普通</option>
                                             <option value="uncommon">不常见</option>
@@ -169,7 +169,7 @@
                                 <!-- 技能筛选 -->
                                 <div class="row mb-3">
                                     <div class="col-md-6">
-                                        <select class="form-select form-select-sm" id="skill-category-filter">
+                                        <select class="form-select form-select-sm" id="skill-category-filter" title="选择技能类别">
                                             <option value="">所有类别</option>
                                             <option value="combat">战斗</option>
                                             <option value="magic">魔法</option>
@@ -220,7 +220,7 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title">添加新道具</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="添加新道具"></button>
                 </div>
                 <div class="modal-body">
                     <form id="addItemForm">
@@ -291,7 +291,7 @@
             <div class="modal-content">
                 <div class="modal-header">
                     <h5 class="modal-title">添加新技能</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="添加新技能"></button>
                 </div>
                 <div class="modal-body">
                     <form id="addSkillForm">
