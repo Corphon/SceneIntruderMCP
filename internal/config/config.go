@@ -53,26 +53,33 @@ type Config struct {
 }
 
 // generateEncryptionKey generates a secure encryption key
+// Only displays warning once during initialization
+var encryptionKeyWarningShown = false
+
 func generateEncryptionKey() string {
 	key := getEnv("CONFIG_ENCRYPTION_KEY", "")
 	if key == "" {
-		// In production, this should be a fatal error rather than using a default key
-		log.Println("警告: 未设置 CONFIG_ENCRYPTION_KEY 环境变量。")
-		log.Println("建议: 在生产环境中设置一个安全的32字符加密密钥")
-		
+		// Only show warning once
+		if !encryptionKeyWarningShown {
+			// In production, this should be a fatal error rather than using a default key
+			log.Println("⚠️ 警告: 未设置 CONFIG_ENCRYPTION_KEY 环境变量")
+			log.Println("💡 建议: 在生产环境中设置一个安全的32字符加密密钥")
+			encryptionKeyWarningShown = true
+		}
+
 		// For development only, we'll warn and use a default, but in production this should be an error
 		if getEnv("DEBUG_MODE", "true") == "true" {
 			key = "SceneIntruderMCP_default_encryption_key_32_chars!"
 		} else {
-			log.Fatal("生产环境中必须设置 CONFIG_ENCRYPTION_KEY 环境变量")
+			log.Fatal("❌ 生产环境中必须设置 CONFIG_ENCRYPTION_KEY 环境变量")
 		}
 	}
-	
+
 	// Validate key length
 	if len(key) < 32 {
-		log.Fatalf("加密密钥长度不足。请使用至少32字符的密钥")
+		log.Fatalf("❌ 加密密钥长度不足。请使用至少32字符的密钥")
 	}
-	
+
 	return key
 }
 
@@ -95,10 +102,10 @@ func Load() (*Config, error) {
 		DebugMode:    getEnvBool("DEBUG_MODE", true),
 	}
 
-	// 验证OpenAI API密钥
+	// 验证OpenAI API密钥 (这是可选的，可以通过设置页面配置)
 	if config.OpenAIAPIKey == "" {
-		// 只记录警告，不返回错误
-		log.Println("警告: 未设置OpenAI API密钥，将需要在设置页面中配置才能使用LLM功能")
+		// 只记录提示信息，不是警告 - 因为用户可以通过页面配置
+		log.Println("💡 提示: 可通过设置页面配置LLM API密钥以使用AI功能")
 	}
 
 	return config, nil
@@ -163,7 +170,11 @@ func (c *AppConfig) getDecryptedAPIKey() string {
 			if err == nil {
 				return decryptedKey
 			}
-			log.Printf("警告: 无法解密API密钥: %v", err)
+			// Decryption failed - likely due to changed encryption key
+			// Clear the invalid encrypted key and fall back to unencrypted config
+			log.Printf("⚠️ 警告: 无法解密已保存的API密钥(可能是加密密钥已变更)")
+			log.Printf("💡 提示: 请在设置页面重新配置API密钥")
+			delete(c.EncryptedLLMConfig, "api_key")
 		}
 	}
 	// For backward compatibility, check the unencrypted config
@@ -242,7 +253,7 @@ func InitConfig(dataDir string) error {
 	if baseConfig.OpenAIAPIKey != "" {
 		err := currentConfig.setEncryptedAPIKey(baseConfig.OpenAIAPIKey)
 		if err != nil {
-			log.Printf("警告: 无法加密API密钥: %v", err)
+			log.Printf("⚠️ 警告: 无法加密环境变量中的API密钥: %v", err)
 		}
 	}
 
@@ -267,7 +278,10 @@ func InitConfig(dataDir string) error {
 						// Set the encrypted version and clear the unencrypted one
 						err := savedConfig.setEncryptedAPIKey(apiKey)
 						if err != nil {
-							log.Printf("警告: 无法加密从旧配置中发现的API密钥: %v", err)
+							log.Printf("⚠️ 警告: 无法加密旧配置中的API密钥: %v", err)
+							log.Printf("💡 建议: 请通过设置页面重新配置API密钥")
+						} else {
+							log.Println("✅ 已自动将旧配置中的API密钥升级为加密存储")
 						}
 						// Remove api_key from the unencrypted config
 						delete(savedConfig.LLMConfig, "api_key")
