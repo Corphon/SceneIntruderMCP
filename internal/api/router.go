@@ -255,9 +255,6 @@ func SetupRouter() (*gin.Engine, error) {
 			}
 		}
 
-		// 调试路由
-		api.GET("/ws/status", AuthMiddleware(), handler.GetWebSocketStatus)
-
 		// WebSocket 管理路由
 		wsGroup := api.Group("/ws")
 		{
