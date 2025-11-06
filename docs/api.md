@@ -129,6 +129,9 @@ GET    /api/scenes/{id}/story/branches  # Get story branches
 GET    /api/scenes/{id}/export/scene        # Export scene data
 GET    /api/scenes/{id}/export/interactions # Export interactions
 GET    /api/scenes/{id}/export/story        # Export story document
+GET    /api/scenes/{id}/export/conversations # Export conversation history (NEW)
+GET    /api/scenes/{id}/export/characters   # Export character data (NEW)
+GET    /api/scenes/{id}/export/aggregate    # Export all scene data (NEW)
 ```
 
 #### Character Interaction
@@ -151,6 +154,37 @@ POST   /api/settings/test-connection    # Test connection
 GET    /api/llm/status                  # Get LLM service status (NEW)
 GET    /api/llm/models                  # Get available models (NEW)
 PUT    /api/llm/config                  # Update LLM configuration (NEW)
+```
+
+#### Interaction Aggregation
+```http
+POST   /api/interactions/aggregate      # Process aggregated interactions
+GET    /api/interactions/{scene_id}     # Get character interactions
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # Get specific character interactions
+```
+
+#### Scene Aggregation
+```http
+GET    /api/scenes/{id}/aggregate       # Get comprehensive scene data with options
+```
+
+#### Batch Operations
+```http
+POST   /api/scenes/{id}/story/batch      # Batch story operations
+```
+
+#### Configuration and Health Checks
+```http
+GET    /api/config/health                # Get configuration health status
+GET    /api/config/metrics               # Get configuration metrics
+GET    /api/config/models                # Get available models from providers
+POST   /api/config/test-connection       # Test provider connection
+```
+
+#### WebSocket Management
+```http
+GET    /api/ws/status                    # Get WebSocket connection status
+POST   /api/ws/cleanup                   # Clean up expired WebSocket connections
 ```
 
 #### User Management System
