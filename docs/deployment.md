@@ -75,14 +75,22 @@ export DEBUG_MODE=true
 ```json
 {
   "port": "8080",
-  "openai_api_key": "your-api-key",
+  "data_dir": "data",
+  "static_dir": "static",
+  "templates_dir": "web/templates",
+  "log_dir": "logs",
+  "debug_mode": true,
   "llm_provider": "openai",
   "llm_config": {
-    "api_key": "your-openai-api-key",
     "default_model": "gpt-4o"
+  },
+  "encrypted_llm_config": {
+    "api_key": "<encrypted_api_key_here>"  // API Key will be encrypted when stored
   }
 }
 ```
+
+**Note**: API keys are encrypted when stored in the configuration file for security. During runtime, they are decrypted only when needed for API calls.
 
 ### 3. Start Development Server
 
@@ -457,7 +465,17 @@ RATE_LIMIT_ENABLED=true
 
 ## 🔐 Security Configuration
 
-### 1. Nginx Reverse Proxy
+### 1. API Key Encryption
+
+The application implements AES-GCM encryption to protect API keys both in transit and at rest:
+- **AES-GCM Encryption**: API keys are securely encrypted using AES-GCM algorithm before storage
+- **Environment Priority**: API keys are primarily loaded from environment variables (e.g., `OPENAI_API_KEY`) 
+- **Encrypted Storage**: When stored in configuration files, API keys are kept in encrypted form in `encrypted_llm_config` field
+- **Runtime Decryption**: API keys are decrypted only when needed for API calls
+- **Automatic Migration**: Legacy unencrypted API keys are automatically migrated to encrypted storage
+- **Configuration Security**: The encryption key should be set as `CONFIG_ENCRYPTION_KEY` environment variable for optimal security
+
+### 2. Nginx Reverse Proxy
 
 ```nginx
 # /etc/nginx/sites-available/sceneintruder
