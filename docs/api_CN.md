@@ -131,6 +131,9 @@ GET    /api/scenes/{id}/story/branches  # 获取故事分支
 GET    /api/scenes/{id}/export/scene        # 导出场景数据
 GET    /api/scenes/{id}/export/interactions # 导出互动记录
 GET    /api/scenes/{id}/export/story        # 导出故事文档
+GET    /api/scenes/{id}/export/conversations # 导出对话历史 (新增)
+GET    /api/scenes/{id}/export/characters   # 导出角色数据 (新增)
+GET    /api/scenes/{id}/export/aggregate    # 导出所有场景数据 (新增)
 ```
 
 #### 角色互动
@@ -153,6 +156,37 @@ POST   /api/settings/test-connection    # 测试连接
 GET    /api/llm/status                  # 获取 LLM 服务状态
 GET    /api/llm/models                  # 获取可用模型
 PUT    /api/llm/config                  # 更新 LLM 配置
+```
+
+#### 互动聚合
+```http
+POST   /api/interactions/aggregate      # 处理聚合互动
+GET    /api/interactions/{scene_id}     # 获取角色互动
+GET    /api/interactions/{scene_id}/{character1_id}/{character2_id} # 获取特定角色间互动
+```
+
+#### 场景聚合
+```http
+GET    /api/scenes/{id}/aggregate       # 获取综合场景数据（含选项）
+```
+
+#### 批量操作
+```http
+POST   /api/scenes/{id}/story/batch      # 批量故事操作
+```
+
+#### 配置与健康检查
+```http
+GET    /api/config/health                # 获取配置健康状态
+GET    /api/config/metrics               # 获取配置指标
+GET    /api/config/models                # 获取提供商的可用模型
+POST   /api/config/test-connection       # 测试提供商连接
+```
+
+#### WebSocket 管理
+```http
+GET    /api/ws/status                    # 获取 WebSocket 连接状态
+POST   /api/ws/cleanup                   # 清理过期 WebSocket 连接
 ```
 
 #### 用户管理系统
