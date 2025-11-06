@@ -3227,24 +3227,6 @@ class UserProfile {
 // ========================================
 
 /**
- * 显示添加道具模态框
- */
-function showAddItemModal() {
-    if (window.userProfile) {
-        window.userProfile.showModal('addItemModal');
-    }
-}
-
-/**
- * 显示添加技能模态框
- */
-function showAddSkillModal() {
-    if (window.userProfile) {
-        window.userProfile.showModal('addSkillModal');
-    }
-}
-
-/**
  * 全局函数：显示添加道具模态框
  */
 function showAddItemModal() {
