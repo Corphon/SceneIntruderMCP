@@ -42,6 +42,7 @@ type UserPreferences struct {
 	NotificationLevel string          `json:"notification_level"`        // 通知级别: none, important, all
 	DarkMode          bool            `json:"dark_mode"`                 // 暗色模式
 	PreferredModel    string          `json:"preferred_model,omitempty"` // 首选LLM模型
+	AutoSave          bool            `json:"auto_save"`
 }
 
 // 在现有结构前添加新的道具和技能数据结构
