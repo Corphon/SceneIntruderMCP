@@ -792,9 +792,21 @@ func (s *CharacterService) GenerateCharacterInteraction(
 			if char, ok := characterMap[dialogues[i].CharacterName]; ok {
 				dialogues[i].CharacterID = char.ID
 			} else {
-				// 使用角色名的首字母+时间戳作为临时ID
-				tempID := fmt.Sprintf("%s_%d", string(dialogues[i].CharacterName[0]), time.Now().UnixNano())
-				dialogues[i].CharacterID = tempID
+				// Try to find character by partial name match (case-insensitive)
+				found := false
+				for name, char := range characterMap {
+					if strings.EqualFold(name, dialogues[i].CharacterName) {
+						dialogues[i].CharacterID = char.ID
+						found = true
+						break
+					}
+				}
+				
+				if !found {
+					return nil, fmt.Errorf("无法找到匹配的角色: %s，可用角色: %v", 
+						dialogues[i].CharacterName, 
+						getCharacterNames(characters))
+				}
 			}
 		}
 
@@ -1130,6 +1142,15 @@ func (s *CharacterService) InvalidateSceneCache(sceneID string) {
 	defer s.cacheMutex.Unlock()
 
 	delete(s.sceneCache, sceneID)
+}
+
+// getCharacterNames extracts names from character slice for error reporting
+func getCharacterNames(characters []*models.Character) []string {
+	names := make([]string, len(characters))
+	for i, char := range characters {
+		names[i] = char.Name
+	}
+	return names
 }
 
 // 优雅关闭方法
