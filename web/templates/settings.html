@@ -62,19 +62,20 @@
                             </div>
                         </div>
 
-                        <!-- 修正：使用单一的模型选择字段 -->
+                        <!-- 修正：使用单一的模型选择字段 - 支持选择和手动输入 -->
                         <div class="mb-3">
                             <label for="model-select" class="form-label">模型选择</label>
                             <div class="input-group">
-                                <select class="form-select" id="model-select" name="model" disabled>
+                                <select class="form-select" id="model-select" name="model_temp" disabled>
                                     <option value="">请先选择提供商</option>
                                 </select>
+                                <input type="text" class="form-control" id="model-name" name="model" placeholder="或手动输入模型名称" disabled>
                                 <button class="btn btn-outline-primary" type="button" id="refresh-models" disabled aria-label="刷新模型列表">
                                     <i class="bi bi-arrow-clockwise"></i>
                                 </button>
                             </div>
                             <div class="form-text">
-                                选择提供商后将自动加载可用模型
+                                选择提供商后将自动加载可用模型，或手动输入自定义模型名称
                                 <span id="model-loading" class="d-none">
                                     <i class="bi bi-hourglass-split text-primary"></i> 加载中...
                                 </span>
@@ -136,30 +137,34 @@
                             <div class="col-md-6">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" id="debug-mode" name="debug_mode">
-                                    <label class="form-check-label" for="debug-mode">
+                                    <label class="form-check-label" for="debug-mode" title="输出详细的日志信息，便于开发人员调试问题">
                                         启用调试模式
+                                        <i class="bi bi-info-circle text-muted ms-1" style="cursor: help;" data-bs-toggle="tooltip" title="输出详细的日志信息，便于开发人员调试问题"></i>
                                     </label>
                                 </div>
                                 
                                 <div class="form-check mt-2">
                                     <input class="form-check-input" type="checkbox" id="auto-save" name="auto_save">
-                                    <label class="form-check-label" for="auto-save">
+                                    <label class="form-check-label" for="auto-save" title="自动保存当前设置到本地存储，防止意外丢失">
                                         自动保存设置
+                                        <i class="bi bi-info-circle text-muted ms-1" style="cursor: help;" data-bs-toggle="tooltip" title="自动保存当前设置到本地存储，防止意外丢失"></i>
                                     </label>
                                 </div>
                             </div>
                             <div class="col-md-6">
                                 <div class="form-check">
                                     <input class="form-check-input" type="checkbox" id="error-reporting" name="error_reporting">
-                                    <label class="form-check-label" for="error-reporting">
+                                    <label class="form-check-label" for="error-reporting" title="记录并报告应用程序错误，帮助改进系统稳定性">
                                         启用错误报告
+                                        <i class="bi bi-info-circle text-muted ms-1" style="cursor: help;" data-bs-toggle="tooltip" title="记录并报告应用程序错误，帮助改进系统稳定性"></i>
                                     </label>
                                 </div>
                                 
                                 <div class="form-check mt-2">
                                     <input class="form-check-input" type="checkbox" id="performance-monitoring" name="performance_monitoring">
-                                    <label class="form-check-label" for="performance-monitoring">
+                                    <label class="form-check-label" for="performance-monitoring" title="监控系统性能指标，识别潜在的性能问题">
                                         性能监控
+                                        <i class="bi bi-info-circle text-muted ms-1" style="cursor: help;" data-bs-toggle="tooltip" title="监控系统性能指标，识别潜在的性能问题"></i>
                                     </label>
                                 </div>
                             </div>
