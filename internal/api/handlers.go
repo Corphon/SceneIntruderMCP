@@ -471,6 +471,11 @@ func (h *Handler) GetCharacters(c *gin.Context) {
 		return
 	}
 
+	// 确保角色数据不为nil
+	if sceneData.Characters == nil {
+		sceneData.Characters = []*models.Character{}
+	}
+
 	h.Response.Success(c, sceneData.Characters, "角色列表获取成功")
 }
 
@@ -1467,7 +1472,7 @@ func (h *Handler) SettingsPage(c *gin.Context) {
 	config := h.ConfigService.GetCurrentConfig()
 	stats := h.StatsService.GetUsageStats()
 
-	c.HTML(http.StatusOK, "setting.html", gin.H{
+	c.HTML(http.StatusOK, "settings.html", gin.H{
 		"current_provider": config.LLMProvider,
 		"current_model":    config.LLMConfig["model"],
 		"debug_mode":       config.DebugMode,
