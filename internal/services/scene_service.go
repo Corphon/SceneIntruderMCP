@@ -382,6 +382,10 @@ func (s *SceneService) LoadScene(sceneID string) (*SceneData, error) {
 
 // 带缓存的角色加载
 func (s *SceneService) loadCharactersCached(sceneID string) ([]*models.Character, error) {
+	if s.FileCache == nil {
+		return nil, fmt.Errorf("文件存储服务未初始化")
+	}
+
 	charactersDir := filepath.Join(s.BasePath, sceneID, "characters")
 
 	if _, err := os.Stat(charactersDir); os.IsNotExist(err) {
@@ -406,7 +410,6 @@ func (s *SceneService) loadCharactersCached(sceneID string) ([]*models.Character
 				continue
 			}
 
-			characters = append(characters, &character)
 		}
 	}
 
@@ -620,6 +623,17 @@ func (s *SceneService) UpdateCharacter(sceneID, characterID string, character *m
 	character.ID = characterID
 	character.SceneID = sceneID
 	character.LastUpdated = time.Now()
+
+	// Use the existing character's data to preserve fields that might not be in the update
+	if character.Name == "" {
+		character.Name = existingCharacter.Name
+	}
+	if character.Description == "" {
+		character.Description = existingCharacter.Description
+	}
+	if character.Personality == "" {
+		character.Personality = existingCharacter.Personality
+	}
 
 	// 使用 FileStorage 保存更新后的角色数据
 	if err := s.FileCache.SaveJSONFile(characterDir, characterFile, character); err != nil {
