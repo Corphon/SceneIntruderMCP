@@ -594,8 +594,14 @@ class SceneApp {
         const form = document.getElementById('settings-form');
         if (!form) return;
 
+        // 加载LLM提供商列表
+        this.loadLLMProviders();
+
         // 加载当前设置
         this.loadCurrentSettings();
+
+        // 初始化工具提示
+        this.initTooltips();
 
         // 绑定表单提交
         form.addEventListener('submit', async (e) => {
@@ -613,7 +619,84 @@ class SceneApp {
         const providerSelect = document.getElementById('llm-provider');
         if (providerSelect) {
             providerSelect.addEventListener('change', (e) => {
+                // Clear model input when provider changes
+                const modelSelect = document.getElementById('model-select');
+                const modelNameInput = document.getElementById('model-name');
+                
+                if (modelSelect) {
+                    modelSelect.innerHTML = '<option value="">加载中...</option>';
+                    modelSelect.disabled = true;
+                }
+                
+                if (modelNameInput) {
+                    modelNameInput.value = '';
+                    modelNameInput.disabled = true;
+                }
+                
+                // Load models for the selected provider
                 this.loadModelsForProvider(e.target.value);
+            });
+        }
+        
+        // 绑定刷新模型按钮
+        const refreshBtn = document.getElementById('refresh-models');
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', async () => {
+                const providerSelect = document.getElementById('llm-provider');
+                if (providerSelect && providerSelect.value) {
+                    await this.loadModelsForProvider(providerSelect.value);
+                } else {
+                    Utils.showInfo('请先选择一个提供商');
+                }
+            });
+        }
+        
+        // 绑定模型选择和手动输入的联动
+        const modelSelect = document.getElementById('model-select');
+        const modelNameInput = document.getElementById('model-name');
+        
+        if (modelSelect) {
+            modelSelect.addEventListener('change', () => {
+                // 当选择下拉框时，清空手动输入框
+                if (modelNameInput) {
+                    modelNameInput.value = '';
+                }
+            });
+        }
+        
+        if (modelNameInput) {
+            modelNameInput.addEventListener('input', () => {
+                // 当手动输入时，清空下拉框选择
+                if (modelSelect) {
+                    modelSelect.value = '';
+                }
+            });
+        }
+    }
+
+    /**
+     * 初始化工具提示
+     */
+    initTooltips() {
+        // 检查Bootstrap是否可用
+        if (typeof bootstrap !== 'undefined' && bootstrap.Tooltip) {
+            // 初始化所有带data-bs-toggle="tooltip"属性的元素
+            const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+            tooltipTriggerList.map(function (tooltipTriggerEl) {
+                return new bootstrap.Tooltip(tooltipTriggerEl);
+            });
+        } else {
+            // 如果Bootstrap不可用，使用简单的原生提示
+            const tooltipElements = document.querySelectorAll('[title]');
+            tooltipElements.forEach((element) => {
+                element.addEventListener('mouseenter', (e) => {
+                    // 简单的原生提示实现
+                    const title = element.getAttribute('title');
+                    if (title) {
+                        element.setAttribute('data-original-title', title);
+                        element.removeAttribute('title');
+                    }
+                });
             });
         }
     }
@@ -5208,6 +5291,51 @@ class SceneApp {
     // ========================================
 
     /**
+     * 加载可用的LLM提供商列表
+     */
+    async loadLLMProviders() {
+        try {
+            // Since there's no direct API to get all providers, we'll hardcode the known providers
+            // but in a real implementation, there would be an API to fetch all available providers
+            const providerSelect = document.getElementById('llm-provider');
+            if (!providerSelect) return;
+
+            // Clear existing options except the first one
+            const firstOption = providerSelect.querySelector('option:first-child');
+            providerSelect.innerHTML = '';
+            
+            if (firstOption) {
+                providerSelect.appendChild(firstOption);
+            }
+
+            // Known providers that are implemented in the system
+            const providers = [
+                { value: 'openai', text: 'OpenAI' },
+                { value: 'anthropic', text: 'Anthropic (Claude)' },
+                { value: 'google', text: 'Google Gemini' },
+                { value: 'qwen', text: 'Alibaba Qwen' },
+                { value: 'mistral', text: 'Mistral AI' },
+                { value: 'deepseek', text: 'DeepSeek' },
+                { value: 'glm', text: 'Zhipu AI (GLM)' },
+                { value: 'githubmodels', text: 'GitHub Models' },
+                { value: 'grok', text: 'xAI (Grok)' },
+                { value: 'openrouter', text: 'OpenRouter' },
+                { value: 'local', text: '本地模型 (Ollama/Llama.cpp)' }
+            ];
+
+            providers.forEach(provider => {
+                const option = document.createElement('option');
+                option.value = provider.value;
+                option.textContent = provider.text;
+                providerSelect.appendChild(option);
+            });
+
+        } catch (error) {
+            console.error('加载提供商列表失败:', error);
+        }
+    }
+
+    /**
      * 加载当前设置
      */
     async loadCurrentSettings() {
@@ -5225,9 +5353,22 @@ class SceneApp {
             }
 
             if (settings.llm_config?.model) {
-                const modelSelect = document.getElementById('model-name');
+                const modelSelect = document.getElementById('model-select');
+                const modelNameInput = document.getElementById('model-name');
+                
                 if (modelSelect) {
-                    modelSelect.value = settings.llm_config.model;
+                    // 尝试在下拉列表中找到匹配的模型
+                    if (modelSelect.querySelector(`option[value="${settings.llm_config.model}"]`)) {
+                        modelSelect.value = settings.llm_config.model;
+                    } else {
+                        // 如果模型不在下拉列表中，清空下拉框并设置到手动输入框
+                        modelSelect.value = '';
+                        if (modelNameInput) {
+                            modelNameInput.value = settings.llm_config.model;
+                        }
+                    }
+                } else if (modelNameInput) {
+                    modelNameInput.value = settings.llm_config.model;
                 }
             }
 
@@ -5254,20 +5395,54 @@ class SceneApp {
 
         try {
             const result = await API.getLLMModels(provider);
-            const modelSelect = document.getElementById('model-name');
+            const modelSelect = document.getElementById('model-select');
+            const modelNameInput = document.getElementById('model-name');
+            const refreshBtn = document.getElementById('refresh-models');
+            const modelLoading = document.getElementById('model-loading');
 
-            if (modelSelect && result.models) {
-                modelSelect.innerHTML = '<option value="">选择模型</option>';
+            if (modelSelect) {
+                modelSelect.disabled = false;
+                // Enable manual input as well
+                if (modelNameInput) {
+                    modelNameInput.disabled = false;
+                }
+                
+                if (result && result.models) {
+                    modelSelect.innerHTML = '<option value="">选择模型</option>';
 
-                result.models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model;
-                    option.textContent = model;
-                    modelSelect.appendChild(option);
-                });
+                    result.models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model;
+                        option.textContent = model;
+                        modelSelect.appendChild(option);
+                    });
+                } else {
+                    // If no models returned, show a message
+                    modelSelect.innerHTML = '<option value="">无可用模型</option>';
+                }
+            }
+            
+            if (modelLoading) {
+                modelLoading.classList.add('d-none');
             }
         } catch (error) {
             console.error('加载模型列表失败:', error);
+            const modelSelect = document.getElementById('model-select');
+            const modelNameInput = document.getElementById('model-name');
+            const modelLoading = document.getElementById('model-loading');
+            
+            if (modelSelect) {
+                modelSelect.innerHTML = '<option value="">加载失败</option>';
+                modelSelect.disabled = false;
+            }
+            
+            if (modelNameInput) {
+                modelNameInput.disabled = false;
+            }
+            
+            if (modelLoading) {
+                modelLoading.classList.add('d-none');
+            }
         }
     }
 
@@ -5279,23 +5454,73 @@ class SceneApp {
             const form = document.getElementById('settings-form');
             const formData = new FormData(form);
 
+            // Determine which model field to use
+            let modelValue = '';
+            
+            // Check manual input first
+            const manualModel = formData.get('model'); // This is the manual input field
+            const selectModel = formData.get('model-select'); // This is the dropdown
+            
+            // Use manual input if it has a value, otherwise use the dropdown selection
+            if (manualModel && manualModel.trim() !== '') {
+                modelValue = manualModel.trim();
+            } else if (selectModel && selectModel !== '') {
+                modelValue = selectModel;
+            }
+
             const settings = {
                 llm_provider: formData.get('llm_provider'),
                 llm_config: {
                     api_key: formData.get('api_key'),
-                    model: formData.get('model')
+                    model: modelValue
                 },
-                debug_mode: formData.get('debug_mode') === 'on'
+                debug_mode: formData.get('debug_mode') === 'on',
+                auto_save: formData.get('auto_save') === 'on',
+                error_reporting: formData.get('error_reporting') === 'on',
+                performance_monitoring: formData.get('performance_monitoring') === 'on'
             };
 
             await API.saveSettings(settings);
+            
+            // Update the status indicator
+            const statusSpan = document.getElementById('settings-status');
+            if (statusSpan) {
+                statusSpan.textContent = '已保存';
+                statusSpan.className = 'badge bg-success';
+                
+                // Reset after 3 seconds
+                setTimeout(() => {
+                    if (statusSpan) {
+                        statusSpan.textContent = '已保存';
+                        statusSpan.className = 'badge bg-secondary';
+                    }
+                }, 3000);
+            }
+            
             Utils.showSuccess('设置保存成功');
+            console.log('Settings saved successfully');
 
             // 更新连接状态
             await this.updateConnectionStatus();
 
         } catch (error) {
             Utils.showError('保存设置失败: ' + error.message);
+            console.error('保存设置失败:', error);
+            
+            // Update the status indicator to show error
+            const statusSpan = document.getElementById('settings-status');
+            if (statusSpan) {
+                statusSpan.textContent = '保存失败';
+                statusSpan.className = 'badge bg-danger';
+                
+                // Reset after 5 seconds
+                setTimeout(() => {
+                    if (statusSpan) {
+                        statusSpan.textContent = '未保存';
+                        statusSpan.className = 'badge bg-secondary';
+                    }
+                }, 5000);
+            }
         }
     }
 
@@ -5384,16 +5609,52 @@ class SceneApp {
      * 获取角色名称
      */
     getCharacterName(characterId) {
-        const character = this.currentScene?.characters?.find(c => c.id === characterId);
-        return character ? character.name : '未知角色';
+        if (!characterId) return '未知角色';
+
+        // 安全地访问当前场景数据
+        if (this.currentScene && Array.isArray(this.currentScene.characters)) {
+            const character = this.currentScene.characters.find(c => c.id === characterId);
+            if (character && character.name) {
+                return character.name;
+            }
+        }
+
+        // 如果在当前场景中找不到，尝试在其他可能的来源中查找
+        if (this.aggregateData && this.aggregateData.characters) {
+            const character = this.aggregateData.characters.find(c => c.id === characterId);
+            if (character && character.name) {
+                return character.name;
+            }
+        }
+
+        // 如果都找不到，返回默认值
+        return `角色${characterId}`;
     }
 
     /**
      * 获取角色头像
      */
     getCharacterAvatar(characterId) {
-        const character = this.currentScene?.characters?.find(c => c.id === characterId);
-        return character ? character.avatar : null;
+        if (!characterId) return null;
+
+        // 安全地访问当前场景数据
+        if (this.currentScene && Array.isArray(this.currentScene.characters)) {
+            const character = this.currentScene.characters.find(c => c.id === characterId);
+            if (character && character.avatar) {
+                return character.avatar;
+            }
+        }
+
+        // 如果在当前场景中找不到，尝试在其他可能的来源中查找
+        if (this.aggregateData && this.aggregateData.characters) {
+            const character = this.aggregateData.characters.find(c => c.id === characterId);
+            if (character && character.avatar) {
+                return character.avatar;
+            }
+        }
+
+        // 默认头像
+        return null;
     }
 
     /**
