@@ -931,40 +931,79 @@ class API {
      * 订阅分析进度（SSE）
      */
     static subscribeProgress(taskId, onProgress, onError, onComplete) {
+        // 确保taskId存在
+        if (!taskId) {
+            console.error('taskId不能为空');
+            if (onError) onError(new Error('taskId不能为空'));
+            return null;
+        }
+
         const eventSource = new EventSource(`${this.BASE_URL}/progress/${taskId}`);
 
-        eventSource.addEventListener('progress', (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (onProgress) onProgress(data);
+        // 存储事件处理器引用以便后续清理
+        const handlers = {
+            progress: (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (onProgress) onProgress(data);
 
-                // 检查是否完成
-                if (data.status === 'completed' || data.status === 'failed') {
-                    eventSource.close();
-                    if (onComplete) onComplete(data);
+                    // 检查是否完成
+                    if (data.status === 'completed' || data.status === 'failed') {
+                        // 延迟关闭连接以确保所有事件处理完毕
+                        setTimeout(() => {
+                            if (eventSource.readyState !== EventSource.CLOSED) {
+                                eventSource.close();
+                            }
+                        }, 100);
+                        
+                        if (onComplete) onComplete(data);
+                    }
+                } catch (error) {
+                    console.error('解析进度数据失败:', error);
+                    if (onError) onError(error);
                 }
-            } catch (error) {
-                console.error('解析进度数据失败:', error);
+            },
+            
+            connected: (event) => {
+                console.log('进度订阅已连接');
+            },
+            
+            heartbeat: (event) => {
+                // 心跳事件，保持连接
+            },
+            
+            error: (error) => {
+                console.error('SSE连接错误:', error);
+                // 检查是否是连接关闭错误，避免重复关闭
+                if (eventSource.readyState !== EventSource.CLOSED) {
+                    eventSource.close();
+                }
                 if (onError) onError(error);
             }
-        });
-
-        eventSource.addEventListener('connected', (event) => {
-            console.log('进度订阅已连接');
-        });
-
-        eventSource.addEventListener('heartbeat', (event) => {
-            // 心跳事件，保持连接
-        });
-
-        eventSource.onerror = (error) => {
-            console.error('SSE连接错误:', error);
-            eventSource.close();
-            if (onError) onError(error);
         };
 
-        // 返回EventSource实例，允许外部关闭
-        return eventSource;
+        // 绑定事件处理器
+        eventSource.addEventListener('progress', handlers.progress);
+        eventSource.addEventListener('connected', handlers.connected);
+        eventSource.addEventListener('heartbeat', handlers.heartbeat);
+        eventSource.onerror = handlers.error;
+
+        // 返回EventSource实例和清理函数，允许外部控制
+        return {
+            eventSource,
+            close: () => {
+                if (eventSource.readyState !== EventSource.CLOSED) {
+                    eventSource.close();
+                }
+            },
+            // 提供重新连接功能
+            reconnect: () => {
+                if (eventSource.readyState !== EventSource.CLOSED) {
+                    eventSource.close();
+                }
+                return this.subscribeProgress(taskId, onProgress, onError, onComplete);
+            }
+        };
     }
 
     // ========================================
