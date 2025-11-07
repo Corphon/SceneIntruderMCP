@@ -197,11 +197,17 @@ func (s *ContextService) AddConversation(sceneID, speakerID, content string, met
 
 	// 🔧 更新缓存
 	s.cacheMutex.Lock()
+	if s.sceneCache == nil {
+		s.sceneCache = make(map[string]*CachedSceneData)
+	}
 	s.sceneCache[sceneID] = &CachedSceneData{
 		SceneData: sceneData,
 		Timestamp: time.Now(),
 	}
 	s.cacheMutex.Unlock()
+
+	// 清除缓存以强制重新加载 when context changes
+	s.InvalidateSceneCache(sceneID)
 
 	return nil
 }
