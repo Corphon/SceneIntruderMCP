@@ -118,7 +118,7 @@
   --z-modal: 1050;
   --z-popover: 1060;
   --z-tooltip: 1070;
-/* removed stray closing brace */
+}
 
 /* ========================================
      全局基础样式
@@ -6425,7 +6425,77 @@ body.user-idle .user-status-indicator {
 
 /* 聊天容器样式 - 修复内联样式 */
 .chat-container {
-  height: 400px;
+  max-height: 400px;
   background-color: #f8f9fa;
   border-radius: 8px;
+  overflow-y: auto;
+}
+
+/* 改进角色项目显示 */
+.character-item {
+  position: relative;
+  transition: all 0.2s ease;
+}
+
+.character-item.selected {
+  border-color: var(--primary-color) !important;
+  background-color: rgba(var(--primary-rgb), 0.1);
+}
+
+.character-item:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+/* 改进按钮组在移动端的显示 */
+.scene-actions .btn-group {
+  flex-wrap: wrap;
+}
+
+/* 改进卡片布局 */
+.card {
+  display: flex;
+  flex-direction: column;
+}
+
+.card-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* 响应式改进 */
+@media (max-width: 768px) {
+  .chat-container {
+    max-height: 300px;
+  }
+  
+  .scene-actions {
+    margin-bottom: 10px;
+  }
+  
+  .scene-actions .btn-group {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  
+  .character-item {
+    flex-direction: row;
+    align-items: center;
+  }
+}
+
+/* 动画优化 */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in-element {
+  animation: fadeIn 0.3s ease-out;
 }
