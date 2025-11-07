@@ -1429,23 +1429,6 @@ class RealtimeManager {
         return this.sendMessage('user_status', message);
     }
 
-    /**
-     * 发送角色互动消息 - 验证参数
-     */
-    sendCharacterInteraction(sceneId, characterId, message, metadata = {}) {
-        if (!sceneId || !characterId || !message) {
-            console.error('发送角色互动消息缺少必要参数');
-            return false;
-        }
-
-        return this.sendMessage(`scene_${sceneId}`, {
-            type: 'character_interaction',
-            character_id: characterId,
-            message: message,
-            user_id: this.getCurrentUserId(),
-            ...metadata
-        });
-    }
     // ========================================
     // 心跳和重连机制
     // ========================================
@@ -1642,8 +1625,25 @@ class RealtimeManager {
      * 获取角色名称
      */
     getCharacterName(characterId) {
+        if (!characterId) return `角色${characterId}`;
+
+        // 首先尝试从DOM中获取
         const characterElement = document.querySelector(`[data-character-id="${characterId}"] .fw-bold`);
-        return characterElement ? characterElement.textContent : `角色${characterId}`;
+        if (characterElement && characterElement.textContent) {
+            return characterElement.textContent;
+        }
+
+        // 如果DOM中找不到，尝试通过app实例获取
+        if (window.SceneApp && typeof window.SceneApp.getCharacterName === 'function') {
+            try {
+                return window.SceneApp.getCharacterName(characterId);
+            } catch (error) {
+                console.debug('无法通过SceneApp获取角色名称:', error);
+            }
+        }
+
+        // 返回默认名称
+        return `角色${characterId}`;
     }
 
     /**
