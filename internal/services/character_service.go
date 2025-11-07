@@ -398,7 +398,10 @@ func (s *CharacterService) GetCharacter(sceneID, characterID string) (*models.Ch
 	}
 
 	// 从缓存的角色映射中获取角色
+	s.cacheMutex.RLock()  // Add read lock for thread safety
 	character, exists := cachedData.Characters[characterID]
+	s.cacheMutex.RUnlock()  // Release read lock
+
 	if !exists {
 		return nil, fmt.Errorf("角色不存在: %s", characterID)
 	}
