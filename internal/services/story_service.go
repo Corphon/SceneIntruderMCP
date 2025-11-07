@@ -2451,6 +2451,8 @@ func (s *StoryService) ProcessCharacterInteractionTriggers(sceneID string, nodeI
 			if err := s.saveStoryData(sceneID, &storyData); err != nil {
 				return err
 			}
+			// 清除缓存以确保一致性
+			s.invalidateStoryCache(sceneID)
 		}
 		generatedInteractions = interactions
 		return nil
