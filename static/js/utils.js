@@ -943,17 +943,37 @@ class Utils {
      * @returns {object} 搜索结果信息
      */
     static searchText(text, searchTerm, caseSensitive = false) {
+        // 验证输入参数
+        if (typeof text !== 'string' || typeof searchTerm !== 'string') {
+            console.warn('搜索文本或搜索词类型错误', { text: typeof text, searchTerm: typeof searchTerm });
+            return { matches: [], count: 0, positions: [] };
+        }
+
         if (!text || !searchTerm) {
             return { matches: [], count: 0, positions: [] };
         }
 
+        // 防止正则表达式拒绝服务攻击，限制搜索词长度
+        if (searchTerm.length > 100) {
+            console.warn('搜索词过长，已截断', searchTerm);
+            searchTerm = searchTerm.substring(0, 100);
+        }
+
         const flags = caseSensitive ? 'g' : 'gi';
-        const regex = new RegExp(this.escapeRegex(searchTerm), flags);
+        let regex;
+        try {
+            regex = new RegExp(this.escapeRegex(searchTerm), flags);
+        } catch (error) {
+            console.error('正则表达式创建失败:', error);
+            return { matches: [], count: 0, positions: [] };
+        }
 
         const matches = [];
         const positions = [];
         let match;
 
+        // 限制匹配数量防止长时间运行
+        const maxMatches = 1000;
         while ((match = regex.exec(text)) !== null) {
             matches.push(match[0]);
             positions.push({
@@ -961,6 +981,17 @@ class Utils {
                 end: match.index + match[0].length,
                 text: match[0]
             });
+
+            // 防止无限循环
+            if (match.index === regex.lastIndex) {
+                regex.lastIndex++;
+            }
+
+            // 限制匹配数量
+            if (matches.length >= maxMatches) {
+                console.warn(`匹配数量达到上限 ${maxMatches}，停止搜索`);
+                break;
+            }
         }
 
         return {
