@@ -81,11 +81,15 @@ func (fs *FileStorage) SaveTextFile(dirPath, filename string, content []byte) er
 	}
 
 	if err := os.Rename(tempPath, fullPath); err != nil {
-		os.Remove(tempPath) // 清理临时文件
+		// Ensure temp file is cleaned up on error
+		if removeErr := os.Remove(tempPath); removeErr != nil {
+			// Log the cleanup error but return the original error
+			fmt.Printf("Warning: failed to clean up temporary file %s after rename failure: %v\n", tempPath, removeErr)
+		}
 		return fmt.Errorf("保存文件失败: %w", err)
 	}
 
-	// 清除缓存
+	// Clear cache after successful write
 	fs.invalidateCache(fullPath)
 
 	return nil
