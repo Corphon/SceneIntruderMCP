@@ -99,6 +99,18 @@ func NewAnalyzerServiceWithProvider(provider llm.Provider) *AnalyzerService {
 	}
 }
 
+// NewAnalyzerServiceWithLLMService 使用现有的LLM服务创建分析服务
+func NewAnalyzerServiceWithLLMService(llmService *LLMService) *AnalyzerService {
+	return &AnalyzerService{
+		LLMService: llmService,
+		semaphore:  make(chan struct{}, 3), // 限制并发数量为3
+		analysisCache: &AnalysisCache{
+			cache:      make(map[string]*CachedAnalysis),
+			expiration: 30 * time.Minute,
+		},
+	}
+}
+
 // AnalyzeText 分析文本，提取场景、角色、物品等信息
 func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResult, error) {
 	// 获取并发许可
@@ -131,7 +143,6 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 	var wg sync.WaitGroup
 	var sceneErr, charErr, itemErr, summaryErr error
 	var scenes []models.Scene
-	var characters []models.Character
 	var items []models.Item
 	var summary string
 
@@ -147,19 +158,7 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 		scenes = s
 	}()
 
-	// 提取角色
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		characters, err := s.extractCharacters(text, title)
-		if err != nil {
-			charErr = err
-			return
-		}
-		result.Characters = characters
-	}()
-
-	// 提取角色
+	// 提取角色 (只调用一次)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -168,7 +167,7 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 			charErr = err
 			return
 		}
-		characters = c
+		result.Characters = c
 	}()
 
 	// 提取物品
@@ -213,9 +212,8 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 		result.Summary = "无法生成摘要。"
 	}
 
-	// 安全地设置结果
+	// 安全地设置结果 - characters are already set in the goroutine above
 	result.Scenes = scenes
-	result.Characters = characters
 	result.Items = items
 	result.Summary = summary
 
@@ -227,8 +225,12 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 
 // 提取场景信息
 func (s *AnalyzerService) extractScenes(text, title string) ([]models.Scene, error) {
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
 	// 使用LLMService的结构化输出功能
-	sceneInfos, err := s.LLMService.ExtractScenes(context.Background(), text, title)
+	sceneInfos, err := s.LLMService.ExtractScenes(ctx, text, title)
 	if err != nil {
 		return nil, err
 	}
@@ -267,8 +269,12 @@ func (s *AnalyzerService) extractScenes(text, title string) ([]models.Scene, err
 
 // 提取角色信息
 func (s *AnalyzerService) extractCharacters(text, title string) ([]models.Character, error) {
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
 	// 使用LLMService的结构化输出功能
-	characterInfos, err := s.LLMService.ExtractCharacters(context.Background(), text, title)
+	characterInfos, err := s.LLMService.ExtractCharacters(ctx, text, title)
 	if err != nil {
 		return nil, err
 	}
@@ -315,98 +321,67 @@ func (s *AnalyzerService) extractItems(text, title string) ([]models.Item, error
 	var prompt, systemPrompt string
 
 	if isEnglish {
-		prompt = fmt.Sprintf(`Analyze the following text titled "%s" and extract all important item information:
-	
-	%s
-	
-	Please identify all significant items mentioned in the text, providing:
-	1. Item name and physical description
-	2. Function or purpose within the story
-	3. Current location or where it was found
-	4. Importance level (critical/important/minor)
-	5. Associated characters (who owns/uses it)
-	6. Any special properties or abilities
-	7. Historical or cultural significance
-	
-	Focus on items that are plot-relevant, have symbolic meaning, or play a role in character development.`, title, truncateText(text, 5000))
+		systemPrompt = `You are a structured data extraction specialist. You must output only valid JSON that matches the requested schema. No explanations, no markdown, no extra keys.`
+		prompt = fmt.Sprintf(`Analyze the following text titled "%s" and extract every important item as a JSON array of objects with this schema:
+[
+  {
+    "name": string,
+    "description": string,
+    "importance": "critical" | "important" | "minor",
+    "location": string,
+    "usage": string (optional)
+  }
+]
 
-		systemPrompt = `You are a professional item analysis expert specializing in identifying story-relevant objects and artifacts. Extract detailed information about each item's role in the narrative, its symbolic meaning, and practical importance.`
+Requirements:
+- Return ONLY the JSON array described above, without backticks or extra commentary.
+- Include every story-relevant or symbolic item.
+- Fill missing fields with an empty string if unknown.
+
+Text to analyze:
+%s`, title, truncateText(text, 5000))
 	} else {
-		prompt = fmt.Sprintf(`分析以下标题为《%s》的文本，提取所有重要物品信息:
-	
-	%s
-	
-	请识别文本中提到的所有重要物品，提供以下信息：
-	1. 物品名称和外观描述
-	2. 在故事中的功能或用途
-	3. 当前位置或发现地点
-	4. 重要性等级（关键/重要/次要）
-	5. 相关角色（谁拥有/使用它）
-	6. 任何特殊属性或能力
-	7. 历史或文化意义
-	
-	重点关注与情节相关、具有象征意义或在角色发展中发挥作用的物品。`, title, truncateText(text, 5000))
+		systemPrompt = `你是一个结构化数据抽取专家。必须严格输出符合指定结构的 JSON，禁止添加说明或 Markdown。`
+		prompt = fmt.Sprintf(`分析标题为《%s》的文本，提取所有与情节、象征或角色发展相关的物品。
+请仅以 JSON 数组形式返回结果，每个元素需包含以下字段：
+[
+  {
+    "name": "物品名称",
+    "description": "外观或特征",
+    "importance": "critical" | "important" | "minor",
+    "location": "所在位置",
+    "usage": "用途或能力，可为空"
+  }
+]
 
-		systemPrompt = `你是一个专业的物品分析专家，专门识别故事相关的物体和文物。提取每个物品在叙事中的作用、象征意义和实际重要性的详细信息。`
+要求：
+- 只能输出上述 JSON 数组，不得包含其它文字或符号。
+- 缺失信息用空字符串表示。
+- 必须覆盖所有关键或具有象征意义的物品。
+
+待分析文本：
+%s`, title, truncateText(text, 5000))
 	}
 
-	// 使用结构化输出API获取响应
-	request := llm.CompletionRequest{
-		Model:        s.LLMService.GetDefaultModel(),
-		Prompt:       prompt,
-		SystemPrompt: systemPrompt,
-		MaxTokens:    2000,
-		Temperature:  0.2,
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
-	// 尝试从缓存获取
-	cacheKey := s.LLMService.GenerateCacheKey(request)
-	var response *llm.CompletionResponse
-	if cachedResp := s.LLMService.CheckCache(cacheKey); cachedResp != nil {
-		response = cachedResp
-	} else {
-		// 执行API调用
-		var err error
-		response, err = s.LLMService.provider.CompleteText(context.Background(), request)
-		if err != nil {
-			return nil, err
-		}
-		// 添加到缓存
-		s.LLMService.AddToCache(cacheKey, response)
-	}
-	// 尝试解析为数组格式
 	var itemInfos []ItemInfo
-	err := json.Unmarshal([]byte(response.Text), &itemInfos)
-	if err == nil {
-		// 数组解析成功
-		var items []models.Item
-		for _, info := range itemInfos {
-			item := models.Item{
-				Name:        info.Name,
-				Description: info.Description,
-				Location:    info.Location,
-			}
-			items = append(items, item)
-		}
-		return items, nil
-	}
-
-	// 如果解析数组失败，尝试解析为单个对象
-	var singleItem ItemInfo
-	err = json.Unmarshal([]byte(response.Text), &singleItem)
+	err := s.LLMService.CreateStructuredCompletion(ctx, prompt, systemPrompt, &itemInfos)
 	if err != nil {
-		return nil, fmt.Errorf("解析AI响应为结构化数据失败: %w\nAI返回: %s",
-			err, truncateText(response.Text, 120))
+		return nil, fmt.Errorf("解析物品列表失败: %w", err)
 	}
 
-	// 将单个对象添加到数组中
-	return []models.Item{
-		{
-			Name:        singleItem.Name,
-			Description: singleItem.Description,
-			Location:    singleItem.Location,
-		},
-	}, nil
+	items := make([]models.Item, 0, len(itemInfos))
+	for _, info := range itemInfos {
+		items = append(items, models.Item{
+			Name:        info.Name,
+			Description: info.Description,
+			Location:    info.Location,
+		})
+	}
+
+	return items, nil
 }
 
 // 生成故事摘要
@@ -442,7 +417,11 @@ The summary should be brief and capture the main plot, characters, and themes of
 		systemPrompt = `你是一个专业的文学摘要专家，擅长为故事创建简明而全面的摘要。`
 	}
 
-	err := s.LLMService.CreateStructuredCompletion(context.Background(), prompt, systemPrompt, &response)
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	err := s.LLMService.CreateStructuredCompletion(ctx, prompt, systemPrompt, &response)
 	if err != nil {
 		return "", err
 	}
