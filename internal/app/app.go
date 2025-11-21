@@ -16,6 +16,18 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/services"
 	"github.com/Corphon/SceneIntruderMCP/internal/storage"
+
+	// Import LLM providers for their init() functions to register the providers
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/anthropic"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/deepseek"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/githubmodels"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/glm"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/google"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/grok"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/mistral"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/openai"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/openrouter"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/qwen"
 )
 
 // App 代表应用程序实例
@@ -88,7 +100,7 @@ func InitServices() error {
 	storyService := services.NewStoryService(llmService)
 	container.Register("story", storyService)
 
-	analyzerService := services.NewAnalyzerServiceWithProvider(llmService.GetProvider())
+	analyzerService := services.NewAnalyzerServiceWithLLMService(llmService)
 	container.Register("analyzer", analyzerService)
 
 	// 5. 聚合服务（依赖多个其他服务）
@@ -139,6 +151,31 @@ func Initialize(configPath string) error {
 		return fmt.Errorf("初始化API路由失败: %w", err)
 	}
 	GetApp().router = router
+
+	return nil
+}
+
+// ReinitializeLLMService 重新初始化LLM服务（在配置更新后调用）
+func ReinitializeLLMService() error {
+	container := di.GetContainer()
+
+	// 重新创建LLM服务
+	llmService, err := services.NewLLMService()
+	if err != nil {
+		// 如果LLM服务初始化失败，创建空服务作为fallback
+		llmService = services.NewEmptyLLMService()
+	}
+
+	// 更新容器中的LLM服务
+	container.Register("llm", llmService)
+
+	// 重新创建依赖LLM服务的Analyzer服务
+	analyzerService := services.NewAnalyzerServiceWithLLMService(llmService)
+	container.Register("analyzer", analyzerService)
+
+	// 重新创建依赖LLM服务的Story服务
+	storyService := services.NewStoryService(llmService)
+	container.Register("story", storyService)
 
 	return nil
 }
