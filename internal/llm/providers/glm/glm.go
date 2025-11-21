@@ -25,6 +25,9 @@ func init() {
 			recommendedModels: []string{
 				"glm-4",
 				"glm-4-plus",
+				"glm-4.5-air",
+				"glm-4.5",
+				"glm-4.6",
 			},
 			baseURL: "https://open.bigmodel.cn/api/paas/v4",
 		}
