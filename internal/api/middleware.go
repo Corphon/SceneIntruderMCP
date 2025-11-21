@@ -1,162 +1,176 @@
-// internal/api/middleware.go
+// internal/api/rate_limit_middleware.go
 package api
 
 import (
-	"context"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 
-	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/gin-gonic/gin"
 )
 
-// Logger 中间件记录请求日志
-func Logger() gin.HandlerFunc {
+// RateLimiter implements a simple rate limiter using a token bucket algorithm
+type RateLimiter struct {
+	visitors map[string]*Visitor
+	mu       sync.RWMutex
+}
+
+// Visitor represents a client with rate limiting data
+type Visitor struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
+}
+
+// NewRateLimiter creates a new rate limiter
+func NewRateLimiter() *RateLimiter {
+	rl := &RateLimiter{
+		visitors: make(map[string]*Visitor),
+	}
+
+	// Start cleanup goroutine to remove old entries
+	go rl.cleanup()
+
+	return rl
+}
+
+// cleanup removes visitors that haven't made requests in over an hour
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		for key, visitor := range rl.visitors {
+			if now.After(visitor.Reset) {
+				delete(rl.visitors, key)
+			}
+		}
+		rl.mu.Unlock()
+	}
+}
+
+// Allow checks if a visitor is allowed to make a request
+func (rl *RateLimiter) Allow(key string, limit int, window time.Duration) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	visitor, exists := rl.visitors[key]
+
+	if !exists || now.After(visitor.Reset) {
+		// New visitor or previous window has expired
+		rl.visitors[key] = &Visitor{
+			Limit:     limit,
+			Remaining: limit - 1,
+			Reset:     now.Add(window),
+		}
+		return true
+	}
+
+	if visitor.Remaining <= 0 {
+		// No remaining requests in this window
+		return false
+	}
+
+	// Decrement remaining requests
+	visitor.Remaining--
+	return true
+}
+
+// GetRateLimitHeaders returns the rate limit headers
+func (rl *RateLimiter) GetRateLimitHeaders(key string, limit int, window time.Duration) (int, int, int64) {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+
+	visitor, exists := rl.visitors[key]
+	if !exists {
+		return limit, limit, time.Now().Add(window).Unix()
+	}
+
+	remaining := visitor.Remaining
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	resetTime := visitor.Reset.Unix()
+	return limit, remaining, resetTime
+}
+
+// Global rate limiter instance
+var rateLimiter = NewRateLimiter()
+
+// RateLimitMiddleware creates a rate limiting middleware
+func RateLimitMiddleware(limit int, window time.Duration, keyFunc func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 请求开始时间
-		startTime := time.Now()
+		key := keyFunc(c)
 
-		// 处理请求
+		if !rateLimiter.Allow(key, limit, window) {
+			// Get current rate limit values for headers
+			limit, remaining, reset := rateLimiter.GetRateLimitHeaders(key, limit, window)
+
+			c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
+			c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+			c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
+
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"success":   false,
+				"error":     "Rate limit exceeded",
+				"code":      "RATE_LIMIT_EXCEEDED",
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
+			c.Abort()
+			return
+		}
+
+		// Add rate limit headers to response
+		limit, remaining, reset := rateLimiter.GetRateLimitHeaders(key, limit, window)
+		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
+		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
+		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
+
 		c.Next()
+	}
+}
 
-		// 请求结束时间
-		endTime := time.Now()
-		// 执行时间
-		latencyTime := endTime.Sub(startTime)
-		// 请求方式
-		reqMethod := c.Request.Method
-		// 请求路由
-		reqUri := c.Request.RequestURI
-		// 状态码
-		statusCode := c.Writer.Status()
-		// 请求IP
+// RateLimitByIP applies rate limiting based on client IP address
+func RateLimitByIP(limit int, window time.Duration) gin.HandlerFunc {
+	return RateLimitMiddleware(limit, window, func(c *gin.Context) string {
+		// Get real IP considering proxies
 		clientIP := c.ClientIP()
-
-		// 日志格式
-		fmt.Fprintf(gin.DefaultWriter, "| %d | %v | %s | %s | %s\n",
-			statusCode, latencyTime, clientIP, reqMethod, reqUri)
-	}
+		return clientIP
+	})
 }
 
-// ErrorHandler 中间件处理错误
-func ErrorHandler() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Next()
-
-		// 检查是否有错误
-		if len(c.Errors) > 0 {
-			// 获取最后一个错误
-			err := c.Errors.Last()
-
-			// 根据错误类型返回不同状态码
-			switch err.Type {
-			case gin.ErrorTypeBind:
-				// 参数绑定错误
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			case gin.ErrorTypeRender:
-				// 响应渲染错误
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器内部错误"})
-			case gin.ErrorTypePrivate:
-				// 自定义错误，状态码可能已经设置
-				if !c.Writer.Written() {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-				}
-			default:
-				// 其他错误
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "未知错误"})
-			}
+// RateLimitByUser applies rate limiting based on user ID from context or headers
+func RateLimitByUser(limit int, window time.Duration) gin.HandlerFunc {
+	return RateLimitMiddleware(limit, window, func(c *gin.Context) string {
+		// Try to get user ID from context or header
+		userID := c.GetHeader("X-User-ID")
+		if userID == "" {
+			// Fallback to IP if no user ID is provided
+			userID = c.ClientIP()
 		}
-	}
+		return userID
+	})
 }
 
-// Auth 中间件验证请求身份
-func Auth() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// 获取API密钥
-		apiKey := c.GetHeader("X-API-Key")
-		if apiKey == "" {
-			apiKey = c.Query("api_key") // Also check query parameter as fallback
-		}
-
-		if apiKey == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "API密钥缺失"})
-			return
-		}
-
-		// 从配置中获取有效的API密钥进行验证
-		cfg := config.GetCurrentConfig()
-		if cfg == nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "配置系统未初始化"})
-			return
-		}
-
-		// 获取解密后的API密钥进行比较
-		// The LLMConfig field in the config returned by GetCurrentConfig already contains decrypted values
-		validAPIKey := ""
-		if cfg.LLMConfig != nil {
-			validAPIKey = cfg.LLMConfig["api_key"]
-		}
-		if validAPIKey == "" || apiKey != validAPIKey {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "无效的API密钥"})
-			return
-		}
-
-		c.Next()
-	}
+// ChatRateLimit applies specific rate limiting for chat endpoints
+func ChatRateLimit() gin.HandlerFunc {
+	// 30 requests per minute for chat endpoints
+	return RateLimitByUser(30, time.Minute)
 }
 
-// RequestSizeLimiter 限制请求体大小
-func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSize)
-		c.Next()
-	}
+// AnalysisRateLimit applies specific rate limiting for analysis endpoints
+func AnalysisRateLimit() gin.HandlerFunc {
+	// 10 requests per hour for analysis endpoints (they're more resource-intensive)
+	return RateLimitByUser(10, time.Hour)
 }
 
-// Timeout 请求超时中间件
-func Timeout(timeout time.Duration) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// 创建超时上下文
-		ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
-		defer cancel()
-
-		// 替换请求上下文
-		c.Request = c.Request.WithContext(ctx)
-
-		// 创建完成通道
-		done := make(chan bool)
-
-		// 处理请求的goroutine
-		go func() {
-			c.Next()
-			done <- true
-		}()
-
-		// 等待请求完成或超时
-		select {
-		case <-done:
-			// 请求正常完成
-			return
-		case <-ctx.Done():
-			// 请求超时
-			if ctx.Err() == context.DeadlineExceeded {
-				c.AbortWithStatusJSON(http.StatusRequestTimeout, gin.H{
-					"error": "请求处理超时",
-				})
-			}
-		}
-	}
-}
-
-// SecureHeaders 添加安全相关的HTTP头
-func SecureHeaders() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Writer.Header().Set("X-XSS-Protection", "1; mode=block")
-		c.Writer.Header().Set("X-Frame-Options", "DENY")
-		c.Writer.Header().Set("X-Content-Type-Options", "nosniff")
-		c.Writer.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
-		c.Writer.Header().Set("Content-Security-Policy", "default-src 'self'")
-		c.Next()
-	}
+// DefaultRateLimit applies general rate limiting for most API endpoints
+func DefaultRateLimit() gin.HandlerFunc {
+	// 100 requests per minute by IP
+	return RateLimitByIP(100, time.Minute)
 }
