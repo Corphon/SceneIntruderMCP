@@ -17,8 +17,22 @@ var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 	CheckOrigin: func(r *http.Request) bool {
-		// 在生产环境中应该进行更严格的检查
-		return true
+		// 仅允许同源请求，更安全的配置
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			// 没有 Origin 头，可能是直接连接
+			return true
+		}
+		
+		// 获取服务器主机信息
+		host := r.Host
+		expectedOrigin := "http://" + host
+		if r.TLS != nil {
+			expectedOrigin = "https://" + host
+		}
+		
+		// 检查 Origin 是否与预期匹配
+		return origin == expectedOrigin
 	},
 }
 
