@@ -325,10 +325,14 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 		)
 	}
 
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	
 	// 调用LLM服务
 	var emotionalData models.EmotionalResponse
 	err = s.LLMService.CreateStructuredCompletion(
-		context.Background(),
+		ctx,
 		userPrompt,
 		systemPrompt,
 		&emotionalData,
@@ -769,12 +773,16 @@ func (s *CharacterService) GenerateCharacterInteraction(
 		return nil, fmt.Errorf("LLM服务未配置")
 	}
 
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	
 	// 使用结构化输出
 	var dialogues []models.InteractionDialogue
 	err = s.LLMService.CreateStructuredCompletion(
-		context.Background(),
-		topic,      // 用户消息
+		ctx,
 		prompt,     // 系统提示词
+		topic,      // 用户消息
 		&dialogues, // 输出结构
 	)
 
@@ -953,12 +961,16 @@ func (s *CharacterService) SimulateCharactersConversation(
 		return nil, fmt.Errorf("LLM服务未配置")
 	}
 
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	
 	// 使用结构化输出
 	var dialogues []models.InteractionDialogue
 	err = s.LLMService.CreateStructuredCompletion(
-		context.Background(),
-		initialSituation, // 用户消息
+		ctx,
 		prompt.String(),  // 系统提示词
+		initialSituation, // 用户消息
 		&dialogues,       // 输出结构
 	)
 
