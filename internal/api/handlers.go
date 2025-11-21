@@ -109,13 +109,13 @@ func (h *Handler) GetWebSocketStatus(c *gin.Context) {
 	status["ping_timeout_seconds"] = int(wsManager.pingTimeout.Seconds())
 	status["timestamp"] = time.Now().Format(time.RFC3339)
 
-	h.Response.Success(c, status, "WebSocket状态获取成功")
+	h.Response.Success(c, status, "WebSocket status retrieved successfully")
 }
 
 // 添加管理器控制API
 func (h *Handler) CleanupWebSocketConnections(c *gin.Context) {
 	wsManager.cleanupExpiredConnections()
-	h.Response.Success(c, nil, "连接清理已执行")
+	h.Response.Success(c, nil, "Connection cleanup executed")
 }
 
 // ========================================
@@ -130,13 +130,13 @@ func (h *Handler) ExportScene(c *gin.Context) {
 
 	exportService := h.getExportService()
 	if exportService == nil {
-		h.Response.InternalError(c, "导出服务未初始化", "无法获取导出服务实例")
+		h.Response.InternalError(c, "Export service not initialized", "Failed to obtain export service instance")
 		return
 	}
 
 	result, err := exportService.ExportSceneData(c.Request.Context(), sceneID, format, includeConversations)
 	if err != nil {
-		h.Response.InternalError(c, "导出场景数据失败", err.Error())
+		h.Response.InternalError(c, "Failed to export scene data", err.Error())
 		return
 	}
 
@@ -151,20 +151,20 @@ func (h *Handler) ExportInteractions(c *gin.Context) {
 
 	// 验证场景ID
 	if sceneID == "" {
-		h.Response.BadRequest(c, "缺少场景ID")
+		h.Response.BadRequest(c, "Missing scene ID")
 		return
 	}
 
 	// 验证导出格式
 	supportedFormats := []string{"json", "markdown", "txt", "html", "csv"}
 	if !contains(supportedFormats, strings.ToLower(format)) {
-		h.Response.BadRequest(c, "不支持的导出格式", fmt.Sprintf("支持的格式: %v", supportedFormats))
+		h.Response.BadRequest(c, "Unsupported export format", fmt.Sprintf("Supported formats: %v", supportedFormats))
 		return
 	}
 	// 获取导出服务
 	exportService := h.getExportService()
 	if exportService == nil {
-		h.Response.InternalError(c, "导出服务未初始化", "无法获取导出服务实例")
+		h.Response.InternalError(c, "Export service not initialized", "Failed to obtain export service instance")
 		return
 	}
 
@@ -178,7 +178,7 @@ func (h *Handler) ExportInteractions(c *gin.Context) {
 		// 根据错误类型返回不同的错误码
 		if ctx.Err() == context.DeadlineExceeded {
 			h.Response.Error(c, http.StatusRequestTimeout, ErrorExportTimeout,
-				"导出操作超时", "请稍后重试或联系管理员")
+				"Export operation timed out", "Please try again later or contact the administrator.")
 			return
 		}
 
@@ -324,27 +324,27 @@ func (h *Handler) GetScenes(c *gin.Context) {
 // GetScene 获取指定场景详情
 func (h *Handler) GetScene(c *gin.Context) {
 	sceneID := c.Param("id")
-	
+
 	if sceneID == "" {
 		h.Response.BadRequest(c, "场景ID不能为空")
 		return
 	}
-	
+
 	startTime := time.Now()
 	h.Logger.Info("Getting scene details", map[string]interface{}{
-		"scene_id": sceneID,
+		"scene_id":  sceneID,
 		"client_ip": c.ClientIP(),
 	})
 
 	sceneData, err := h.SceneService.LoadScene(sceneID)
 	if err != nil {
 		h.Logger.Error("Failed to load scene", map[string]interface{}{
-			"scene_id": sceneID,
-			"error": err.Error(),
+			"scene_id":  sceneID,
+			"error":     err.Error(),
 			"client_ip": c.ClientIP(),
 		})
 		h.Metrics.RecordError("scene_load_failed", "scene_service")
-		
+
 		// Check if it's a "not found" error specifically
 		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "不存在") {
 			h.Response.NotFound(c, "场景", "场景ID: "+sceneID)
@@ -361,10 +361,10 @@ func (h *Handler) GetScene(c *gin.Context) {
 
 	duration := time.Since(startTime)
 	h.Logger.Info("Scene details retrieved successfully", map[string]interface{}{
-		"scene_id": sceneID,
+		"scene_id":        sceneID,
 		"character_count": len(sceneData.Characters),
-		"duration_ms": duration.Milliseconds(),
-		"client_ip": c.ClientIP(),
+		"duration_ms":     duration.Milliseconds(),
+		"client_ip":       c.ClientIP(),
 	})
 
 	h.Metrics.RecordAPIRequest("get_scene", "GET", http.StatusOK, duration)
@@ -384,7 +384,7 @@ func (h *Handler) CreateScene(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Logger.Error("Invalid request parameters for create scene endpoint", map[string]interface{}{
-			"error": err.Error(),
+			"error":     err.Error(),
 			"client_ip": c.ClientIP(),
 		})
 		h.Metrics.RecordError("invalid_request", "create_scene_endpoint")
@@ -415,9 +415,9 @@ func (h *Handler) CreateScene(c *gin.Context) {
 
 	// Log the scene creation attempt
 	h.Logger.Info("Creating new scene", map[string]interface{}{
-		"title": req.Title,
+		"title":       req.Title,
 		"text_length": len(req.Text),
-		"client_ip": c.ClientIP(),
+		"client_ip":   c.ClientIP(),
 	})
 
 	// Get user ID from context for ownership
@@ -430,8 +430,8 @@ func (h *Handler) CreateScene(c *gin.Context) {
 	scene, err := h.SceneService.CreateSceneFromText(userID, req.Text, req.Title)
 	if err != nil {
 		h.Logger.Error("Failed to create scene", map[string]interface{}{
-			"title": req.Title,
-			"error": err.Error(),
+			"title":     req.Title,
+			"error":     err.Error(),
 			"client_ip": c.ClientIP(),
 		})
 		h.Metrics.RecordError("scene_creation_failed", "scene_service")
@@ -441,7 +441,7 @@ func (h *Handler) CreateScene(c *gin.Context) {
 
 	if scene == nil {
 		h.Logger.Error("Scene creation returned nil", map[string]interface{}{
-			"title": req.Title,
+			"title":     req.Title,
 			"client_ip": c.ClientIP(),
 		})
 		h.Response.InternalError(c, "创建场景失败", "返回了无效的场景数据")
@@ -450,10 +450,10 @@ func (h *Handler) CreateScene(c *gin.Context) {
 
 	duration := time.Since(startTime)
 	h.Logger.Info("Scene created successfully", map[string]interface{}{
-		"scene_id": scene.ID,
-		"title": scene.Title,
+		"scene_id":    scene.ID,
+		"title":       scene.Title,
 		"duration_ms": duration.Milliseconds(),
-		"client_ip": c.ClientIP(),
+		"client_ip":   c.ClientIP(),
 	})
 
 	h.Metrics.RecordAPIRequest("create_scene", "POST", http.StatusCreated, duration)
@@ -491,7 +491,7 @@ func (h *Handler) Chat(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Logger.Error("Invalid request parameters for chat endpoint", map[string]interface{}{
-			"error": err.Error(),
+			"error":     err.Error(),
 			"client_ip": c.ClientIP(),
 		})
 		h.Metrics.RecordError("invalid_request", "chat_endpoint")
@@ -503,10 +503,10 @@ func (h *Handler) Chat(c *gin.Context) {
 	response, err := h.CharacterService.GenerateResponse(req.SceneID, req.CharacterID, req.Message)
 	if err != nil {
 		h.Logger.Error("Failed to generate character response", map[string]interface{}{
-			"scene_id": req.SceneID,
+			"scene_id":     req.SceneID,
 			"character_id": req.CharacterID,
-			"error": err.Error(),
-			"client_ip": c.ClientIP(),
+			"error":        err.Error(),
+			"client_ip":    c.ClientIP(),
 		})
 		h.Metrics.RecordError("response_generation_failed", "character_service")
 		h.Response.InternalError(c, "生成回应失败", err.Error())
@@ -515,10 +515,10 @@ func (h *Handler) Chat(c *gin.Context) {
 
 	duration := time.Since(startTime)
 	h.Logger.Info("Chat request completed successfully", map[string]interface{}{
-		"scene_id": req.SceneID,
+		"scene_id":     req.SceneID,
 		"character_id": req.CharacterID,
-		"duration_ms": duration.Milliseconds(),
-		"client_ip": c.ClientIP(),
+		"duration_ms":  duration.Milliseconds(),
+		"client_ip":    c.ClientIP(),
 	})
 
 	h.Metrics.RecordAPIRequest("chat", "POST", http.StatusOK, duration)
@@ -621,7 +621,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 			os.Remove(tempPath)
 			return
 		}
-		
+
 		// Limit content size to prevent memory exhaustion
 		const maxContentLength = 1000000 // 1MB of content
 		if len(content) > maxContentLength {
@@ -629,13 +629,13 @@ func (h *Handler) UploadFile(c *gin.Context) {
 			os.Remove(tempPath)
 			return
 		}
-		
+
 		// Additional security checks for text files
 		contentStr := string(content)
-		
+
 		// Check for potential script tags in markdown files
 		if ext == ".md" {
-			if strings.Contains(strings.ToLower(contentStr), "<script") || 
+			if strings.Contains(strings.ToLower(contentStr), "<script") ||
 				strings.Contains(strings.ToLower(contentStr), "javascript:") ||
 				strings.Contains(strings.ToLower(contentStr), "data:text/html") {
 				h.Response.BadRequest(c, "文件内容不安全", "文件包含潜在危险内容")
@@ -643,7 +643,7 @@ func (h *Handler) UploadFile(c *gin.Context) {
 				return
 			}
 		}
-		
+
 		// Check for extremely long lines that could indicate binary content or be a DoS vector
 		lines := strings.Split(contentStr, "\n")
 		for _, line := range lines {
@@ -671,11 +671,23 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 // IndexPage 返回主页
 func (h *Handler) IndexPage(c *gin.Context) {
-	c.HTML(http.StatusOK, "index.html", nil)
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
+	c.HTML(http.StatusOK, "index.html", gin.H{
+		"Title": "SceneIntruder",
+	})
 }
 
 // SceneSelectorPage 返回场景选择页面
 func (h *Handler) SceneSelectorPage(c *gin.Context) {
+	// 添加缓存控制头，防止浏览器缓存导致页面不更新
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	scenes, err := h.SceneService.GetAllScenes()
 	if err != nil {
 		c.HTML(http.StatusInternalServerError, "error.html", gin.H{
@@ -685,17 +697,30 @@ func (h *Handler) SceneSelectorPage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "scene_selector.html", gin.H{
-		"scenes": scenes,
+		"Title":  "场景列表",
+		"Scenes": scenes,
 	})
 }
 
 // CreateScenePage 返回创建场景页面
 func (h *Handler) CreateScenePage(c *gin.Context) {
-	c.HTML(http.StatusOK, "create_scene.html", nil)
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
+	c.HTML(http.StatusOK, "create_scene.html", gin.H{
+		"Title": "创建场景",
+	})
 }
 
 // ScenePage 返回场景交互页面
 func (h *Handler) ScenePage(c *gin.Context) {
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	sceneID := c.Param("id")
 	sceneData, err := h.SceneService.LoadScene(sceneID)
 	if err != nil {
@@ -709,6 +734,7 @@ func (h *Handler) ScenePage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "scene.html", gin.H{
+		"Title":      sceneData.Scene.Title,
 		"scene":      sceneData.Scene,
 		"characters": sceneData.Characters,
 	})
@@ -726,7 +752,7 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Logger.Error("Invalid request parameters for analyze text endpoint", map[string]interface{}{
-			"error": err.Error(),
+			"error":     err.Error(),
 			"client_ip": c.ClientIP(),
 		})
 		h.Metrics.RecordError("invalid_request", "analyze_text_endpoint")
@@ -736,9 +762,9 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 	// Log the analysis attempt
 	h.Logger.Info("Starting text analysis", map[string]interface{}{
-		"title": req.Title,
+		"title":       req.Title,
 		"text_length": len(req.Text),
-		"client_ip": c.ClientIP(),
+		"client_ip":   c.ClientIP(),
 	})
 
 	// 创建唯一任务ID
@@ -756,7 +782,7 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 		// Log the start of the analysis
 		h.Logger.Info("Starting background text analysis", map[string]interface{}{
 			"task_id": taskID,
-			"title": req.Title,
+			"title":   req.Title,
 		})
 
 		// 执行分析
@@ -764,7 +790,7 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 		if err != nil {
 			h.Logger.Error("Text analysis failed", map[string]interface{}{
 				"task_id": taskID,
-				"error": err.Error(),
+				"error":   err.Error(),
 			})
 			h.Metrics.RecordError("text_analysis_failed", "analyzer_service")
 			tracker.Fail(err.Error())
@@ -773,9 +799,9 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 		// Log successful analysis
 		h.Logger.Info("Text analysis completed", map[string]interface{}{
-			"task_id": taskID,
+			"task_id":         taskID,
 			"character_count": len(result.Characters),
-			"scene_count": len(result.Scenes),
+			"scene_count":     len(result.Scenes),
 		})
 
 		// Get user ID from context for ownership
@@ -809,9 +835,9 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 		// 保存场景和角色
 		if err := h.SceneService.CreateSceneWithCharacters(scene, result.Characters); err != nil {
 			h.Logger.Error("Failed to create scene with analyzed characters", map[string]interface{}{
-				"task_id": taskID,
+				"task_id":  taskID,
 				"scene_id": scene.ID,
-				"error": err.Error(),
+				"error":    err.Error(),
 			})
 			tracker.Fail("场景创建失败: " + err.Error())
 			return
@@ -819,7 +845,7 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 		// Log successful scene creation
 		h.Logger.Info("Scene created from analysis", map[string]interface{}{
-			"task_id": taskID,
+			"task_id":  taskID,
 			"scene_id": scene.ID,
 		})
 
@@ -829,10 +855,10 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 
 	duration := time.Since(startTime)
 	h.Logger.Info("Text analysis request accepted", map[string]interface{}{
-		"task_id": taskID,
-		"title": req.Title,
+		"task_id":     taskID,
+		"title":       req.Title,
 		"duration_ms": duration.Milliseconds(),
-		"client_ip": c.ClientIP(),
+		"client_ip":   c.ClientIP(),
 	})
 
 	h.Metrics.RecordAPIRequest("analyze_text", "POST", http.StatusAccepted, duration)
@@ -932,7 +958,7 @@ func (h *Handler) ChatWithEmotion(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Logger.Error("Invalid request parameters for emotional chat endpoint", map[string]interface{}{
-			"error": err.Error(),
+			"error":     err.Error(),
 			"client_ip": c.ClientIP(),
 		})
 		h.Metrics.RecordError("invalid_request", "emotional_chat_endpoint")
@@ -941,20 +967,20 @@ func (h *Handler) ChatWithEmotion(c *gin.Context) {
 	}
 
 	h.Logger.Info("Starting emotional chat request", map[string]interface{}{
-		"scene_id": req.SceneID,
-		"character_id": req.CharacterID,
+		"scene_id":       req.SceneID,
+		"character_id":   req.CharacterID,
 		"message_length": len(req.Message),
-		"client_ip": c.ClientIP(),
+		"client_ip":      c.ClientIP(),
 	})
 
 	// 使用新的方法生成带情绪的回应
 	response, err := h.CharacterService.GenerateResponseWithEmotion(req.SceneID, req.CharacterID, req.Message)
 	if err != nil {
 		h.Logger.Error("Failed to generate emotional response", map[string]interface{}{
-			"scene_id": req.SceneID,
+			"scene_id":     req.SceneID,
 			"character_id": req.CharacterID,
-			"error": err.Error(),
-			"client_ip": c.ClientIP(),
+			"error":        err.Error(),
+			"client_ip":    c.ClientIP(),
 		})
 		h.Metrics.RecordError("emotional_response_generation_failed", "character_service")
 		h.Response.InternalError(c, "生成回应失败", err.Error())
@@ -963,12 +989,12 @@ func (h *Handler) ChatWithEmotion(c *gin.Context) {
 
 	duration := time.Since(startTime)
 	h.Logger.Info("Emotional chat request completed", map[string]interface{}{
-		"scene_id": req.SceneID,
-		"character_id": req.CharacterID,
+		"scene_id":        req.SceneID,
+		"character_id":    req.CharacterID,
 		"response_length": len(response.Response),
-		"duration_ms": duration.Milliseconds(),
-		"tokens_used": response.TokensUsed,
-		"client_ip": c.ClientIP(),
+		"duration_ms":     duration.Milliseconds(),
+		"tokens_used":     response.TokensUsed,
+		"client_ip":       c.ClientIP(),
 	})
 
 	// 记录API使用情况
@@ -1468,11 +1494,17 @@ func (h *Handler) RewindStoryToNode(c *gin.Context) {
 
 // SettingsPage 返回设置页面
 func (h *Handler) SettingsPage(c *gin.Context) {
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	// 从配置服务获取当前设置
 	config := h.ConfigService.GetCurrentConfig()
 	stats := h.StatsService.GetUsageStats()
 
 	c.HTML(http.StatusOK, "settings.html", gin.H{
+		"Title":            "系统设置",
 		"current_provider": config.LLMProvider,
 		"current_model":    config.LLMConfig["model"],
 		"debug_mode":       config.DebugMode,
@@ -1504,9 +1536,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 // 添加通用的设置保存方法
 func (h *Handler) SaveSettings(c *gin.Context) {
 	var request struct {
-		LLMProvider string            `json:"llm_provider"`
-		LLMConfig   map[string]string `json:"llm_config"`
-		DebugMode   bool              `json:"debug_mode"`
+		LLMProvider string                 `json:"llm_provider"`
+		LLMConfig   map[string]interface{} `json:"llm_config"` // Use interface{} to handle different types
+		DebugMode   bool                   `json:"debug_mode"`
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -1514,9 +1546,47 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 		return
 	}
 
+	// Convert interface{} map to string map, handling different types
+	stringConfig := make(map[string]string)
+	for key, value := range request.LLMConfig {
+		switch v := value.(type) {
+		case string:
+			stringConfig[key] = v
+		case float64: // JSON numbers are unmarshaled as float64
+			// Check if it's actually an integer (whole number)
+			if v == float64(int64(v)) {
+				// It's a whole number, convert to int then string
+				stringConfig[key] = strconv.FormatInt(int64(v), 10)
+			} else {
+				// It's a decimal number, convert directly to string
+				stringConfig[key] = strconv.FormatFloat(v, 'f', -1, 64)
+			}
+		case float32:
+			// Check if it's actually an integer
+			if v == float32(int64(v)) {
+				stringConfig[key] = strconv.FormatInt(int64(v), 10)
+			} else {
+				stringConfig[key] = strconv.FormatFloat(float64(v), 'f', -1, 64)
+			}
+		case int:
+			stringConfig[key] = strconv.Itoa(v)
+		case int32:
+			stringConfig[key] = strconv.FormatInt(int64(v), 10)
+		case int64:
+			stringConfig[key] = strconv.FormatInt(v, 10)
+		case bool:
+			stringConfig[key] = strconv.FormatBool(v)
+		case nil:
+			stringConfig[key] = ""
+		default:
+			// Handle unexpected types gracefully
+			stringConfig[key] = fmt.Sprintf("%v", v) // fallback to string representation
+		}
+	}
+
 	// 保存LLM配置
-	if request.LLMProvider != "" && request.LLMConfig != nil {
-		err := h.ConfigService.UpdateLLMConfig(request.LLMProvider, request.LLMConfig, "web_ui")
+	if request.LLMProvider != "" && len(stringConfig) > 0 {
+		err := h.ConfigService.UpdateLLMConfig(request.LLMProvider, stringConfig, "web_ui")
 		if err != nil {
 			h.Response.InternalError(c, "保存LLM配置失败", err.Error())
 			return
@@ -1528,6 +1598,20 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 
 // 添加连接测试方法
 func (h *Handler) TestConnection(c *gin.Context) {
+	// 解析请求体,支持临时配置测试
+	var testRequest struct {
+		Provider  string            `json:"provider"`
+		LLMConfig map[string]string `json:"llm_config"`
+	}
+
+	// 尝试解析请求体(如果有的话)
+	hasTemporaryConfig := false
+	if err := c.ShouldBindJSON(&testRequest); err == nil {
+		if testRequest.Provider != "" && len(testRequest.LLMConfig) > 0 {
+			hasTemporaryConfig = true
+		}
+	}
+
 	container := di.GetContainer()
 	llmService, ok := container.Get("llm").(*services.LLMService)
 	if !ok {
@@ -1535,12 +1619,25 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		return
 	}
 
-	if llmService.IsReady() {
-		// 尝试一个简单的测试调用
+	// 如果提供了临时配置,先尝试使用临时配置测试
+	if hasTemporaryConfig {
+		h.Logger.Info("Testing connection with temporary config", map[string]interface{}{
+			"provider": testRequest.Provider,
+		})
+
+		// 创建临时LLM客户端进行测试
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 		defer cancel()
 
-		// 简单的连接测试
+		// 尝试更新并测试
+		tempService := &services.LLMService{}
+		if err := tempService.UpdateProvider(testRequest.Provider, testRequest.LLMConfig); err != nil {
+			h.Response.Error(c, http.StatusBadRequest, "INVALID_CONFIG",
+				"配置验证失败", err.Error())
+			return
+		}
+
+		// 执行测试请求
 		request := services.ChatCompletionRequest{
 			Messages: []services.ChatCompletionMessage{
 				{
@@ -1552,13 +1649,12 @@ func (h *Handler) TestConnection(c *gin.Context) {
 					Content: "Hello",
 				},
 			},
-			Model:       "", // 使用默认模型
+			Model:       "", // Use default model
 			Temperature: 0.1,
 			MaxTokens:   5,
 		}
 
-		_, err := llmService.CreateChatCompletion(ctx, request)
-
+		_, err := tempService.CreateChatCompletion(ctx, request)
 		if err != nil {
 			h.Response.Error(c, http.StatusServiceUnavailable, "CONNECTION_TEST_FAILED",
 				"连接测试失败", err.Error())
@@ -1566,15 +1662,73 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		}
 
 		data := map[string]interface{}{
-			"provider": llmService.GetProviderName(),
+			"provider": testRequest.Provider,
 			"status":   "connected",
 			"test":     "passed",
+			"mode":     "temporary_config",
 		}
 		h.Response.Success(c, data, "连接测试成功")
-	} else {
-		h.Response.Error(c, http.StatusServiceUnavailable, "CONNECTION_FAILED",
-			"LLM服务未就绪", llmService.GetReadyState())
+		return
 	}
+
+	// 使用当前保存的配置进行测试
+	// Check if LLM service is ready
+	if !llmService.IsReady() {
+		readyState := llmService.GetReadyState()
+
+		// Check if the unready state is specifically due to missing API key
+		switch readyState {
+		case "API key not configured":
+			h.Response.Error(c, http.StatusServiceUnavailable, "LLM_NOT_CONFIGURED",
+				"LLM service not configured", "API key not configured")
+			return
+		case "LLM provider not configured":
+			h.Response.Error(c, http.StatusServiceUnavailable, "LLM_NOT_CONFIGURED",
+				"LLM service not configured", "LLM provider not configured")
+			return
+		}
+
+		h.Response.Error(c, http.StatusServiceUnavailable, "CONNECTION_FAILED",
+			"LLM service not ready", readyState)
+		return
+	}
+
+	// LLM service is ready, try a simple test call
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	// Simple connection test
+	request := services.ChatCompletionRequest{
+		Messages: []services.ChatCompletionMessage{
+			{
+				Role:    services.RoleSystem,
+				Content: "You are a helpful assistant.",
+			},
+			{
+				Role:    services.RoleUser,
+				Content: "Hello",
+			},
+		},
+		Model:       "", // Use default model
+		Temperature: 0.1,
+		MaxTokens:   5,
+	}
+
+	_, err := llmService.CreateChatCompletion(ctx, request)
+
+	if err != nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, "CONNECTION_TEST_FAILED",
+			"连接测试失败", err.Error())
+		return
+	}
+
+	data := map[string]interface{}{
+		"provider": llmService.GetProviderName(),
+		"status":   "connected",
+		"test":     "passed",
+		"mode":     "saved_config",
+	}
+	h.Response.Success(c, data, "连接测试成功")
 }
 
 // GetLLMStatus 获取LLM服务状态
@@ -1608,6 +1762,12 @@ func (h *Handler) GetLLMStatus(c *gin.Context) {
 		if model, ok := cfg.LLMConfig["default_model"]; ok {
 			status["config"].(map[string]interface{})["model"] = model
 		}
+	}
+
+	// Determine if the service is configured but not ready for other reasons
+	cfgReady := cfg.LLMProvider != "" && cfg.LLMConfig != nil && cfg.LLMConfig["api_key"] != ""
+	if !llmService.IsReady() {
+		status["configured"] = cfgReady
 	}
 
 	c.JSON(http.StatusOK, status)
@@ -2216,6 +2376,11 @@ func (h *Handler) ExportInteractionSummary(c *gin.Context) {
 
 // 故事视图页面处理器
 func (h *Handler) StoryViewPage(c *gin.Context) {
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	sceneID := c.Param("id")
 	sceneData, err := h.SceneService.LoadScene(sceneID)
 	if err != nil {
@@ -2226,6 +2391,7 @@ func (h *Handler) StoryViewPage(c *gin.Context) {
 	}
 
 	c.HTML(http.StatusOK, "story_view.html", gin.H{
+		"Title":      "故事视图 - " + sceneData.Scene.Title,
 		"scene":      sceneData.Scene,
 		"characters": sceneData.Characters,
 	})
@@ -2233,6 +2399,11 @@ func (h *Handler) StoryViewPage(c *gin.Context) {
 
 // UserProfilePage 返回用户档案页面
 func (h *Handler) UserProfilePage(c *gin.Context) {
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
 	// 获取用户ID（从query参数或默认值）
 	userID := c.Query("user_id")
 	if userID == "" {
@@ -2244,9 +2415,121 @@ func (h *Handler) UserProfilePage(c *gin.Context) {
 
 	// 渲染用户档案页面
 	c.HTML(http.StatusOK, "user_profile.html", gin.H{
+		"Title":      "用户档案",
 		"title":      "用户档案 - SceneIntruderMCP",
 		"user_id":    userID,
 		"debug":      cfg.DebugMode,
 		"static_url": "/static",
 	})
+}
+
+// LoginPage 返回登录页面
+func (h *Handler) LoginPage(c *gin.Context) {
+	// 添加缓存控制头
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+
+	// 检查是否已认证 - if authenticated, redirect to scenes page instead of root
+	if _, isAuthenticated := GetUserFromContext(c); isAuthenticated {
+		c.Redirect(http.StatusTemporaryRedirect, "/scenes")
+		return
+	}
+
+	// 获取配置
+	cfg := config.GetCurrentConfig()
+
+	// 渲染登录页面
+	c.HTML(http.StatusOK, "login.html", gin.H{
+		"Title":      "登录",
+		"title":      "登录 - SceneIntruderMCP",
+		"debug":      cfg.DebugMode,
+		"static_url": "/static",
+	})
+}
+
+// Login 处理用户登录请求
+func (h *Handler) Login(c *gin.Context) {
+	// 从请求体获取登录凭据
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "登录凭据格式错误", err.Error())
+		return
+	}
+
+	// 在开发环境中，简化登录流程，后续可扩展为真正的用户认证
+	// 建议在生产环境中实现安全的用户认证系统
+	cfg := config.GetCurrentConfig()
+
+	// 检查是否为默认开发账户
+	isValid := false
+	if cfg.DebugMode {
+		// 开发模式下，接受默认凭据
+		isValid = (req.Username == "admin" && req.Password == "admin") ||
+			(req.Username == "user" && req.Password == "user")
+	} else {
+		// 生产模式下，可以使用配置的服务来验证用户
+		// 简单起见，这里直接获取用户，如果存在则认为有效
+		_, err := h.UserService.GetUser(req.Username)
+		isValid = (err == nil)
+	}
+
+	if !isValid {
+		h.Response.Error(c, http.StatusUnauthorized, "INVALID_CREDENTIALS",
+			"用户名或密码错误", "请检查您的登录凭据")
+		return
+	}
+
+	// 生成认证令牌
+	token, err := GenerateUserToken(req.Username)
+	if err != nil {
+		h.Response.InternalError(c, "生成认证令牌失败", err.Error())
+		return
+	}
+
+	// 更新用户最后登录时间
+	user, err := h.UserService.GetUser(req.Username)
+	if err == nil {
+		// 更新用户的最后登录时间
+		user.LastLogin = time.Now()
+		h.UserService.SaveUser(user)
+		h.Logger.Info("User login successful", map[string]interface{}{
+			"username":  req.Username,
+			"client_ip": c.ClientIP(),
+		})
+	} else {
+		// 如果用户不存在但在开发模式下有效，创建临时用户
+		if cfg.DebugMode {
+			h.Logger.Info("Development login successful", map[string]interface{}{
+				"username":  req.Username,
+				"client_ip": c.ClientIP(),
+			})
+		}
+	}
+
+	// 返回成功响应
+	h.Response.Success(c, gin.H{
+		"token":   token,
+		"user_id": req.Username,
+	}, "登录成功")
+}
+
+// Logout 处理用户登出请求
+func (h *Handler) Logout(c *gin.Context) {
+	// 在实际实现中，可能需要将令牌加入黑名单
+	// 但现在我们简单地删除令牌并返回成功
+
+	userID, isAuthenticated := GetUserFromContext(c)
+	if isAuthenticated {
+		h.Logger.Info("User logged out", map[string]interface{}{
+			"user_id":   userID,
+			"client_ip": c.ClientIP(),
+		})
+	}
+
+	h.Response.Success(c, nil, "登出成功")
 }
