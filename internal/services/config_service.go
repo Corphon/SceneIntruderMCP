@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
+	"github.com/Corphon/SceneIntruderMCP/internal/di"
 )
 
 // ConfigService 提供配置管理功能
@@ -207,10 +208,29 @@ func (s *ConfigService) UpdateLLMConfig(provider string, configMap map[string]st
 		return errors.New("provider cannot be empty")
 	}
 
+	// 创建配置副本，避免修改调用方的map
+	normalizedConfig := make(map[string]string)
+	for key, value := range configMap {
+		normalizedConfig[key] = value
+	}
+
+	// 如果请求中没有提供新的API Key，尝试复用当前配置中的密钥
+	if apiKey, ok := normalizedConfig["api_key"]; !ok || apiKey == "" {
+		current := config.GetCurrentConfig()
+		if current != nil && current.LLMProvider == provider {
+			if existingKey := current.LLMConfig["api_key"]; existingKey != "" {
+				normalizedConfig["api_key"] = existingKey
+			}
+		}
+	}
+
 	// 验证配置参数
-	if err := s.validateLLMConfig(provider, configMap); err != nil {
+	if err := s.validateLLMConfig(provider, normalizedConfig); err != nil {
 		return fmt.Errorf("配置验证失败: %w", err)
 	}
+
+	// 使用归一化后的配置进行后续处理
+	configMap = normalizedConfig
 
 	// 🔧 分步骤处理，避免复杂的锁操作
 	var oldConfig *config.AppConfig
@@ -262,6 +282,21 @@ func (s *ConfigService) UpdateLLMConfig(provider string, configMap map[string]st
 
 	// 步骤4：异步通知
 	s.notifySubscribersAsyncSafe(oldConfig, newConfig, subscribers)
+
+	// 步骤5：更新LLM服务以反映新的配置
+	go func() {
+		// 获取依赖注入容器中的LLM服务并更新它
+		container := di.GetContainer()
+		if llmService, ok := container.Get("llm").(*LLMService); ok {
+			// Update provider with the new configuration
+			err := llmService.UpdateProvider(provider, newConfigMap)
+			if err != nil {
+				log.Printf("警告: 更新LLM服务失败: %v", err)
+			} else {
+				log.Printf("LLM服务已成功更新，提供商: %s", provider)
+			}
+		}
+	}()
 
 	return nil
 }
