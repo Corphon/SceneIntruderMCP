@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync/atomic"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
@@ -226,16 +227,32 @@ func (wh *WebSocketHandler) handleWebSocketWrites(client *WebSocketClient) {
 	defer func() {
 		ticker.Stop()
 		// Close send channel gracefully if not already closed
-		func() {
-			defer func() {
-				if recover() != nil {
-					// Channel was already closed, which is fine
-				}
+		// Check if client is already marked as closed using atomic operation
+		if atomic.CompareAndSwapInt32(&client.closed, 0, 1) {
+			// Close send channel safely with panic recovery
+			func() {
+				defer func() {
+					if recover() != nil {
+						// Channel was already closed, which is fine
+					}
+				}()
+				close(client.send)
 			}()
-			close(client.send)
-		}()
-		if !client.IsClosed() {
-			client.Close()
+			// Close the connection after closing the channel
+			client.conn.Close()
+		} else {
+			// Channel might already be marked as closed, but try to close it safely anyway
+			// This handles edge cases where multiple goroutines might try to close
+			func() {
+				defer func() {
+					if recover() != nil {
+						// Channel was already closed, which is fine
+					}
+				}()
+				close(client.send)
+			}()
+			// Close the connection
+			client.conn.Close()
 		}
 	}()
 
