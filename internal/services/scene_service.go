@@ -93,7 +93,7 @@ func (s *SceneService) getSceneLock(sceneID string) *sync.RWMutex {
 }
 
 // 线程安全的场景创建
-func (s *SceneService) CreateScene(userID, title, description, era, theme string) (*models.Scene, error) {
+func (s *SceneService) CreateScene(userID, title, description, content, source string) (*models.Scene, error) {
 	// 验证输入参数
 	if strings.TrimSpace(title) == "" {
 		return nil, fmt.Errorf("场景标题不能为空")
@@ -111,32 +111,21 @@ func (s *SceneService) CreateScene(userID, title, description, era, theme string
 	lock.Lock()
 	defer lock.Unlock()
 
-	// 处理主题字符串
-	var themes []string
-	if theme != "" {
-		// 如果主题包含逗号，按逗号分割成多个主题
-		if strings.Contains(theme, ",") {
-			themes = strings.Split(theme, ",")
-			// 清理每个主题字符串前后的空格
-			for i := range themes {
-				themes[i] = strings.TrimSpace(themes[i])
-			}
-		} else {
-			// 单个主题
-			themes = []string{theme}
-		}
-	}
-
 	// 创建场景对象
 	scene := &models.Scene{
 		ID:          sceneID,
 		UserID:      userID,
 		Title:       title,
 		Description: description,
-		Era:         era,
-		Themes:      themes,
+		Source:      source,
 		CreatedAt:   time.Now(),
 		LastUpdated: time.Now(),
+	}
+
+	// 如果提供了内容，将其添加到场景对象中（如果模型支持的话）
+	// 注意：在当前模型中，场景内容不是直接字段，但我们可以通过其他方式处理
+	if content != "" {
+		scene.Summary = content // 将内容暂时存储在Summary字段中
 	}
 
 	// 使用 FileStorage 保存场景数据
@@ -410,6 +399,8 @@ func (s *SceneService) loadCharactersCached(sceneID string) ([]*models.Character
 				continue
 			}
 
+			// 将加载的角色添加到切片中
+			characters = append(characters, &character)
 		}
 	}
 
@@ -718,14 +709,14 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 		return nil, fmt.Errorf("文本和标题不能为空")
 	}
 
-	// 创建分析器服务（需要注入LLMService）
+	// 创建分析器服务（需要注入AnalyzerService）
 	container := di.GetContainer()
-	llmService, ok := container.Get("llm").(LLMServicer)
-	if !ok || llmService == nil {
-		return nil, fmt.Errorf("LLM服务未初始化，无法分析文本")
+	analyzerService, ok := container.Get("analyzer").(*AnalyzerService)
+	if !ok || analyzerService == nil {
+		return nil, fmt.Errorf("分析服务未初始化，无法分析文本")
 	}
 
-	analysisResult, err := llmService.AnalyzeText(text, title)
+	analysisResult, err := analyzerService.AnalyzeText(text, title)
 	if err != nil {
 		return nil, fmt.Errorf("分析文本失败: %w", err)
 	}
@@ -958,6 +949,53 @@ func (s *SceneService) CreateSceneWithCharacters(scene *models.Scene, characters
 	}
 
 	// 清除缓存
+	s.invalidateListCache()
+
+	return nil
+}
+
+// GetCharactersByScene 获取指定场景的所有角色
+func (s *SceneService) GetCharactersByScene(sceneID string) ([]*models.Character, error) {
+	// 检查场景是否存在
+	sceneDir := filepath.Join(s.BasePath, sceneID)
+	if _, err := os.Stat(sceneDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("场景不存在: %s", sceneID)
+	}
+
+	// 使用缓存的方法加载角色
+	characters, err := s.loadCharactersCached(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载角色失败: %w", err)
+	}
+
+	return characters, nil
+}
+
+// DeleteScene 删除场景及其所有相关数据
+func (s *SceneService) DeleteScene(sceneID string) error {
+	// 验证输入参数
+	if sceneID == "" {
+		return fmt.Errorf("场景ID不能为空")
+	}
+
+	// 获取场景锁
+	lock := s.getSceneLock(sceneID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 检查场景是否存在
+	sceneDir := filepath.Join(s.BasePath, sceneID)
+	if _, err := os.Stat(sceneDir); os.IsNotExist(err) {
+		return fmt.Errorf("场景不存在: %s", sceneID)
+	}
+
+	// 删除场景目录及其所有内容
+	if err := os.RemoveAll(sceneDir); err != nil {
+		return fmt.Errorf("删除场景目录失败: %w", err)
+	}
+
+	// 清除缓存
+	s.invalidateSceneCache(sceneID)
 	s.invalidateListCache()
 
 	return nil
