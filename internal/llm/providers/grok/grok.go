@@ -19,9 +19,10 @@ func init() {
 	llm.Register("grok", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"grok-2",
-				"grok-2-mini",
+				"grok-4",
+				"grok-4-fast",
 				"grok-3",
+				"grok-3-mini",
 			},
 			baseURL: "https://api.x.ai/v1",
 		}
