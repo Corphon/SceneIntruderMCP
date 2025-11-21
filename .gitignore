@@ -1,0 +1,51 @@
+# Build artifacts
+sceneintruder
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binaries
+*.test
+
+# Output coverage files
+*.out
+
+# Go workspace files
+go.work
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+logs/*.log
+*.log
+
+# Data directory (user data)
+data/scenes/*
+data/config.json
+!data/scenes/.gitkeep
+
+# Temporary files
+temp/*
+!temp/.gitkeep
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Static assets (generated)
+static/images/default-character.jpg
