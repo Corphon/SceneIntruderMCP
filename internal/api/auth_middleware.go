@@ -34,14 +34,32 @@ func InitializeAuth() error {
 	if envSecret != "" {
 		secret = []byte(envSecret)
 	} else {
-		// Generate a truly random secret key if none is provided
-		secret, err = auth.GenerateSecureKey(32) // 256-bit key
-		if err != nil {
-			// Fallback to a reasonably secure key based on multiple entropy sources
-			entropy := fmt.Sprintf("%s_%d_%d", cfg.DataDir, time.Now().UnixNano(), os.Getpid())
-			secret = []byte(entropy)
-			log.Printf("警告: 使用派生密钥，建议在环境变量中设置 AUTH_SECRET_KEY")
+		// Check if in debug mode and use a consistent key for testing
+		if os.Getenv("DEBUG_MODE") == "true" || cfg.DebugMode {
+			// Use a consistent key during development to avoid session issues on restart
+			secret = []byte("dev_auth_key_for_testing_purposes_only_")
+			log.Printf("⚠️ 警告: 开发模式下使用固定认证密钥，生产环境请通过环境变量设置 AUTH_SECRET_KEY")
+		} else {
+			// Generate a truly random secret key if none is provided
+			secret, err = auth.GenerateSecureKey(32) // 256-bit key
+			if err != nil {
+				// Fallback to a reasonably secure key based on multiple entropy sources
+				entropy := fmt.Sprintf("%s_%d_%d", cfg.DataDir, time.Now().UnixNano(), os.Getpid())
+				secret = []byte(entropy)
+				log.Printf("Warning: When using derived keys, it is recommended to set them in environment variables AUTH_SECRET_KEY")
+			}
 		}
+	}
+
+	// Ensure the secret is at least 32 bytes
+	if len(secret) < 32 {
+		// Pad the secret if it's too short
+		paddedSecret := make([]byte, 32)
+		copy(paddedSecret, secret)
+		secret = paddedSecret
+	} else if len(secret) > 32 {
+		// Truncate if too long
+		secret = secret[:32]
 	}
 
 	tokenConfig = &auth.TokenConfig{
@@ -109,22 +127,24 @@ func AuthMiddleware() gin.HandlerFunc {
 // isPublicEndpoint checks if the current endpoint should skip authentication
 func isPublicEndpoint(c *gin.Context) bool {
 	publicPaths := []string{
-		"/api/settings",   // Settings can be accessed to configure auth
-		"/api/llm/status", // LLM status for setup
-		"/api/llm/models", // LLM models for setup
-		"/api/upload",     // File upload (may require other validation)
-		"/api/analyze",    // Text analysis
-		"/api/progress/",  // Progress tracking
-		"/",               // Main page
-		"/scenes",         // Scene listing (could be public)
-		"/scenes/create",  // Scene creation (could be public)
-		"/settings",       // Settings page
+		"/api/llm/status",               // LLM status for setup
+		"/api/llm/models",               // LLM models for setup
+		"/api/ws/status",                // WebSocket status
+		"/",                             // Main page
+		"/scenes",                       // Scene listing (could be public)
+		"/scenes/create",                // Scene creation (could be public)
+		"/settings",                     // Settings page - needs to be accessible for initial setup
+		"/login",                        // Login page
+		"/register",                     // Register page
+		"/api/auth/login",               // Login API endpoint
+		"/api/auth/logout",              // Logout API endpoint
+		"/api/settings/test-connection", // Test connection should be accessible without auth for initial setup
 	}
 
 	currentPath := c.Request.URL.Path
 
 	for _, path := range publicPaths {
-		if strings.HasPrefix(currentPath, path) {
+		if currentPath == path || strings.HasPrefix(currentPath, path+"/") {
 			return true
 		}
 	}
@@ -133,7 +153,17 @@ func isPublicEndpoint(c *gin.Context) bool {
 	if c.Request.Method == "GET" &&
 		(strings.HasPrefix(currentPath, "/static/") ||
 			strings.HasPrefix(currentPath, "/scenes/") ||
-			currentPath == "/api/ws/status") {
+			strings.HasPrefix(currentPath, "/uploads/") ||
+			strings.HasSuffix(currentPath, ".css") ||
+			strings.HasSuffix(currentPath, ".js") ||
+			strings.HasSuffix(currentPath, ".png") ||
+			strings.HasSuffix(currentPath, ".jpg") ||
+			strings.HasSuffix(currentPath, ".jpeg") ||
+			strings.HasSuffix(currentPath, ".gif") ||
+			strings.HasSuffix(currentPath, ".ico") ||
+			strings.HasSuffix(currentPath, ".svg") ||
+			strings.HasSuffix(currentPath, ".woff") ||
+			strings.HasSuffix(currentPath, ".woff2")) {
 		return true
 	}
 
