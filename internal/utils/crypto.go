@@ -84,3 +84,18 @@ func Decrypt(ciphertext, key string) (string, error) {
 
 	return string(plaintext), nil
 }
+
+// GenerateSecureKey generates a cryptographically secure random key of specified length
+func GenerateSecureKey(length int) ([]byte, error) {
+	if length <= 0 {
+		return nil, fmt.Errorf("key length must be greater than 0")
+	}
+	
+	key := make([]byte, length)
+	_, err := rand.Read(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate secure key: %w", err)
+	}
+	
+	return key, nil
+}
