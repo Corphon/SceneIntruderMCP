@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 	"github.com/joho/godotenv"
@@ -20,23 +21,24 @@ var (
 	configMutex   sync.RWMutex
 	configFile    string
 	encryptionKey string // Encryption key for API keys
+	// useEncryption is determined each time it's needed from environment variable
 )
 
 // AppConfig 包含应用程序的所有配置
 type AppConfig struct {
 	// 基础配置
-	Port         string            `json:"port"`
-	OpenAIAPIKey string            `json:"-"` // Don't serialize to JSON to avoid plain text storage
-	DataDir      string            `json:"data_dir"`
-	StaticDir    string            `json:"static_dir"`
-	TemplatesDir string            `json:"templates_dir"`
-	LogDir       string            `json:"log_dir"`
-	DebugMode    bool              `json:"debug_mode"`
+	Port         string `json:"port"`
+	OpenAIAPIKey string `json:"-"` // Don't serialize to JSON to avoid plain text storage
+	DataDir      string `json:"data_dir"`
+	StaticDir    string `json:"static_dir"`
+	TemplatesDir string `json:"templates_dir"`
+	LogDir       string `json:"log_dir"`
+	DebugMode    bool   `json:"debug_mode"`
 
 	// LLM相关配置
 	LLMProvider string            `json:"llm_provider"`
 	LLMConfig   map[string]string `json:"llm_config"`
-	
+
 	// Encrypted API key storage (stored as encrypted string)
 	EncryptedLLMConfig map[string]string `json:"encrypted_llm_config,omitempty"`
 }
@@ -59,6 +61,11 @@ var encryptionKeyWarningShown = false
 func generateEncryptionKey() string {
 	key := getEnv("CONFIG_ENCRYPTION_KEY", "")
 	if key == "" {
+		// Check if encryption should be disabled for testing
+		if getEnv("DISABLE_CONFIG_ENCRYPTION", "false") == "true" {
+			return "" // Return empty key when encryption is disabled
+		}
+
 		// Only show warning once
 		if !encryptionKeyWarningShown {
 			// In production, this should be a fatal error rather than using a default key
@@ -67,9 +74,19 @@ func generateEncryptionKey() string {
 			encryptionKeyWarningShown = true
 		}
 
-		// For development only, we'll warn and use a default, but in production this should be an error
+		// For development only, we'll use or generate a persistent key
 		if getEnv("DEBUG_MODE", "true") == "true" {
-			key = "SceneIntruderMCP_default_encryption_key_32_chars!"
+			// Try to load existing key from file, or generate a new one
+			persistentKey, err := loadOrGeneratePersistentKey()
+			if err != nil {
+				log.Printf("⚠️ 警告: 无法加载或生成持久化密钥: %v", err)
+				// Fallback to a more secure derived key if persistent key fails
+				derivedKey := fmt.Sprintf("%-32s", fmt.Sprintf("dev_key_%d", time.Now().UnixNano()))[:32]
+				log.Println("⚠️ 警告: 使用基于时间的开发密钥，不建议用于生产环境")
+				return derivedKey
+			}
+			log.Println("✅ 为开发环境生成了安全的随机加密密钥")
+			return persistentKey
 		} else {
 			log.Fatal("❌ 生产环境中必须设置 CONFIG_ENCRYPTION_KEY 环境变量")
 		}
@@ -81,6 +98,44 @@ func generateEncryptionKey() string {
 	}
 
 	return key
+}
+
+// isEncryptionEnabled returns whether encryption should be used based on environment settings
+func isEncryptionEnabled() bool {
+	return getEnv("DISABLE_CONFIG_ENCRYPTION", "false") != "true"
+}
+
+// loadOrGeneratePersistentKey loads an existing encryption key from file or generates a new one
+func loadOrGeneratePersistentKey() (string, error) {
+	dataDir := getEnv("DATA_DIR", "data")
+	keyFile := filepath.Join(dataDir, ".encryption_key")
+
+	// Ensure data directory exists
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create data directory: %w", err)
+	}
+
+	// Try to load existing key
+	if keyData, err := os.ReadFile(keyFile); err == nil {
+		key := string(keyData)
+		if len(key) >= 32 {
+			return key, nil
+		}
+		log.Println("⚠️ 警告: 现有加密密钥长度不足，将生成新密钥")
+	}
+
+	// Generate a new secure key
+	randomKey, err := utils.GenerateSecureKey(32) // 32 bytes = 256 bits
+	if err != nil {
+		return "", fmt.Errorf("failed to generate secure key: %w", err)
+	}
+
+	// Save the key to file for future use (with restricted permissions)
+	if err := os.WriteFile(keyFile, randomKey, 0600); err != nil {
+		return "", fmt.Errorf("failed to save encryption key: %w", err)
+	}
+
+	return string(randomKey), nil
 }
 
 // Load 从环境变量加载配置
@@ -147,6 +202,11 @@ func getEnvBool(key string, defaultValue bool) bool {
 
 // encryptAPIKey encrypts an API key
 func encryptAPIKey(plaintext string) (string, error) {
+	if !isEncryptionEnabled() {
+		// If encryption is disabled, return the plaintext directly
+		return plaintext, nil
+	}
+
 	if encryptionKey == "" {
 		return "", fmt.Errorf("encryption key not initialized")
 	}
@@ -155,6 +215,11 @@ func encryptAPIKey(plaintext string) (string, error) {
 
 // decryptAPIKey decrypts an API key
 func decryptAPIKey(ciphertext string) (string, error) {
+	if !isEncryptionEnabled() {
+		// If encryption is disabled, return the ciphertext directly as it was stored as plaintext
+		return ciphertext, nil
+	}
+
 	if encryptionKey == "" {
 		return "", fmt.Errorf("encryption key not initialized")
 	}
@@ -163,6 +228,14 @@ func decryptAPIKey(ciphertext string) (string, error) {
 
 // getDecryptedAPIKey gets the decrypted API key from LLMConfig
 func (c *AppConfig) getDecryptedAPIKey() string {
+	if !isEncryptionEnabled() {
+		// If encryption is disabled, API key is stored directly in LLMConfig
+		if c.LLMConfig != nil {
+			return c.LLMConfig["api_key"]
+		}
+		return ""
+	}
+
 	if c.EncryptedLLMConfig != nil {
 		encryptedKey, exists := c.EncryptedLLMConfig["api_key"]
 		if exists && encryptedKey != "" {
@@ -186,10 +259,19 @@ func (c *AppConfig) getDecryptedAPIKey() string {
 
 // setEncryptedAPIKey sets the encrypted API key in LLMConfig
 func (c *AppConfig) setEncryptedAPIKey(apiKey string) error {
+	if !isEncryptionEnabled() {
+		// If encryption is disabled, store API key directly in LLMConfig
+		if c.LLMConfig == nil {
+			c.LLMConfig = make(map[string]string)
+		}
+		c.LLMConfig["api_key"] = apiKey
+		return nil
+	}
+
 	if c.EncryptedLLMConfig == nil {
 		c.EncryptedLLMConfig = make(map[string]string)
 	}
-	
+
 	encryptedKey, err := encryptAPIKey(apiKey)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt API key: %w", err)
@@ -201,22 +283,22 @@ func (c *AppConfig) setEncryptedAPIKey(apiKey string) error {
 // getLLMConfig returns the current LLM config with decrypted API key
 func (c *AppConfig) getLLMConfig() map[string]string {
 	config := make(map[string]string)
-	
+
 	// Copy non-sensitive fields from LLMConfig
 	if c.LLMConfig != nil {
 		for k, v := range c.LLMConfig {
-			if k != "api_key" { // Don't copy the api_key from unencrypted config
+			if k != "api_key" { // Don't copy the api_key from unencrypted config (to avoid duplication with decrypted)
 				config[k] = v
 			}
 		}
 	}
-	
+
 	// Add decrypted API key
 	decryptedAPIKey := c.getDecryptedAPIKey()
 	if decryptedAPIKey != "" {
 		config["api_key"] = decryptedAPIKey
 	}
-	
+
 	return config
 }
 
@@ -235,17 +317,15 @@ func InitConfig(dataDir string) error {
 	defer configMutex.Unlock()
 
 	currentConfig = &AppConfig{
-		Port:         baseConfig.Port,
-		OpenAIAPIKey: baseConfig.OpenAIAPIKey,
-		DataDir:      baseConfig.DataDir,
-		StaticDir:    baseConfig.StaticDir,
-		TemplatesDir: baseConfig.TemplatesDir,
-		LogDir:       baseConfig.LogDir,
-		DebugMode:    baseConfig.DebugMode,
-		LLMProvider:  "openai", // 默认使用OpenAI
-		LLMConfig: map[string]string{
-			"default_model": "gpt-4o",
-		},
+		Port:               baseConfig.Port,
+		OpenAIAPIKey:       baseConfig.OpenAIAPIKey,
+		DataDir:            baseConfig.DataDir,
+		StaticDir:          baseConfig.StaticDir,
+		TemplatesDir:       baseConfig.TemplatesDir,
+		LogDir:             baseConfig.LogDir,
+		DebugMode:          baseConfig.DebugMode,
+		LLMProvider:        "",                      // No default provider
+		LLMConfig:          make(map[string]string), // Empty config initially
 		EncryptedLLMConfig: make(map[string]string),
 	}
 
@@ -263,37 +343,79 @@ func InitConfig(dataDir string) error {
 		if err == nil {
 			var savedConfig AppConfig
 			if json.Unmarshal(data, &savedConfig) == nil {
-				// 合并配置，保留文件中的LLM设置，但使用最新的基础配置
-				savedConfig.Port = baseConfig.Port
-				savedConfig.DataDir = baseConfig.DataDir
-				savedConfig.StaticDir = baseConfig.StaticDir
-				savedConfig.TemplatesDir = baseConfig.TemplatesDir
-				savedConfig.LogDir = baseConfig.LogDir
-				savedConfig.DebugMode = baseConfig.DebugMode
+				// Check if the config file is just a template (empty or default values)
+				// Only load the config if it has meaningful values (not empty provider, not empty default model, has API key)
+				hasMeaningfulValues := false
 
-				// Handle backward compatibility with unencrypted API keys in old configs
-				if savedConfig.LLMConfig != nil {
-					// If there's an unencrypted API key in the old config, encrypt it
-					if apiKey := savedConfig.LLMConfig["api_key"]; apiKey != "" {
-						// Set the encrypted version and clear the unencrypted one
-						err := savedConfig.setEncryptedAPIKey(apiKey)
-						if err != nil {
-							log.Printf("⚠️ 警告: 无法加密旧配置中的API密钥: %v", err)
-							log.Printf("💡 建议: 请通过设置页面重新配置API密钥")
-						} else {
-							log.Println("✅ 已自动将旧配置中的API密钥升级为加密存储")
-						}
-						// Remove api_key from the unencrypted config
-						delete(savedConfig.LLMConfig, "api_key")
-					}
+				// Check if there's an actual provider that's not just the default
+				if savedConfig.LLMProvider != "" && savedConfig.LLMProvider != "openai" {
+					hasMeaningfulValues = true
 				}
 
-				currentConfig = &savedConfig
+				// Check if there's a custom model configured (not just the default)
+				if savedConfig.LLMConfig != nil &&
+					(savedConfig.LLMConfig["default_model"] != "" && savedConfig.LLMConfig["default_model"] != "gpt-4o") {
+					hasMeaningfulValues = true
+				}
+
+				// Check if there's an encrypted API key
+				if savedConfig.EncryptedLLMConfig != nil && savedConfig.EncryptedLLMConfig["api_key"] != "" {
+					hasMeaningfulValues = true
+				}
+
+				// Check if there's an unencrypted API key (for backward compatibility or if user has manually added it)
+				if savedConfig.LLMConfig != nil && savedConfig.LLMConfig["api_key"] != "" {
+					hasMeaningfulValues = true
+				}
+
+				// Check if base_url is set (indicating custom configuration)
+				if savedConfig.LLMConfig != nil && savedConfig.LLMConfig["base_url"] != "" {
+					hasMeaningfulValues = true
+				}
+
+				if hasMeaningfulValues {
+					// 合并配置，保留文件中的LLM设置，但使用最新的基础配置
+					savedConfig.Port = baseConfig.Port
+					savedConfig.DataDir = baseConfig.DataDir
+					savedConfig.StaticDir = baseConfig.StaticDir
+					savedConfig.TemplatesDir = baseConfig.TemplatesDir
+					savedConfig.LogDir = baseConfig.LogDir
+					savedConfig.DebugMode = baseConfig.DebugMode
+
+					// Handle backward compatibility with unencrypted API keys in old configs
+					if savedConfig.LLMConfig != nil {
+						// If there's an unencrypted API key in the old config, handle based on encryption setting
+						if apiKey := savedConfig.LLMConfig["api_key"]; apiKey != "" {
+							if isEncryptionEnabled() {
+								// If encryption is now enabled, encrypt the existing API key
+								err := savedConfig.setEncryptedAPIKey(apiKey)
+								if err != nil {
+									log.Printf("⚠️ 警告: 无法加密旧配置中的API密钥: %v", err)
+									log.Printf("💡 建议: 请通过设置页面重新配置API密钥")
+								} else {
+									log.Println("✅ 已自动将旧配置中的API密钥升级为加密存储")
+								}
+							} else {
+								// If encryption is disabled, just keep it in the unencrypted config
+								log.Println("💡 配置: 加密已禁用，API密钥将以明文形式存储")
+							}
+							// Remove api_key from the unencrypted config to avoid duplication
+							// This will be handled by setEncryptedAPIKey if encryption is used
+							// or will remain in unencrypted config if not used
+							delete(savedConfig.LLMConfig, "api_key")
+						}
+					}
+
+					currentConfig = &savedConfig
+				} else {
+					// The config file exists but only contains template/default values, don't load it
+					log.Println("📝 配置文件仅包含模板值，使用默认配置而不加载文件")
+				}
 			}
 		}
 	}
 
-	// 保存初始配置到文件
+	// 保存初始配置到文件，仅当当前配置与默认配置不同时（即用户已保存有效配置）
 	return SaveConfig()
 }
 
@@ -306,25 +428,23 @@ func GetCurrentConfig() *AppConfig {
 		// 紧急情况，返回一个基本配置
 		baseConfig, _ := Load()
 		appConfig := &AppConfig{
-			Port:         baseConfig.Port,
-			OpenAIAPIKey: baseConfig.OpenAIAPIKey,
-			DataDir:      baseConfig.DataDir,
-			StaticDir:    baseConfig.StaticDir,
-			TemplatesDir: baseConfig.TemplatesDir,
-			LogDir:       baseConfig.LogDir,
-			DebugMode:    baseConfig.DebugMode,
-			LLMProvider:  "openai",
-			LLMConfig: map[string]string{
-				"default_model": "gpt-4o",
-			},
+			Port:               baseConfig.Port,
+			OpenAIAPIKey:       baseConfig.OpenAIAPIKey,
+			DataDir:            baseConfig.DataDir,
+			StaticDir:          baseConfig.StaticDir,
+			TemplatesDir:       baseConfig.TemplatesDir,
+			LogDir:             baseConfig.LogDir,
+			DebugMode:          baseConfig.DebugMode,
+			LLMProvider:        "",
+			LLMConfig:          make(map[string]string),
 			EncryptedLLMConfig: make(map[string]string),
 		}
-		
+
 		// Set encrypted API key if available
 		if baseConfig.OpenAIAPIKey != "" {
 			appConfig.setEncryptedAPIKey(baseConfig.OpenAIAPIKey)
 		}
-		
+
 		return appConfig
 	}
 
@@ -344,31 +464,78 @@ func UpdateLLMConfig(provider string, config map[string]string) error {
 		return fmt.Errorf("配置系统未初始化")
 	}
 
+	// 创建配置副本以避免修改传入的 map
+	newConfig := make(map[string]string)
+	for k, v := range config {
+		newConfig[k] = v
+	}
+
+	// 检查是否提供了新的 API Key
+	newAPIKey, hasNewKey := newConfig["api_key"]
+
+	// 如果没有提供新 Key 或为空，检查是否已有 Key
+	if !hasNewKey || newAPIKey == "" {
+		// 尝试获取现有的解密 Key
+		existingKey := currentConfig.getDecryptedAPIKey()
+		// 只有当现有 Key 存在且当前 Provider 与请求的 Provider 一致时才复用
+		// 如果切换了 Provider，则必须提供新的 Key (除非新 Provider 不需要 Key，但这由 validateLLMConfig 处理)
+		if existingKey != "" && currentConfig.LLMProvider == provider {
+			newConfig["api_key"] = existingKey
+		}
+	}
+
 	// provider 验证
 	if err := validateLLMProvider(provider); err != nil {
 		return err
 	}
 
 	// 配置验证
-	if err := validateLLMConfig(provider, config); err != nil {
+	if err := validateLLMConfig(provider, newConfig); err != nil {
 		return err
 	}
 
 	currentConfig.LLMProvider = provider
-	
-	// Handle API key encryption
+
+	// Handle API key encryption/decryption based on useEncryption setting
 	currentConfig.LLMConfig = make(map[string]string)
-	for k, v := range config {
+	for k, v := range newConfig {
 		if k == "api_key" {
-			// Encrypt the API key
+			// Encrypt the API key based on encryption setting
 			err := currentConfig.setEncryptedAPIKey(v)
 			if err != nil {
-				return fmt.Errorf("failed to encrypt API key: %w", err)
+				return fmt.Errorf("failed to %s API key: %w",
+					map[bool]string{true: "encrypt", false: "store"}[isEncryptionEnabled()], err)
 			}
 		} else {
 			currentConfig.LLMConfig[k] = v
 		}
 	}
+
+	return SaveConfig()
+}
+
+// UpdateFullConfig 更新完整的配置
+func UpdateFullConfig(provider string, llmConfig map[string]string, encryptedLLMConfig map[string]string) error {
+	configMutex.Lock()
+	defer configMutex.Unlock()
+
+	if currentConfig == nil {
+		return fmt.Errorf("配置系统未初始化")
+	}
+
+	// provider 验证
+	if err := validateLLMProvider(provider); err != nil {
+		return err
+	}
+
+	// 配置验证
+	if err := validateLLMConfig(provider, encryptedLLMConfig); err != nil {
+		return err
+	}
+
+	currentConfig.LLMProvider = provider
+	currentConfig.LLMConfig = llmConfig
+	currentConfig.EncryptedLLMConfig = encryptedLLMConfig
 
 	return SaveConfig()
 }
@@ -429,7 +596,7 @@ func SaveConfig() error {
 
 	// Create a copy of the config for serialization that excludes the plain API key
 	configToSave := *currentConfig
-	
+
 	// Store the decrypted LLM config temporarily to avoid storing plain text API key
 	originalLLMConfig := configToSave.LLMConfig
 	configToSave.LLMConfig = make(map[string]string)
