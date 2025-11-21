@@ -22,6 +22,30 @@ const (
 	TriggerTypeCharacterInteraction = "character_interaction"
 )
 
+// sanitizeLLMJSONResponse 移除LLM响应中的Markdown代码块或反引号，确保可以解析为JSON
+func sanitizeLLMJSONResponse(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return cleaned
+	}
+
+	if strings.HasPrefix(cleaned, "```") {
+		cleaned = strings.TrimPrefix(cleaned, "```")
+		cleaned = strings.TrimSpace(cleaned)
+		lower := strings.ToLower(cleaned)
+		if strings.HasPrefix(lower, "json") {
+			cleaned = strings.TrimSpace(cleaned[4:])
+		}
+		if idx := strings.LastIndex(cleaned, "```"); idx != -1 {
+			cleaned = cleaned[:idx]
+		}
+	}
+
+	cleaned = strings.TrimSpace(cleaned)
+	cleaned = strings.Trim(cleaned, "`")
+	return strings.TrimSpace(cleaned)
+}
+
 // StoryService 管理故事进展和剧情分支
 type StoryService struct {
 	SceneService     *SceneService
@@ -42,6 +66,7 @@ type StoryService struct {
 type CachedStoryData struct {
 	Data      *models.StoryData
 	Timestamp time.Time
+	Loading   *sync.Once // 用于确保只加载一次
 }
 
 // NewStoryService 创建故事服务
@@ -111,6 +136,10 @@ func (s *StoryService) cleanupExpiredCache() {
 
 	now := time.Now()
 	for sceneID, cached := range s.storyCache {
+		// 不清理正在加载的数据
+		if cached.Loading != nil {
+			continue
+		}
 		if now.Sub(cached.Timestamp) > s.cacheExpiry {
 			delete(s.storyCache, sceneID)
 		}
@@ -139,29 +168,6 @@ func (s *StoryService) InitializeStoryForScene(sceneID string, preferences *mode
 	return storyData, nil
 }
 
-/*
-// 带锁的加载方法，供不使用缓存的方法使用
-func (s *StoryService) loadStoryDataWithLock(sceneID string) (*models.StoryData, error) {
-	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
-
-	if _, err := os.Stat(storyPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("故事数据不存在")
-	}
-
-	storyDataBytes, err := os.ReadFile(storyPath)
-	if err != nil {
-		return nil, fmt.Errorf("读取故事数据失败: %w", err)
-	}
-
-	var storyData models.StoryData
-	if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
-		return nil, fmt.Errorf("解析故事数据失败: %w", err)
-	}
-
-	return &storyData, nil
-}
-*/
-
 // 统一的故事数据加载方法
 func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, error) {
 	// 检查缓存
@@ -170,9 +176,24 @@ func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, err
 		if time.Since(cached.Timestamp) < s.cacheExpiry {
 			s.cacheMutex.RUnlock()
 			return cached.Data, nil
+		} else if cached.Loading != nil {
+			// 如果数据过期但正在加载，等待加载完成
+			loading := cached.Loading
+			s.cacheMutex.RUnlock()
+			loading.Do(func() {}) // 等待加载完成
+			// 重新检查缓存
+			s.cacheMutex.RLock()
+			if cached, exists := s.storyCache[sceneID]; exists && cached.Data != nil {
+				s.cacheMutex.RUnlock()
+				return cached.Data, nil
+			}
+			s.cacheMutex.RUnlock()
+		} else {
+			s.cacheMutex.RUnlock()
 		}
+	} else {
+		s.cacheMutex.RUnlock()
 	}
-	s.cacheMutex.RUnlock()
 
 	// 缓存过期或不存在，需要重新加载
 	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
@@ -182,26 +203,55 @@ func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, err
 		return nil, fmt.Errorf("故事数据不存在")
 	}
 
-	// 读取文件
-	storyDataBytes, err := os.ReadFile(storyPath)
-	if err != nil {
-		return nil, fmt.Errorf("读取故事数据失败: %w", err)
-	}
+	// 实现加载操作，确保只进行一次
+	var loadedData *models.StoryData
+	var loadErr error
 
-	var storyData models.StoryData
-	if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
-		return nil, fmt.Errorf("解析故事数据失败: %w", err)
-	}
-
-	// 更新缓存
+	// 获取或创建加载标记
 	s.cacheMutex.Lock()
-	s.storyCache[sceneID] = &CachedStoryData{
-		Data:      &storyData,
-		Timestamp: time.Now(),
+	cached, exists := s.storyCache[sceneID]
+	if !exists || cached.Loading == nil {
+		// 创建新的加载标记
+		s.storyCache[sceneID] = &CachedStoryData{
+			Loading: &sync.Once{},
+		}
+		cached = s.storyCache[sceneID]
 	}
+	loading := cached.Loading
 	s.cacheMutex.Unlock()
 
-	return &storyData, nil
+	// 使用 sync.Once 确保只加载一次
+	loading.Do(func() {
+		// 读取文件
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			loadErr = fmt.Errorf("读取故事数据失败: %w", err)
+			return
+		}
+
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			loadErr = fmt.Errorf("解析故事数据失败: %w", err)
+			return
+		}
+
+		loadedData = &storyData
+
+		// 更新缓存
+		s.cacheMutex.Lock()
+		s.storyCache[sceneID] = &CachedStoryData{
+			Data:      &storyData,
+			Timestamp: time.Now(),
+			Loading:   nil, // 加载完成，清除加载标记
+		}
+		s.cacheMutex.Unlock()
+	})
+
+	if loadErr != nil {
+		return nil, loadErr
+	}
+
+	return loadedData, nil
 }
 
 // 缓存失效方法
@@ -356,8 +406,12 @@ Return in JSON format:
 		systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
 	}
 
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
 	resp, err := s.LLMService.CreateChatCompletion(
-		context.Background(),
+		ctx,
 		ChatCompletionRequest{
 			Model: s.getLLMModel(preferences),
 			Messages: []ChatCompletionMessage{
@@ -387,7 +441,7 @@ Return in JSON format:
 		}
 	}
 
-	jsonStr := resp.Choices[0].Message.Content
+	jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 	// 解析返回的JSON
 	var storySetup struct {
@@ -590,6 +644,15 @@ func (s *StoryService) GetStoryData(sceneID string, preferences *models.UserPref
 	})
 
 	return storyData, err
+}
+
+// GetStoryForScene 获取指定场景的故事数据
+func (s *StoryService) GetStoryForScene(sceneID string) (*models.StoryData, error) {
+	storyData, err := s.loadStoryDataSafe(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载故事数据失败: %w", err)
+	}
+	return storyData, nil
 }
 
 // MakeChoice 处理玩家做出的故事选择
@@ -870,8 +933,12 @@ Respond with a JSON object in the following format:
 		systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事，包括角色之间的互动。"
 	}
 
+	// Create a context with timeout for the LLM call
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
 	resp, err := s.LLMService.CreateChatCompletion(
-		context.Background(),
+		ctx,
 		ChatCompletionRequest{
 			Model: s.getLLMModel(preferences),
 			Messages: []ChatCompletionMessage{
@@ -901,7 +968,7 @@ Respond with a JSON object in the following format:
 		}
 	}
 
-	jsonStr := resp.Choices[0].Message.Content
+	jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 	// 解析返回的JSON
 	var nodeData struct {
@@ -1293,8 +1360,12 @@ Return in JSON format:
 			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
 		}
 
+		// Create a context with timeout for the LLM call
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
 		resp, err := s.LLMService.CreateChatCompletion(
-			context.Background(),
+			ctx,
 			ChatCompletionRequest{
 				Model: s.getLLMModel(preferences),
 				Messages: []ChatCompletionMessage{
@@ -1324,7 +1395,7 @@ Return in JSON format:
 			}
 		}
 
-		jsonStr := resp.Choices[0].Message.Content
+		jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 		// 解析返回的JSON
 		var explorationData struct {
@@ -1619,8 +1690,12 @@ Return in JSON format:
 			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
 		}
 
+		// Create a context with timeout for the LLM call
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
 		resp, err := s.LLMService.CreateChatCompletion(
-			context.Background(),
+			ctx,
 			ChatCompletionRequest{
 				Model: s.getLLMModel(preferences),
 				Messages: []ChatCompletionMessage{
@@ -1650,7 +1725,7 @@ Return in JSON format:
 			}
 		}
 
-		jsonStr := resp.Choices[0].Message.Content
+		jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 		// 解析返回的JSON
 		var eventData struct {
@@ -1936,8 +2011,12 @@ Return in JSON format:
 			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
 		}
 
+		// Create a context with timeout for the LLM call
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+
 		resp, err := s.LLMService.CreateChatCompletion(
-			context.Background(),
+			ctx,
 			ChatCompletionRequest{
 				Model: s.getLLMModel(preferences),
 				Messages: []ChatCompletionMessage{
@@ -1967,7 +2046,7 @@ Return in JSON format:
 			}
 		}
 
-		jsonStr := resp.Choices[0].Message.Content
+		jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 		// 解析返回的JSON
 		var branchData struct {
