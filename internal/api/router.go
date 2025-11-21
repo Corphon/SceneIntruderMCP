@@ -106,12 +106,13 @@ func SetupRouter() (*gin.Engine, error) {
 	// ===============================
 	// 页面路由
 	// ===============================
-	r.GET("/", handler.IndexPage)
+	r.GET("/", handler.IndexPage) // 显示欢迎页面
 	r.GET("/scenes", handler.SceneSelectorPage)
 	r.GET("/scenes/create", handler.CreateScenePage)
 	r.GET("/scenes/:id", handler.ScenePage)
 	r.GET("/settings", handler.SettingsPage)
 	r.GET("/user/profile", handler.UserProfilePage) // 添加用户档案页面
+	r.GET("/login", handler.LoginPage)              // 添加登录页面
 	r.GET("/scenes/:id/story", handler.StoryViewPage)
 
 	// WebSocket 支持
@@ -129,13 +130,22 @@ func SetupRouter() (*gin.Engine, error) {
 		api.POST("/interactions/aggregate", AuthMiddleware(), handler.ProcessInteractionAggregate)
 
 		// ===============================
+		// 登录相关路由
+		// ===============================
+		authGroup := api.Group("/auth")
+		{
+			authGroup.POST("/login", handler.Login)
+			authGroup.POST("/logout", handler.Logout) // Remove AuthMiddleware for logout since token is needed to verify
+		}
+
+		// ===============================
 		// 设置相关路由
 		// ===============================
 		settingsGroup := api.Group("/settings")
 		{
 			settingsGroup.GET("", handler.GetSettings)
-			settingsGroup.POST("", AuthMiddleware(), handler.SaveSettings)
-			settingsGroup.POST("/test-connection", AuthMiddleware(), handler.TestConnection)
+			settingsGroup.POST("", handler.SaveSettings) // Remove AuthMiddleware for save-settings to allow unauthenticated saving during initial setup
+			settingsGroup.POST("/test-connection", handler.TestConnection) // Remove AuthMiddleware for test-connection to allow unauthenticated testing
 		}
 
 		// ===============================
@@ -145,7 +155,7 @@ func SetupRouter() (*gin.Engine, error) {
 		{
 			llmGroup.GET("/status", handler.GetLLMStatus)
 			llmGroup.GET("/models", handler.GetLLMModels)
-			llmGroup.PUT("/config", AuthMiddleware(), handler.UpdateLLMConfig)
+			llmGroup.PUT("/config", AuthMiddleware(), handler.UpdateLLMConfig) // Keep AuthMiddleware for UpdateLLMConfig to protect sensitive config changes
 		}
 
 		// ===============================
