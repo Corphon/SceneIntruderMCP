@@ -19,10 +19,8 @@ func init() {
 	llm.Register("google", func() llm.Provider {
 		return &Provider{
 			models: []string{
-				"gemini-2.0-pro-exp",
-				"gemini-2.0-flash-exp",
-				"gemini-1.5-pro",
-				"gemini-2.0-flash-thinking-exp",
+				"gemini-2.5-pro",
+				"gemini-2.5-flash",
 			},
 			baseURL: "https://generativelanguage.googleapis.com/v1",
 		}
