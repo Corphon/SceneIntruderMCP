@@ -58,6 +58,9 @@ func NewUserService() *UserService {
 	// 启动缓存清理
 	service.startCacheCleanup()
 
+	// 确保控制台默认用户可用，便于技能等功能直接使用
+	service.ensureDefaultUser("console_user")
+
 	return service
 }
 
@@ -152,6 +155,47 @@ func (s *UserService) CreateUser(username string, email string) (*models.User, e
 	}
 
 	return user, nil
+}
+
+// ensureDefaultUser 会在缺少指定用户时创建一个基础用户，保证控制台功能可用
+func (s *UserService) ensureDefaultUser(userID string) {
+	if userID == "" {
+		return
+	}
+
+	userPath := filepath.Join(s.BasePath, userID+".json")
+	if _, err := os.Stat(userPath); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		fmt.Printf("警告: 检查默认用户失败: %v\n", err)
+		return
+	}
+
+	now := time.Now()
+	user := &models.User{
+		ID:        userID,
+		Username:  userID,
+		Email:     fmt.Sprintf("%s@local", userID),
+		CreatedAt: now,
+		LastLogin: now,
+		LastUpdated: now,
+		Preferences: models.UserPreferences{
+			CreativityLevel:   models.CreativityBalanced,
+			AllowPlotTwists:   true,
+			ResponseLength:    "medium",
+			LanguageStyle:     "casual",
+			NotificationLevel: "important",
+			DarkMode:          false,
+			PreferredModel:    "qwen3-max",
+			AutoSave:          true,
+		},
+		Items:  []models.UserItem{},
+		Skills: []models.UserSkill{},
+	}
+
+	if err := s.saveUserDirect(user); err != nil {
+		fmt.Printf("警告: 创建默认用户失败: %v\n", err)
+	}
 }
 
 // SaveUser 保存用户信息（线程安全）
