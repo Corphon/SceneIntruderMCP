@@ -20,9 +20,10 @@ func init() {
 		return &Provider{
 			recommendedModels: []string{
 				"gpt-4o",
-				"gpt-oss-120b",
-				"gpt-5-chat",
+				"gpt-4o-mini",
 				"gpt-4.1",
+				"gpt-4.1-mini",
+				"gpt-5-nano",
 			},
 			baseURL: "https://api.openai.com/v1",
 		}
