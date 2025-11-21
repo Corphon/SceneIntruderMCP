@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/llm"
@@ -133,19 +134,19 @@ func NewLLMService() (*LLMService, error) {
 	// 尝试从配置初始化
 	cfg := config.GetCurrentConfig()
 	if cfg == nil {
-		service.readyState = "无法获取配置"
+		service.readyState = "Failed to retrieve configuration"
 		return service, nil
 	}
 
 	if cfg.LLMProvider == "" || (cfg.LLMConfig != nil && cfg.LLMConfig["api_key"] == "") {
-		service.readyState = "未配置API密钥"
+		service.readyState = "API key not configured"
 		return service, nil
 	}
 
 	// 尝试初始化提供商
 	provider, err := llm.GetProvider(cfg.LLMProvider, cfg.LLMConfig)
 	if err != nil {
-		service.readyState = fmt.Sprintf("初始化失败: %v", err)
+		service.readyState = fmt.Sprintf("Initialization failed: %v", err)
 		return service, nil // 返回未就绪服务而不是错误
 	}
 
@@ -153,7 +154,7 @@ func NewLLMService() (*LLMService, error) {
 	service.provider = provider
 	service.providerName = cfg.LLMProvider
 	service.isReady = true
-	service.readyState = "已就绪"
+	service.readyState = "Ready"
 
 	return service, nil
 }
@@ -162,7 +163,7 @@ func NewLLMService() (*LLMService, error) {
 func NewEmptyLLMService() *LLMService {
 	service := createBaseLLMService()
 	service.providerName = "empty"
-	service.readyState = "后备服务模式 - 请在设置中配置API密钥"
+	service.readyState = "Standby Service Mode – Please configure the API key in settings"
 	return service
 }
 
@@ -172,7 +173,7 @@ func createBaseLLMService() *LLMService {
 		provider:     nil,
 		providerName: "",
 		isReady:      false,
-		readyState:   "未初始化",
+		readyState:   "Uninitialized",
 		cache: &LLMCache{
 			cache:      make(map[string]*CacheEntry),
 			mutex:      sync.RWMutex{},
@@ -185,14 +186,60 @@ func createBaseLLMService() *LLMService {
 func (s *LLMService) IsReady() bool {
 	s.providerMutex.RLock()
 	defer s.providerMutex.RUnlock()
-	return s.isReady
+
+	// Check if provider exists and is set
+	if s.provider != nil && s.isReady {
+		return true
+	}
+
+	// Check current config to see if service should be ready
+	cfg := config.GetCurrentConfig()
+	if cfg == nil {
+		return false
+	}
+
+	// Check if provider and API key are properly configured
+	if cfg.LLMProvider == "" {
+		return false
+	}
+
+	// Check if API key is available in the current config
+	// The LLMConfig from GetCurrentConfig should already include decrypted API key
+	if cfg.LLMConfig == nil || cfg.LLMConfig["api_key"] == "" {
+		return false
+	}
+
+	return true
 }
 
 // GetReadyState 返回服务就绪状态描述
 func (s *LLMService) GetReadyState() string {
 	s.providerMutex.RLock()
 	defer s.providerMutex.RUnlock()
-	return s.readyState
+
+	// Return real-time status based on current config
+	cfg := config.GetCurrentConfig()
+	if cfg == nil {
+		return "Cannot get configuration"
+	}
+
+	if cfg.LLMProvider == "" {
+		return "LLM provider not configured"
+	}
+
+	// Check if API key is available in the current config
+	// The LLMConfig from GetCurrentConfig should already include decrypted API key
+	if cfg.LLMConfig == nil || cfg.LLMConfig["api_key"] == "" {
+		return "API key not configured"
+	}
+
+	// If we have a provider set and it's marked as ready, return "已就绪"
+	if s.provider != nil && s.isReady {
+		return "Ready"
+	}
+
+	// Otherwise, the provider might need to be initialized
+	return "Waiting for initialization"
 }
 
 // UpdateProvider 更新LLM服务的提供商
@@ -201,7 +248,7 @@ func (s *LLMService) UpdateProvider(providerName string, config map[string]strin
 	if err != nil {
 		s.providerMutex.Lock()
 		s.isReady = false
-		s.readyState = fmt.Sprintf("配置失败: %v", err)
+		s.readyState = fmt.Sprintf("Configuration failed: %v", err)
 		s.providerMutex.Unlock()
 		return err
 	}
@@ -212,7 +259,7 @@ func (s *LLMService) UpdateProvider(providerName string, config map[string]strin
 	s.provider = provider
 	s.providerName = providerName
 	s.isReady = true
-	s.readyState = "已就绪"
+	s.readyState = "Ready"
 
 	// 清理缓存
 	s.cache = &LLMCache{
@@ -309,14 +356,14 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 		case RoleAssistant:
 			assistantMessages = append(assistantMessages, msg.Content)
 		default:
-			log.Printf("警告: 未知的消息角色类型: %s", msg.Role)
+			log.Printf("Warning: Unknown message role type: %s", msg.Role)
 		}
 	}
 
 	// 助手消息历史，将其整合到用户提示中
 	if len(assistantMessages) > 0 {
 		conversationHistory := strings.Join(assistantMessages, "\n\n")
-		userContent = fmt.Sprintf("对话历史:\n%s\n\n当前用户输入: %s",
+		userContent = fmt.Sprintf("Conversation history:\n%s\n\nCurrent user input: %s",
 			conversationHistory, userContent)
 	}
 
@@ -327,7 +374,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 	if s.cache != nil {
 		var cachedResult ChatCompletionResponse
 		if s.checkAndUseCache(cacheKey, &cachedResult) {
-			log.Printf("DEBUG:LLM聊天缓存命中: %s", cacheKey[:8])
+			log.Printf("DEBUG:LLM Chat cache hit: %s", cacheKey[:8])
 			return cachedResult, nil
 		}
 	}
@@ -370,7 +417,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 	// 保存到缓存
 	if s.cache != nil {
 		s.saveToCache(cacheKey, result)
-		log.Printf("DEBUG:保存到LLM聊天缓存: %s", cacheKey[:8])
+		log.Printf("DEBUG:Save to LLM chat cache: %s", cacheKey[:8])
 	}
 
 	return result, nil
@@ -383,7 +430,7 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 	s.providerMutex.RLock()
 	if !s.isReady || s.provider == nil {
 		s.providerMutex.RUnlock()
-		return fmt.Errorf("LLM服务未就绪: %s", s.readyState)
+		return fmt.Errorf("LLM service not ready: %s", s.readyState)
 	}
 
 	models := s.provider.GetSupportedModels()
@@ -407,7 +454,7 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 	if systemPrompt != "" {
 		structuredSystemPrompt += "\n\n"
 	}
-	structuredSystemPrompt += "以有效的JSON格式返回您的响应，遵循提供的输出架构，不要添加解释或前言。"
+	structuredSystemPrompt += "Return your response in valid JSON format, following the provided output schema, without adding explanations or preambles."
 
 	req := llm.CompletionRequest{
 		Prompt:       prompt,
@@ -428,7 +475,7 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 	// 解析JSON到提供的结构中
 	err = json.Unmarshal([]byte(text), outputSchema)
 	if err != nil {
-		return fmt.Errorf("解析AI响应为结构化数据失败: %w\nAI返回: %s", err, text)
+		return fmt.Errorf("failed to parse AI response into structured data: %w\nAI return: %s", err, text)
 	}
 
 	// 保存到缓存
@@ -438,33 +485,199 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 }
 
 // 清理JSON字符串，去除前后非JSON内容
+var jsonNoiseReplacer = strings.NewReplacer(
+	"```json", "",
+	"```", "",
+	"\ufeff", "",
+	"\u00a0", " ",
+	"\u2028", "\n",
+	"\u2029", "\n",
+)
+
+var structuralPunctuationMap = map[rune]rune{
+	'：': ':',
+	'﹕': ':',
+	'，': ',',
+	'﹐': ',',
+	'；': ';',
+	'﹔': ';',
+	'【': '[',
+	'】': ']',
+	'［': '[',
+	'］': ']',
+	'｛': '{',
+	'｝': '}',
+	'（': '(',
+	'）': ')',
+}
+
+var quotePairs = map[rune]rune{
+	'"': '"',
+	'“': '”',
+	'”': '”',
+	'„': '”',
+	'‟': '”',
+	'「': '」',
+	'」': '」',
+	'『': '』',
+	'﹁': '﹂',
+	'﹂': '﹂',
+}
+
+func normalizeJSONStructure(s string) string {
+	if s == "" {
+		return s
+	}
+
+	var builder strings.Builder
+	builder.Grow(len(s))
+	inString := false
+	escaped := false
+	currentClosing := '"'
+
+	for _, r := range s {
+		if inString {
+			if !escaped && r == '\\' {
+				escaped = true
+				builder.WriteRune(r)
+				continue
+			}
+
+			if escaped {
+				escaped = false
+				builder.WriteRune(r)
+				continue
+			}
+
+			if r == currentClosing || r == '"' {
+				inString = false
+				currentClosing = '"'
+				builder.WriteRune('"')
+				continue
+			}
+
+			builder.WriteRune(r)
+			continue
+		}
+
+		if replacement, ok := structuralPunctuationMap[r]; ok {
+			r = replacement
+		} else if closing, ok := quotePairs[r]; ok {
+			inString = true
+			currentClosing = closing
+			builder.WriteRune('"')
+			continue
+		} else if r == '"' {
+			inString = true
+			currentClosing = '"'
+			builder.WriteRune(r)
+			continue
+		} else if r > unicode.MaxASCII && !unicode.IsSpace(r) {
+			// 丢弃出现在字符串外的异常Unicode字符（例如 æ、• 等）
+			continue
+		}
+
+		builder.WriteRune(r)
+	}
+
+	return builder.String()
+}
+
 func cleanJSONString(s string) string {
-	// 查找第一个{
-	start := strings.Index(s, "{")
+	if s == "" {
+		return s
+	}
+
+	// 统一替换常见的噪声、全角符号以及Markdown标记
+	s = jsonNoiseReplacer.Replace(s)
+	s = strings.TrimSpace(s)
+
+	// 移除零宽字符及除换行/制表符外的控制字符
+	s = strings.Map(func(r rune) rune {
+		switch r {
+		case '\u200b', '\u200c', '\u200d', '\u2060', '\ufeff':
+			return -1
+		}
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return -1
+		}
+		return r
+	}, s)
+
+	// 查找第一个 { 或 [，将其之前的内容全部丢弃
+	start := strings.IndexAny(s, "[{")
 	if start == -1 {
-		start = strings.Index(s, "[")
-		if start == -1 {
-			return s // 没有找到JSON开始标记
+		return s
+	}
+
+	s = strings.TrimSpace(s[start:])
+	if s == "" {
+		return s
+	}
+
+	// 规范化JSON结构所需的标点符号，移除字符串外的异常字符
+	s = normalizeJSONStructure(s)
+
+	isArray := len(s) > 0 && s[0] == '['
+
+	// 简单的括号计数匹配
+	balance := 0
+	inString := false
+	escaped := false
+
+	for i := 0; i < len(s); i++ {
+		char := s[i]
+
+		if escaped {
+			escaped = false
+			continue
+		}
+
+		if char == '\\' {
+			escaped = true
+			continue
+		}
+
+		if char == '"' {
+			inString = !inString
+			continue
+		}
+
+		if !inString {
+			if isArray {
+				if char == '[' {
+					balance++
+				} else if char == ']' {
+					balance--
+				}
+			} else {
+				if char == '{' {
+					balance++
+				} else if char == '}' {
+					balance--
+				}
+			}
+
+			if balance == 0 {
+				// 找到了匹配的结束符
+				return strings.TrimSpace(s[:i+1])
+			}
 		}
 	}
 
-	// 查找最后一个}
-	end := strings.LastIndex(s, "}")
-	if end == -1 {
+	// 如果没找到匹配的结束符，尝试回退到旧逻辑（找最后一个）
+	end := -1
+	if isArray {
 		end = strings.LastIndex(s, "]")
-		if end == -1 {
-			return s // 没有找到JSON结束标记
-		}
-		end++
 	} else {
-		end++
+		end = strings.LastIndex(s, "}")
 	}
 
-	// 提取JSON部分
-	if start < end {
-		return s[start:end]
+	if end != -1 && end >= 0 {
+		return strings.TrimSpace(s[:end+1])
 	}
-	return s
+
+	return strings.TrimSpace(s)
 }
 
 // GenerateScenarioIdeas 根据初始概念生成场景创意
@@ -741,22 +954,55 @@ func (s *LLMService) ExtractCharacters(ctx context.Context, text, title string) 
 	var prompt, systemPrompt string
 	if isEnglish {
 		// 英文提示词
-		prompt = fmt.Sprintf(`Analyze the following text titled "%s" and extract all character information:
+		prompt = fmt.Sprintf(`Analyze the following text titled "%s" and extract all character information.
+Return the result as a JSON array of objects with the exact schema described in the system prompt.
+If a field is unknown, use an empty string or empty array.
 
-%s
+Text:
+%s`, title, text)
 
-Identify all possible characters from the text, including names, personality traits, appearance descriptions, etc. For each character, provide as detailed information as possible.`, title, text)
-
-		systemPrompt = `You are a professional literary character analyst, skilled at extracting character information from texts. Extract all characters that appear in the text, including both main and supporting characters.`
+		systemPrompt = `You are a professional literary character analyst. Respond ONLY with valid JSON that matches the following schema:
+[
+	{
+		"name": "string",
+		"role": "string",
+		"description": "string",
+		"personality": "string",
+		"background": "string",
+		"speech_style": "string",
+		"relationships": {"string": "string"},
+		"knowledge": ["string"]
+	}
+]
+Formatting requirements:
+1. The entire response must be a single JSON array (use [] when no characters are found).
+2. Use standard ASCII characters for quotes, commas, and colons. Do NOT use Chinese punctuation or Markdown fences.
+3. Do not add explanations, comments, or prose outside the JSON array.`
 	} else {
 		// 中文提示词（原有逻辑）
-		prompt = fmt.Sprintf(`分析以下标题为《%s》的文本，提取所有角色信息:
+		prompt = fmt.Sprintf(`分析以下标题为《%s》的文本，提取所有角色信息。
+结果必须符合系统提示中描述的JSON数组结构。如某字段未知请使用空字符串或空数组。
 
-%s
+文本内容:
+%s`, title, text)
 
-从文本中识别所有可能的角色，包括名字、性格特点、外表描述等。对于每个角色，提供尽可能详细的信息。`, title, text)
-
-		systemPrompt = `你是一个专业的文学角色分析专家，擅长提取文本中的人物信息。提取文本中出现的所有角色，包括主要和次要角色。`
+		systemPrompt = `你是专业的文学角色分析专家。回答时只能输出有效的JSON，并且严格符合以下数组结构：
+[
+	{
+		"name": "",
+		"role": "",
+		"description": "",
+		"personality": "",
+		"background": "",
+		"speech_style": "",
+		"relationships": {"": ""},
+		"knowledge": [""]
+	}
+]
+格式要求：
+1. 整个回答必须是一个JSON数组，没有角色时返回[]。
+2. 必须使用半角的双引号、冒号、逗号，不得使用全角符号或Markdown代码块。
+3. 禁止在JSON前后添加任何说明文字。`
 	}
 
 	// 使用结构化输出API
@@ -764,24 +1010,25 @@ Identify all possible characters from the text, including names, personality tra
 		Model:        s.GetDefaultModel(),
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
-		MaxTokens:    2000,
+		MaxTokens:    4000, // 增加token限制以容纳完整的JSON
 		Temperature:  0.2,
 	}
 
 	cacheKey := s.GenerateCacheKey(request)
 	if cachedResp := s.CheckCache(cacheKey); cachedResp != nil {
+		cleanedText := cleanJSONString(cachedResp.Text)
 		// 尝试解析为数组格式
 		var characters []CharacterInfo
-		err := json.Unmarshal([]byte(cachedResp.Text), &characters)
+		err := json.Unmarshal([]byte(cleanedText), &characters)
 		if err == nil {
 			return characters, nil
 		}
 
 		// 如果解析数组失败，尝试解析为单个对象
 		var singleCharacter CharacterInfo
-		err = json.Unmarshal([]byte(cachedResp.Text), &singleCharacter)
+		err = json.Unmarshal([]byte(cleanedText), &singleCharacter)
 		if err != nil {
-			return nil, fmt.Errorf("解析缓存的AI响应为结构化数据失败: %w\nAI返回: %s",
+			return nil, fmt.Errorf("failed to parse cached AI response into structured data: %w\nAI return: %s",
 				err, truncateText(cachedResp.Text, 120))
 		}
 
@@ -796,18 +1043,19 @@ Identify all possible characters from the text, including names, personality tra
 	// 添加到缓存
 	s.AddToCache(cacheKey, response)
 
+	cleanedText := cleanJSONString(response.Text)
 	// 尝试解析为数组格式
 	var characters []CharacterInfo
-	err = json.Unmarshal([]byte(response.Text), &characters)
+	err = json.Unmarshal([]byte(cleanedText), &characters)
 	if err == nil {
 		return characters, nil
 	}
 
 	// 如果解析数组失败，尝试解析为单个对象
 	var singleCharacter CharacterInfo
-	err = json.Unmarshal([]byte(response.Text), &singleCharacter)
+	err = json.Unmarshal([]byte(cleanedText), &singleCharacter)
 	if err != nil {
-		return nil, fmt.Errorf("解析AI响应为结构化数据失败: %w\nAI返回: %s",
+		return nil, fmt.Errorf("failed to parse AI response into structured data: %w\nAI return: %s",
 			err, truncateText(response.Text, 120))
 	}
 
@@ -830,36 +1078,55 @@ func (s *LLMService) ExtractScenes(ctx context.Context, text, title string) ([]S
 
 	var prompt, systemPrompt string
 	if isEnglish {
-		prompt = fmt.Sprintf(`Analyze the following text titled "%s" and extract all scene information:
+		prompt = fmt.Sprintf(`Analyze the following text titled "%s" and extract all scene information.
+Return the result as a JSON array of objects with the exact schema described in the system prompt.
+If a field is unknown, use an empty string or empty array.
 
-%s
-
-Identify the main scenes in the text, including:
-1. Scene name
-2. Detailed description
-3. Scene atmosphere
-4. Time period/era
-5. Thematic elements
-6. Major items or props present in the scene`,
+Text:
+%s`,
 			title, truncateText(text, 5000))
 
-		systemPrompt = `You are a professional scene analysis expert. Please extract key scene information from the text. Return in JSON format, including scene name, description, atmosphere, era, themes, and a list of items.`
+		systemPrompt = `You are a professional scene analysis expert. Respond ONLY with valid JSON that matches the following schema:
+[
+	{
+		"name": "string",
+		"description": "string",
+		"atmosphere": "string",
+		"era": "string",
+		"themes": ["string"],
+		"items": ["string"],
+		"importance": "string"
+	}
+]
+Formatting requirements:
+1. Output must be a single JSON array (return [] when no scenes are found).
+2. Use ASCII double quotes, commas, and colons. Do NOT use Chinese punctuation or Markdown code fences.
+3. Provide no commentary outside the JSON array.`
 	} else {
 		// 原有中文提示词
-		prompt = fmt.Sprintf(`分析以下标题为《%s》的文本，提取所有场景信息:
+		prompt = fmt.Sprintf(`分析以下标题为《%s》的文本，提取所有场景信息。
+结果必须符合系统提示中提供的JSON数组结构，如无数据请返回[]。
 
-%s
-
-识别文中的主要场景，包括:
-1. 场景名称
-2. 详细描述
-3. 场景氛围
-4. 时代背景
-5. 主题元素
-6. 场景中出现的主要物品`,
+文本内容:
+%s`,
 			title, truncateText(text, 5000))
 
-		systemPrompt = `你是一个专业的场景分析专家，请从文本中提取关键场景信息。返回JSON格式，包含场景名称(name)、描述(description)、氛围(atmosphere)、时代背景(era)、主题(themes)和物品列表(items)。`
+		systemPrompt = `你是专业的场景分析专家。你只能输出符合以下结构的JSON数组：
+[
+	{
+		"name": "",
+		"description": "",
+		"atmosphere": "",
+		"era": "",
+		"themes": [""],
+		"items": [""],
+		"importance": ""
+	}
+]
+格式要求：
+1. 仅输出JSON数组；没有场景时返回[]。
+2. 必须使用半角双引号、逗号、冒号，不得使用全角符号或Markdown代码块。
+3. JSON前后不能添加任何解释性文字。`
 	}
 
 	// 使用结构化输出API
@@ -867,24 +1134,25 @@ Identify the main scenes in the text, including:
 		Model:        s.GetDefaultModel(),
 		Prompt:       prompt,
 		SystemPrompt: systemPrompt,
-		MaxTokens:    2000,
+		MaxTokens:    4000,
 		Temperature:  0.2,
 	}
 
 	cacheKey := s.GenerateCacheKey(request)
 	if cachedResp := s.CheckCache(cacheKey); cachedResp != nil {
+		cleanedText := cleanJSONString(cachedResp.Text)
 		// 尝试解析为数组格式
 		var scenes []SceneInfo
-		err := json.Unmarshal([]byte(cachedResp.Text), &scenes)
+		err := json.Unmarshal([]byte(cleanedText), &scenes)
 		if err == nil {
 			return scenes, nil
 		}
 
 		// 如果解析数组失败，尝试解析为单个对象
 		var singleScene SceneInfo
-		err = json.Unmarshal([]byte(cachedResp.Text), &singleScene)
+		err = json.Unmarshal([]byte(cleanedText), &singleScene)
 		if err != nil {
-			return nil, fmt.Errorf("解析缓存的AI响应为结构化数据失败: %w\nAI返回: %s",
+			return nil, fmt.Errorf("failed to parse cached AI response into structured data: %w\nAI return: %s",
 				err, truncateText(cachedResp.Text, 120))
 		}
 
@@ -899,18 +1167,19 @@ Identify the main scenes in the text, including:
 	// 添加到缓存
 	s.AddToCache(cacheKey, response)
 
+	cleanedText := cleanJSONString(response.Text)
 	// 尝试解析为数组格式
 	var scenes []SceneInfo
-	err = json.Unmarshal([]byte(response.Text), &scenes)
+	err = json.Unmarshal([]byte(cleanedText), &scenes)
 	if err == nil {
 		return scenes, nil
 	}
 
 	// 如果解析数组失败，尝试解析为单个对象
 	var singleScene SceneInfo
-	err = json.Unmarshal([]byte(response.Text), &singleScene)
+	err = json.Unmarshal([]byte(cleanedText), &singleScene)
 	if err != nil {
-		return nil, fmt.Errorf("解析AI响应为结构化数据失败: %w\nAI返回: %s",
+		return nil, fmt.Errorf("failed to parse AI response into structured data: %w\nAI return: %s",
 			err, truncateText(response.Text, 120))
 	}
 
@@ -1074,12 +1343,12 @@ func (s *LLMService) GetDefaultModel() string {
 	// 根据提供商名称返回默认模型
 	defaultModels := map[string]string{
 		"OpenAI":           "gpt-4.1",
-		"Anthropic Claude": "claude-3.5-sonnet",
+		"Anthropic Claude": "claude-4.5-haiku",
 		"Mistral":          "mistral-large-latest",
 		"DeepSeek":         "deepseek-chat",
-		"GLM":              "glm-4",
-		"google gemini":    "gemini-2.0-flash",
-		"Qwen":             "qwen2.5-max",
+		"GLM":              "glm-4.5-air",
+		"google gemini":    "gemini-2.5-flash",
+		"Qwen":             "qwen3-max",
 		"GitHub Models":    "gpt-4.1",
 		"Grok":             "grok-3",
 		"openrouter":       "google/gemma-3-27b-it:free",
@@ -1105,7 +1374,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 				// 尝试将缓存的 JSON 字节反序列化到输出结构
 				err := json.Unmarshal(responseBytes, outputSchema)
 				if err == nil {
-					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+					log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
 					return true
 				}
 			}
@@ -1118,7 +1387,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 				if err == nil {
 					err = json.Unmarshal(responseJSON, outputSchema)
 					if err == nil {
-						log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+						log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
 						return true
 					}
 				}
@@ -1126,7 +1395,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 				// 对于普通响应，直接返回
 				if chatResp, ok := outputSchema.(*ChatCompletionResponse); ok {
 					*chatResp = resp
-					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+					log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
 					return true
 				}
 			}
@@ -1137,7 +1406,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 			if outputSchema != nil {
 				err := json.Unmarshal([]byte(resp.Text), outputSchema)
 				if err == nil {
-					log.Printf("DEBUG:LLM缓存命中: %s", cacheKey[:8])
+					log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
 					return true
 				}
 			}
@@ -1153,12 +1422,12 @@ func (s *LLMService) saveToCache(cacheKey string, response interface{}) {
 		// 总是将响应序列化为JSON字节存储，以确保一致的类型处理
 		responseBytes, err := json.Marshal(response)
 		if err != nil {
-			log.Printf("ERROR:序列化缓存响应失败: %v", err)
+			log.Printf("ERROR:Failed to serialize cached response: %v", err)
 			// 仍然尝试保存原始响应以向后兼容
 			s.cache.saveToCache(cacheKey, response)
 		} else {
 			s.cache.saveToCache(cacheKey, responseBytes)
 		}
-		log.Printf("DEBUG:保存到LLM缓存: %s", cacheKey[:8])
+		log.Printf("DEBUG:Save to LLM cache: %s", cacheKey[:8])
 	}
 }
