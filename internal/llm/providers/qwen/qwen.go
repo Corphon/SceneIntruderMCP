@@ -19,11 +19,10 @@ func init() {
 	llm.Register("qwen", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"qwen2.5-max",
-				"qwen2.5-plus",
-				"qwq-32b",
+
+				"qwen3-max",
 			},
-			baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+			baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", // Default to compatibility mode
 		}
 	})
 }
@@ -41,7 +40,7 @@ type Provider struct {
 func (p *Provider) Initialize(config map[string]string) error {
 	apiKey, exists := config["api_key"]
 	if !exists || apiKey == "" {
-		return errors.New("千问(Qwen) API密钥未提供")
+		return errors.New("qwen APIKey not provided")
 	}
 
 	p.apiKey = apiKey
@@ -50,7 +49,7 @@ func (p *Provider) Initialize(config map[string]string) error {
 	if model, exists := config["default_model"]; exists && model != "" {
 		p.defaultModel = model
 	} else {
-		p.defaultModel = "qwen2.5-max"
+		p.defaultModel = "qwen3-max"
 	}
 
 	if baseURL, exists := config["base_url"]; exists && baseURL != "" {
@@ -75,7 +74,7 @@ func (p *Provider) Initialize(config map[string]string) error {
 }
 
 func (p *Provider) GetName() string {
-	return "Qwen"
+	return "qwen"
 }
 
 func (p *Provider) GetSupportedModels() []string {
@@ -112,35 +111,30 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 		}, messages...)
 	}
 
-	// 构建请求体
+	// 构建OpenAI兼容的请求体
 	requestBody := map[string]interface{}{
-		"model": model,
-		"input": map[string]interface{}{
-			"messages": messages,
-		},
-		"parameters": map[string]interface{}{
-			"temperature":        req.Temperature,
-			"incremental_output": true, // 启用流式输出
-		},
+		"model":       model,
+		"messages":    messages,
+		"temperature": req.Temperature,
+		"stream":      true, // 启用流式输出 for OpenAI-compatible APIs
 	}
 
 	if req.MaxTokens > 0 {
-		requestBody["parameters"].(map[string]interface{})["max_tokens"] = req.MaxTokens
+		requestBody["max_tokens"] = req.MaxTokens
 	}
 
 	if req.TopP > 0 {
-		requestBody["parameters"].(map[string]interface{})["top_p"] = req.TopP
+		requestBody["top_p"] = req.TopP
 	}
 
 	if len(req.StopWords) > 0 {
-		requestBody["parameters"].(map[string]interface{})["stop"] = req.StopWords
+		requestBody["stop"] = req.StopWords
 	}
 
 	// 添加任何额外参数
 	if req.ExtraParams != nil {
-		paramsMap := requestBody["parameters"].(map[string]interface{})
 		for k, v := range req.ExtraParams {
-			paramsMap[k] = v
+			requestBody[k] = v
 		}
 	}
 
@@ -150,11 +144,11 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 		return nil, err
 	}
 
-	// 创建HTTP请求
+	// 创建HTTP请求 - 使用兼容模式的正确端点
 	httpReq, err := http.NewRequestWithContext(
 		ctx,
 		"POST",
-		p.baseURL+"/services/aigc/text-generation/generation",
+		p.baseURL+"/chat/completions",
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
@@ -164,8 +158,12 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
+	// Only add X-DashScope-SSE header for stream requests
 	httpReq.Header.Set("X-DashScope-SSE", "enable")
-	httpReq.Header.Set("X-DashScope-Region", p.region)
+	// Add region header if available
+	if p.region != "" {
+		httpReq.Header.Set("X-DashScope-Region", p.region)
+	}
 
 	// 发送请求
 	httpResp, err := p.client.Do(httpReq)
@@ -177,7 +175,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if httpResp.StatusCode != http.StatusOK {
 		httpResp.Body.Close()
 		body, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("千问(Qwen) API错误(%d): %s", httpResp.StatusCode, string(body))
+		return nil, fmt.Errorf("qwen API Error(%d): %s", httpResp.StatusCode, string(body))
 	}
 
 	// 创建响应通道
@@ -219,21 +217,26 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 				// 移除 "data: " 前缀
 				line = strings.TrimPrefix(line, "data: ")
 
-				// 解析JSON数据
+				// 解析OpenAI兼容的流式响应
 				var streamResp struct {
-					Output struct {
-						Text    string `json:"text"`
-						Choices []struct {
-							FinishReason string `json:"finish_reason"`
-							Message      struct {
-								Content string `json:"content"`
-							} `json:"message"`
-						} `json:"choices"`
-					} `json:"output"`
-					Usage struct {
-						OutputTokens int `json:"output_tokens"`
-						InputTokens  int `json:"input_tokens"`
-						TotalTokens  int `json:"total_tokens"`
+					ID      string `json:"id"`
+					Object  string `json:"object"`
+					Created int64  `json:"created"`
+					Model   string `json:"model"`
+					Choices []struct {
+						Index int `json:"index"`
+						Delta struct {
+							Content string `json:"content"`
+						} `json:"delta"`
+						Message struct {
+							Content string `json:"content"`
+						} `json:"message"`
+						FinishReason string `json:"finish_reason"`
+					} `json:"choices"`
+					Usage *struct {
+						PromptTokens     int `json:"prompt_tokens"`
+						CompletionTokens int `json:"completion_tokens"`
+						TotalTokens      int `json:"total_tokens"`
 					} `json:"usage"`
 				}
 
@@ -241,35 +244,41 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 					continue
 				}
 
-				// 先尝试从text字段获取
-				content := streamResp.Output.Text
+				// 从delta.content获取增量内容（流式）
+				content := ""
+				done := false
 
-				// 如果text为空，尝试从choices获取
-				if content == "" && len(streamResp.Output.Choices) > 0 {
-					content = streamResp.Output.Choices[0].Message.Content
+				if len(streamResp.Choices) > 0 {
+					choice := streamResp.Choices[0]
+					if choice.Delta.Content != "" {
+						// 流式增量内容
+						content = choice.Delta.Content
+					} else if choice.Message.Content != "" {
+						// 如果没有delta，使用完整content（非流式场景）
+						content = choice.Message.Content
+					}
+
+					if choice.FinishReason != "" {
+						done = true
+					}
 				}
 
 				if content != "" {
-					// 阿里云的流式响应不是增量的，而是全量文本
-					// 需要计算增量部分
-					currentLength := contentBuffer.Len()
-					if len(content) > currentLength {
-						delta := content[currentLength:]
-						contentBuffer.WriteString(delta)
+					// 对于OpenAI兼容的流式API，delta是增量内容
+					contentBuffer.WriteString(content)
 
-						respChan <- llm.StreamResponse{
-							Text:      delta,
-							ModelName: model,
-							Done:      false,
-						}
+					respChan <- llm.StreamResponse{
+						Text:      content,
+						ModelName: model,
+						Done:      false,
 					}
 				}
 
 				// 检查是否已完成
-				if len(streamResp.Output.Choices) > 0 && streamResp.Output.Choices[0].FinishReason != "" {
+				if done {
 					respChan <- llm.StreamResponse{
 						Text:         contentBuffer.String(),
-						FinishReason: streamResp.Output.Choices[0].FinishReason,
+						FinishReason: "stop", // Standard finish reason
 						ModelName:    model,
 						Done:         true,
 					}
@@ -288,7 +297,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 		model = p.defaultModel
 	}
 
-	// 构建请求
+	// 构建请求 - 使用OpenAI兼容格式
 	messages := []map[string]string{
 		{"role": "user", "content": req.Prompt},
 	}
@@ -300,34 +309,32 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 		}, messages...)
 	}
 
-	// 构建请求体
+	// 构建OpenAI兼容的请求体
 	requestBody := map[string]interface{}{
-		"model": model,
-		"input": map[string]interface{}{
-			"messages": messages,
-		},
-		"parameters": map[string]interface{}{
-			"temperature": req.Temperature,
-		},
+		"model":    model,
+		"messages": messages,
+	}
+
+	if req.Temperature > 0 {
+		requestBody["temperature"] = req.Temperature
 	}
 
 	if req.MaxTokens > 0 {
-		requestBody["parameters"].(map[string]interface{})["max_tokens"] = req.MaxTokens
+		requestBody["max_tokens"] = req.MaxTokens
 	}
 
 	if req.TopP > 0 {
-		requestBody["parameters"].(map[string]interface{})["top_p"] = req.TopP
+		requestBody["top_p"] = req.TopP
 	}
 
 	if len(req.StopWords) > 0 {
-		requestBody["parameters"].(map[string]interface{})["stop"] = req.StopWords
+		requestBody["stop"] = req.StopWords
 	}
 
 	// 添加任何额外参数
 	if req.ExtraParams != nil {
-		paramsMap := requestBody["parameters"].(map[string]interface{})
 		for k, v := range req.ExtraParams {
-			paramsMap[k] = v
+			requestBody[k] = v
 		}
 	}
 
@@ -337,11 +344,11 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 		return nil, err
 	}
 
-	// 创建HTTP请求
+	// 创建HTTP请求 - 使用兼容模式的正确端点
 	httpReq, err := http.NewRequestWithContext(
 		ctx,
 		"POST",
-		p.baseURL+"/services/aigc/text-generation/generation",
+		p.baseURL+"/chat/completions",
 		bytes.NewBuffer(jsonData),
 	)
 	if err != nil {
@@ -350,7 +357,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-	httpReq.Header.Set("X-DashScope-Region", p.region)
+	// Add region header if available
+	if p.region != "" {
+		httpReq.Header.Set("X-DashScope-Region", p.region)
+	}
 
 	// 发送请求
 	httpResp, err := p.client.Do(httpReq)
@@ -362,26 +372,27 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	// 检查错误
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("千问(Qwen) API错误(%d): %s", httpResp.StatusCode, string(body))
+		return nil, fmt.Errorf("qwen API Error(%d): %s", httpResp.StatusCode, string(body))
 	}
 
-	// 解析响应
+	// 解析OpenAI兼容的响应
 	var response struct {
-		RequestID string `json:"request_id"`
-		Output    struct {
-			Text    string `json:"text"`
-			Choices []struct {
-				Message struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
-				} `json:"message"`
-				FinishReason string `json:"finish_reason"`
-			} `json:"choices"`
-		} `json:"output"`
+		ID      string `json:"id"`
+		Object  string `json:"object"`
+		Created int64  `json:"created"`
+		Model   string `json:"model"`
+		Choices []struct {
+			Index   int `json:"index"`
+			Message struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-			TotalTokens  int `json:"total_tokens"`
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
 	}
 
@@ -389,30 +400,23 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 		return nil, err
 	}
 
-	// 使用output.text或choices[0].message.content
-	text := response.Output.Text
-	finishReason := ""
-
-	// 从choices获取完成原因，无论text是否为空
-	if len(response.Output.Choices) > 0 {
-		finishReason = response.Output.Choices[0].FinishReason
-
-		// 如果text为空，尝试从choices获取内容
-		if text == "" {
-			text = response.Output.Choices[0].Message.Content
-		}
+	if len(response.Choices) == 0 {
+		return nil, errors.New("qwen returned no results")
 	}
 
+	text := response.Choices[0].Message.Content
+	finishReason := response.Choices[0].FinishReason
+
 	if text == "" {
-		return nil, errors.New("千问(Qwen)未返回任何结果")
+		return nil, errors.New("qwen returned empty content")
 	}
 
 	return &llm.CompletionResponse{
 		Text:         text,
 		FinishReason: finishReason,
 		TokensUsed:   response.Usage.TotalTokens,
-		PromptTokens: response.Usage.InputTokens,
-		OutputTokens: response.Usage.OutputTokens,
+		PromptTokens: response.Usage.PromptTokens,
+		OutputTokens: response.Usage.CompletionTokens,
 		ModelName:    model,
 		ProviderName: p.GetName(),
 	}, nil
@@ -421,62 +425,26 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 // FetchAvailableModels 尝试获取千问平台上可用的模型列表
 func (p *Provider) FetchAvailableModels(ctx context.Context) error {
 	if p.apiKey == "" {
-		return errors.New("API密钥未设置，无法获取模型列表")
+		return errors.New("api key not set, unable to fetch model list")
 	}
 
-	// 构建请求 - 修正URL路径结构，确保包含/api/v1前缀
-	baseAPIURL := strings.Replace(p.baseURL, "/compatible-mode/v1", "", 1)
-	url := fmt.Sprintf("%s/api/v1/services/api/models", baseAPIURL)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	// For compatible mode, models are usually known in advance, so we can just validate key works
+	// Instead of getting model list, let's do a simple test call to validate key
+	testReq := llm.CompletionRequest{
+		Model:       p.defaultModel,
+		Prompt:      "Say 'test' to verify API key",
+		Temperature: 0.1,
+		MaxTokens:   5,
+	}
+
+	// Do a simple test request to verify the API key works
+	_, err := p.CompleteText(ctx, testReq)
 	if err != nil {
-		return err
+		return fmt.Errorf("API key authentication failed: %v", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
-	req.Header.Set("X-DashScope-Region", p.region)
-
-	// 发送请求
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 检查响应
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("获取模型列表失败(%d): %s", resp.StatusCode, string(body))
-	}
-
-	// 解析响应
-	var response struct {
-		Models []struct {
-			ModelName  string `json:"name"`
-			ModelID    string `json:"id"`
-			ModelType  string `json:"type"`
-			Generation string `json:"generation"`
-		} `json:"data"`
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
-		return err
-	}
-
-	// 提取模型ID，只保留文本生成模型
-	p.availableModels = make([]string, 0)
-	for _, model := range response.Models {
-		// 只收集文本生成相关模型
-		if strings.Contains(model.ModelType, "text-generation") ||
-			strings.Contains(model.ModelType, "chat") ||
-			strings.HasPrefix(model.ModelID, "qwen") {
-			p.availableModels = append(p.availableModels, model.ModelID)
-		}
-	}
-
-	// 如果API没有返回任何模型，使用推荐模型列表
-	if len(p.availableModels) == 0 {
-		p.availableModels = p.recommendedModels
-	}
+	// If successful, just use the recommended models
+	p.availableModels = p.recommendedModels
 
 	return nil
 }
