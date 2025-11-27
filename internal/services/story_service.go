@@ -89,7 +89,7 @@ func NewStoryService(llmService *LLMService) *StoryService {
 	sceneService := NewSceneService(scenesPath)
 
 	// 创建物品服务(如果需要)
-	itemService := NewItemService()
+	itemService := NewItemService("data/items")
 
 	// 🔧 获取角色服务并缓存
 	var characterService *CharacterService
@@ -2641,6 +2641,45 @@ func (s *StoryService) SaveStoryData(sceneID string, storyData *models.StoryData
 
 	// 调用内部的保存方法
 	return s.saveStoryData(sceneID, storyData)
+}
+
+// DeleteStoryData 删除指定场景的故事数据目录
+func (s *StoryService) DeleteStoryData(sceneID string) error {
+	if s == nil {
+		return fmt.Errorf("故事服务未初始化")
+	}
+
+	if sceneID == "" {
+		return fmt.Errorf("场景ID不能为空")
+	}
+
+	return s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		storyDir := filepath.Join(s.BasePath, sceneID)
+
+		// 优先使用文件存储接口，确保缓存一致
+		if s.FileStorage != nil {
+			if !s.FileStorage.DirExists(sceneID) {
+				s.invalidateStoryCache(sceneID)
+				return nil
+			}
+
+			if err := s.FileStorage.DeleteDir(sceneID); err != nil {
+				return fmt.Errorf("删除故事数据失败: %w", err)
+			}
+		} else {
+			if _, err := os.Stat(storyDir); os.IsNotExist(err) {
+				s.invalidateStoryCache(sceneID)
+				return nil
+			}
+
+			if err := os.RemoveAll(storyDir); err != nil {
+				return fmt.Errorf("删除故事数据失败: %w", err)
+			}
+		}
+
+		s.invalidateStoryCache(sceneID)
+		return nil
+	})
 }
 
 // ExecuteBatchOperation 批量执行故事操作
