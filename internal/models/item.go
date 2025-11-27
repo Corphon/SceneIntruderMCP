@@ -28,3 +28,21 @@ type ItemInteraction struct {
 	Description string `json:"description"`
 	Effect      string `json:"effect"`
 }
+
+// IsInventoryOnly 判断物品是否只应出现在玩家背包中
+func (item *Item) IsInventoryOnly() bool {
+	if item == nil {
+		return false
+	}
+
+	if item.IsOwned {
+		return true
+	}
+
+	switch item.Source {
+	case SourceStory, SourceExploration:
+		return true
+	default:
+		return false
+	}
+}
