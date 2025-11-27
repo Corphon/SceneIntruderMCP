@@ -4,7 +4,7 @@
 
 **🎭 AI 驱动的沉浸式互动叙事平台 API 参考**
 
-版本: v1.1.0 | 更新日期: 2025-06-27
+版本: v1.2.2 | 更新日期: 2025-11-27
 
 [返回主页](../README.md) | [English Version](api.md)
 
@@ -110,11 +110,18 @@ Content-Type: application/json
 #### 场景管理
 ```http
 GET    /api/scenes                      # 获取场景列表
-POST   /api/scenes                      # 创建场景  
+POST   /api/scenes                      # 创建场景
 GET    /api/scenes/{id}                 # 获取场景详情
 GET    /api/scenes/{id}/characters      # 获取场景角色
 GET    /api/scenes/{id}/conversations   # 获取场景对话
 GET    /api/scenes/{id}/aggregate       # 获取场景聚合数据
+
+# 场景物品管理 (新增)
+GET    /api/scenes/{id}/items           # 获取场景物品列表
+POST   /api/scenes/{id}/items           # 添加物品到场景
+GET    /api/scenes/{id}/items/{item_id} # 获取指定物品
+PUT    /api/scenes/{id}/items/{item_id} # 更新场景物品
+DELETE /api/scenes/{id}/items/{item_id} # 删除场景物品
 ```
 
 #### 故事系统
@@ -124,6 +131,17 @@ POST   /api/scenes/{id}/story/choice    # 进行故事选择
 POST   /api/scenes/{id}/story/advance   # 推进故事
 POST   /api/scenes/{id}/story/rewind    # 回溯故事
 GET    /api/scenes/{id}/story/branches  # 获取故事分支
+GET    /api/scenes/{id}/story/choices   # 获取可用选择 (新增)
+
+# 任务与目标管理 (新增)
+POST   /api/scenes/{id}/story/tasks/{task_id}/objectives/{objective_id}/complete
+       # 完成任务目标
+
+# 地点管理 (新增)
+POST   /api/scenes/{id}/story/locations/{location_id}/unlock
+       # 解锁故事地点
+POST   /api/scenes/{id}/story/locations/{location_id}/explore
+       # 探索故事地点（触发事件、发现物品）
 ```
 
 #### 导出功能
@@ -360,6 +378,27 @@ GET /api/scenes/{scene_id}/aggregate?conversation_limit=50&include_story=true&in
 | `conversation_limit` | integer | 对话历史限制数量 |
 | `include_story` | boolean | 是否包含故事数据 |
 | `include_ui_state` | boolean | 是否包含 UI 状态 |
+
+### 删除场景
+
+删除指定场景及其关联的缓存和故事数据。
+
+```http
+DELETE /api/scenes/{scene_id}
+```
+
+**响应示例：**
+```json
+{
+  "success": true,
+  "data": {
+    "scene_id": "scene_001"
+  },
+  "message": "场景删除成功"
+}
+```
+
+> **v1.2.2 更新**：接口会同步删除 `data/stories/<scene_id>` 目录并刷新故事缓存，不再产生残留文件。
 
 ---
 
@@ -1329,7 +1368,12 @@ curl -X PUT http://localhost:8080/api/llm/config \
 
 ## 📋 API 更新日志
 
-### v1.1.0 (2025-06-27) - 当前版本
+### v1.2.2 (2025-11-27) - 当前版本
+- **改进**: `DELETE /api/scenes/{id}` 会自动删除 `data/stories/<scene_id>` 并刷新缓存，避免残留数据
+- **修复**: GitHub Models 等提供商严格遵循配置中的 `default_model`，彻底解决 “connection failed” 问题
+- **文档**: 新增 `data/.encryption_key` 说明与预发布数据清理指引，提升上线准备效率
+
+### v1.1.0 (2025-06-27)
 - **新增**: 故事系统 API，支持交互式叙事
 - **新增**: 导出功能，支持场景、互动和故事导出
 - **新增**: WebSocket 支持，实现实时通信
