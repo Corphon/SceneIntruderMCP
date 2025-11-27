@@ -7,7 +7,7 @@
 **🎭 AI-Powered Immersive Interactive Storytelling Platform**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
@@ -82,6 +82,8 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 ### 📁 Project Structure
 
 ```
+
+> ℹ️ **Tip**: The `default_model` value for the active provider is now respected across the backend. Any AI call that doesn't explicitly pass a model name will automatically fall back to this configuration, so you can centrally switch models without touching code.
 SceneIntruderMCP/
 ├── cmd/
 │   └── server/           # Application entry point
@@ -117,6 +119,32 @@ SceneIntruderMCP/
 - **Storage**: File system-based JSON storage with database extension support
 - **Frontend**: Vanilla JavaScript + HTML/CSS, responsive design
 - **Deployment**: Containerization support, cloud-native architecture
+
+## 🆕 Release Highlights (v1.2.0 · 2025-11-27)
+
+- **Scene deletion cleanup** – `DELETE /api/scenes/{id}` now synchronously removes the matching `data/stories/<scene_id>` timeline, ensuring no orphaned story files remain after a scene is removed.
+- **GitHub Models fallback fixes** – Provider bootstrap now respects the configured `default_model` even when only GitHub Models credentials are supplied, eliminating the previous “connection failed” errors.
+- **Operational readiness upgrades** – Documented the persistent encryption key (`data/.encryption_key`), refreshed the API/deployment guides, and added a pre-release data cleanup checklist so release artifacts stay tidy.
+
+## 🧹 Pre-release Data Cleanup Checklist
+
+Before packaging a new build or resetting a shared demo environment, wipe transient data while preserving configuration secrets.
+
+### Remove before releasing
+- `data/scenes/*` – per-scene caches, characters, and context files
+- `data/stories/*` – story timelines (v1.2.0+ deletes these automatically alongside scenes)
+- `data/items/*` – scene item caches
+- `data/exports/*` – exported archives and interaction summaries
+- `data/stats/usage_stats.json` – accumulated telemetry
+- `temp/*` – temporary uploads and scratch files
+- `logs/*.log` – runtime logs (archive first if you need them)
+
+### Keep (or rotate with care)
+- `data/config.json` – persisted runtime settings and encrypted API keys
+- `data/.encryption_key` – AES-GCM key required to decrypt stored LLM credentials; deleting it forces you to re-enter every API key
+- `data/users/*.json` – built-in accounts such as `admin.json` and `console_user.json`
+
+> ℹ️ Scenes deleted prior to v1.2.0 may have left residual `data/stories/scene_*` folders. You can safely remove those directories manually to reclaim disk space.
 
 ## 🚀 Quick Start
 
@@ -197,6 +225,13 @@ Open browser: http://localhost:8080
   }
 }
 ```
+
+#### 🔐 Configuration Encryption & `.encryption_key`
+
+- When `CONFIG_ENCRYPTION_KEY` isn’t provided, the backend generates a random 32-byte key and stores it in `data/.encryption_key` so encrypted API keys keep working between restarts.
+- The file must stay alongside `data/config.json`; deleting it invalidates every encrypted credential until you re-enter them through the settings UI.
+- To rotate the key intentionally, delete the file, restart the server, and immediately update the API keys—new data will be re-encrypted with the regenerated key.
+- Keep `.encryption_key` out of version control and deployment artefacts that are meant to be shared publicly.
 
 ## 📖 User Guide
 
