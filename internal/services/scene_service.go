@@ -19,11 +19,11 @@ import (
 
 // SceneData 包含场景及其相关数据
 type SceneData struct {
-	Scene      models.Scene
-	Context    models.SceneContext
-	Settings   models.SceneSettings
-	Characters []*models.Character
-	Items      []*models.Item
+	Scene      models.Scene         `json:"scene"`
+	Context    models.SceneContext  `json:"context"`
+	Settings   models.SceneSettings `json:"settings"`
+	Characters []*models.Character  `json:"characters"`
+	Items      []*models.Item       `json:"items"`
 }
 
 // SceneService 处理场景相关的业务逻辑
@@ -338,17 +338,41 @@ func (s *SceneService) LoadScene(sceneID string) (*SceneData, error) {
 		}
 	}
 
+	// 加载上下文和设置
+	context := models.SceneContext{
+		SceneID:       sceneID,
+		Conversations: []models.Conversation{},
+		LastUpdated:   time.Now(),
+	}
+
+	if s.FileCache != nil {
+		if err := s.FileCache.LoadJSONFile(sceneID, "context.json", &context); err != nil {
+			// 如果 context 不存在，则保持默认结构
+			context.SceneID = sceneID
+		}
+	}
+
+	settings := models.SceneSettings{
+		SceneID:     sceneID,
+		UserID:      scene.UserID,
+		LastUpdated: time.Now(),
+	}
+
+	if s.FileCache != nil {
+		if err := s.FileCache.LoadJSONFile(sceneID, "settings.json", &settings); err != nil {
+			settings.SceneID = sceneID
+		}
+	}
+
+	// 更新元数据计数
+	scene.CharacterCount = len(characters)
+	scene.ItemCount = len(items)
+
 	// 构建完整的 SceneData
 	sceneData := &SceneData{
-		Scene: scene,
-		Context: models.SceneContext{
-			SceneID:     sceneID,
-			LastUpdated: time.Now(),
-		},
-		Settings: models.SceneSettings{
-			SceneID:     sceneID,
-			LastUpdated: time.Now(),
-		},
+		Scene:      scene,
+		Context:    context,
+		Settings:   settings,
 		Characters: characters,
 		Items:      items,
 	}
@@ -688,6 +712,10 @@ func (s *SceneService) GetAllScenes() ([]models.Scene, error) {
 				continue
 			}
 		}
+
+		// 计算角色/物品数量，便于前端展示
+		s.enrichSceneSummary(sceneID, &scene)
+
 		scenes = append(scenes, scene)
 	}
 
@@ -700,6 +728,37 @@ func (s *SceneService) GetAllScenes() ([]models.Scene, error) {
 	s.cacheMutex.Unlock()
 
 	return scenes, nil
+}
+
+// enrichSceneSummary 补充场景的角色和物品数量等元数据
+func (s *SceneService) enrichSceneSummary(sceneID string, scene *models.Scene) {
+	if scene == nil {
+		return
+	}
+
+	characterDir := filepath.Join(s.BasePath, sceneID, "characters")
+	if entries, err := os.ReadDir(characterDir); err == nil {
+		count := 0
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			count++
+		}
+		scene.CharacterCount = count
+	}
+
+	itemsDir := filepath.Join(s.BasePath, sceneID, "items")
+	if entries, err := os.ReadDir(itemsDir); err == nil {
+		count := 0
+		for _, entry := range entries {
+			if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+				continue
+			}
+			count++
+		}
+		scene.ItemCount = count
+	}
 }
 
 // CreateSceneFromText 从文本创建新场景
