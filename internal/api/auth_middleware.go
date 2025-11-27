@@ -81,12 +81,10 @@ func AuthMiddleware() gin.HandlerFunc {
 
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"error":   "Authorization header is required",
-				"code":    "UNAUTHORIZED",
-			})
-			c.Abort()
+			// Allow guest usage by treating missing credentials as console_user
+			c.Set("user_id", "console_user")
+			c.Set("user_authenticated", false)
+			c.Next()
 			return
 		}
 
@@ -95,24 +93,20 @@ func AuthMiddleware() gin.HandlerFunc {
 		token = strings.TrimSpace(token)
 
 		if token == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"error":   "Token is required",
-				"code":    "UNAUTHORIZED",
-			})
-			c.Abort()
+			c.Set("user_id", "console_user")
+			c.Set("user_authenticated", false)
+			c.Next()
 			return
 		}
 
 		// Parse and validate token
 		parsedToken, err := auth.ParseToken(token, tokenConfig)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"success": false,
-				"error":   fmt.Sprintf("Invalid token: %v", err),
-				"code":    "UNAUTHORIZED",
-			})
-			c.Abort()
+			log.Printf("AuthMiddleware: invalid token detected (%v), downgrading to console_user", err)
+			c.Set("user_id", "console_user")
+			c.Set("user_authenticated", false)
+			c.Set("auth_error", err.Error())
+			c.Next()
 			return
 		}
 
@@ -187,11 +181,17 @@ func GetUserFromContext(c *gin.Context) (string, bool) {
 	}
 
 	userIDStr, ok := userID.(string)
-	if !ok {
+	if !ok || userIDStr == "" {
 		return "", false
 	}
 
-	return userIDStr, true
+	if authenticatedVal, exists := c.Get("user_authenticated"); exists {
+		if authenticated, ok := authenticatedVal.(bool); ok {
+			return userIDStr, authenticated
+		}
+	}
+
+	return userIDStr, false
 }
 
 // RequireAuthForScene ensures the user has access to a specific scene
@@ -255,6 +255,13 @@ func RequireAuthForUser() gin.HandlerFunc {
 		authUserID, userAuthenticated := GetUserFromContext(c)
 
 		if !userAuthenticated {
+			if requestedUserID == "console_user" {
+				// Allow console user to access personal resources during guest sessions
+				c.Set("user_id", requestedUserID)
+				c.Set("user_authenticated", false)
+				c.Next()
+				return
+			}
 			c.JSON(http.StatusForbidden, gin.H{
 				"success": false,
 				"error":   "Authentication required",
