@@ -15,7 +15,7 @@ import (
 
 // ItemService 处理物品相关的业务逻辑
 type ItemService struct {
-	BasePath string
+	ScenesPath string
 
 	// 并发控制
 	sceneLocks  sync.Map // sceneID -> *sync.RWMutex
@@ -34,16 +34,17 @@ type CachedItemData struct {
 }
 
 // NewItemService 创建物品服务
-func NewItemService() *ItemService {
-	basePath := "data/items"
+func NewItemService(scenesPath string) *ItemService {
+	if scenesPath == "" {
+		scenesPath = filepath.Join("data", "scenes")
+	}
 
-	// 确保物品数据目录存在
-	if err := os.MkdirAll(basePath, 0755); err != nil {
-		fmt.Printf("警告: 创建物品数据目录失败: %v\n", err)
+	if err := os.MkdirAll(scenesPath, 0755); err != nil {
+		fmt.Printf("警告: 创建场景数据目录失败: %v\n", err)
 	}
 
 	service := &ItemService{
-		BasePath:    basePath,
+		ScenesPath:  scenesPath,
 		itemCache:   make(map[string]*CachedItemData),
 		cacheExpiry: 3 * time.Minute, // 3分钟缓存
 	}
@@ -97,7 +98,7 @@ func (s *ItemService) loadSceneItemsSafe(sceneID string) (*CachedItemData, error
 	s.cacheMutex.RUnlock()
 
 	// 加载数据
-	scenePath := filepath.Join(s.BasePath, sceneID)
+	scenePath := filepath.Join(s.ScenesPath, sceneID, "items")
 	cached := &CachedItemData{
 		Items:     make(map[string]*models.Item),
 		Timestamp: time.Now(),
@@ -155,7 +156,7 @@ func (s *ItemService) AddItem(sceneID string, item *models.Item) error {
 
 	// 🔧 线程安全的目录创建
 	s.fileMutex.Lock()
-	scenePath := filepath.Join(s.BasePath, sceneID)
+	scenePath := filepath.Join(s.ScenesPath, sceneID, "items")
 	if err := os.MkdirAll(scenePath, 0755); err != nil {
 		s.fileMutex.Unlock()
 		return fmt.Errorf("创建场景物品目录失败: %w", err)
@@ -202,7 +203,7 @@ func (s *ItemService) AddItem(sceneID string, item *models.Item) error {
 func (s *ItemService) generateUniqueItemID(sceneID string) string {
 	for {
 		id := fmt.Sprintf("item_%d_%d", time.Now().UnixNano(), rand.Intn(1000))
-		itemPath := filepath.Join(s.BasePath, sceneID, id+".json")
+		itemPath := filepath.Join(s.ScenesPath, sceneID, "items", id+".json")
 
 		// 检查文件是否已存在
 		if _, err := os.Stat(itemPath); os.IsNotExist(err) {
@@ -307,7 +308,7 @@ func (s *ItemService) DeleteItem(sceneID, itemID string) error {
 	defer lock.Unlock()
 
 	// 删除物品文件
-	itemPath := filepath.Join(s.BasePath, sceneID, itemID+".json")
+	itemPath := filepath.Join(s.ScenesPath, sceneID, "items", itemID+".json")
 	if err := os.Remove(itemPath); err != nil {
 		return fmt.Errorf("删除物品失败: %w", err)
 	}
