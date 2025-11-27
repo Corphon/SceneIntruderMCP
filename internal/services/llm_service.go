@@ -23,14 +23,28 @@ const (
 	RoleAssistant = "assistant"
 )
 
+var providerDefaultModels = map[string]string{
+	"openai":       "gpt-4.1",
+	"anthropic":    "claude-haiku-4.5",
+	"mistral":      "mistral-large-latest",
+	"deepseek":     "deepseek-chat",
+	"glm":          "glm-4.5-air",
+	"google":       "gemini-2.5-flash",
+	"qwen":         "qwen3-max",
+	"githubmodels": "gpt-4.1-mini",
+	"grok":         "grok-4.1-fast",
+	"openrouter":   "x-ai/grok-4.1-fast:free",
+}
+
 // LLMService 提供统一的大语言模型调用接口
 type LLMService struct {
-	providerMutex sync.RWMutex
-	provider      llm.Provider
-	providerName  string
-	cache         *LLMCache
-	isReady       bool
-	readyState    string
+	providerMutex      sync.RWMutex
+	provider           llm.Provider
+	providerName       string
+	cache              *LLMCache
+	isReady            bool
+	readyState         string
+	activeDefaultModel string
 }
 type LLMCache struct {
 	cache      map[string]*CacheEntry
@@ -153,6 +167,7 @@ func NewLLMService() (*LLMService, error) {
 	// 初始化成功
 	service.provider = provider
 	service.providerName = cfg.LLMProvider
+	service.activeDefaultModel = extractDefaultModel(cfg.LLMConfig)
 	service.isReady = true
 	service.readyState = "Ready"
 
@@ -170,10 +185,11 @@ func NewEmptyLLMService() *LLMService {
 // createBaseLLMService 创建基础LLM服务实例
 func createBaseLLMService() *LLMService {
 	return &LLMService{
-		provider:     nil,
-		providerName: "",
-		isReady:      false,
-		readyState:   "Uninitialized",
+		provider:           nil,
+		providerName:       "",
+		isReady:            false,
+		readyState:         "Uninitialized",
+		activeDefaultModel: "",
 		cache: &LLMCache{
 			cache:      make(map[string]*CacheEntry),
 			mutex:      sync.RWMutex{},
@@ -258,6 +274,7 @@ func (s *LLMService) UpdateProvider(providerName string, config map[string]strin
 
 	s.provider = provider
 	s.providerName = providerName
+	s.activeDefaultModel = extractDefaultModel(config)
 	s.isReady = true
 	s.readyState = "Ready"
 
@@ -367,8 +384,11 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 			conversationHistory, userContent)
 	}
 
+	// 解析需要使用的模型
+	resolvedModel := s.resolveModel(request.Model)
+
 	// 生成缓存键
-	cacheKey := s.generateCacheKey(userContent, systemContent, request.Model)
+	cacheKey := s.generateCacheKey(userContent, systemContent, resolvedModel)
 
 	// 检查缓存
 	if s.cache != nil {
@@ -381,7 +401,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 
 	// 转换请求格式
 	req := llm.CompletionRequest{
-		Model:       request.Model,
+		Model:       resolvedModel,
 		Temperature: float32(request.Temperature),
 		MaxTokens:   request.MaxTokens,
 	}
@@ -432,14 +452,10 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 		s.providerMutex.RUnlock()
 		return fmt.Errorf("LLM service not ready: %s", s.readyState)
 	}
-
-	models := s.provider.GetSupportedModels()
-	model := "gpt-4o" // 默认兜底值
-	if len(models) > 0 {
-		model = models[0]
-	}
 	provider := s.provider
 	s.providerMutex.RUnlock()
+
+	model := s.resolveModel("")
 
 	// 生成缓存键
 	cacheKey := s.generateCacheKey(prompt, systemPrompt, model)
@@ -1326,39 +1342,64 @@ Generate 1-2 specific, detailed exploration results that feel organic to the wor
 
 // GetDefaultModel 获取当前配置的默认模型
 func (s *LLMService) GetDefaultModel() string {
+	return s.resolveModel("")
+}
+
+// resolveModel 根据请求和配置确定应使用的模型
+func (s *LLMService) resolveModel(requestedModel string) string {
+	if trimmed := strings.TrimSpace(requestedModel); trimmed != "" {
+		return trimmed
+	}
+
 	s.providerMutex.RLock()
-	defer s.providerMutex.RUnlock()
+	provider := s.provider
+	providerName := s.providerName
+	activeDefault := s.activeDefaultModel
+	s.providerMutex.RUnlock()
 
-	// 如果LLM服务不可用或未就绪，返回默认值
-	if !s.isReady || s.provider == nil {
-		return "gpt-4.1"
+	if activeDefault != "" {
+		return activeDefault
 	}
 
-	// 获取提供商支持的模型列表
-	models := s.provider.GetSupportedModels()
-	if len(models) > 0 {
-		return models[0]
+	if provider != nil {
+		if models := provider.GetSupportedModels(); len(models) > 0 {
+			if model := strings.TrimSpace(models[0]); model != "" {
+				return model
+			}
+		}
 	}
 
-	// 根据提供商名称返回默认模型
-	defaultModels := map[string]string{
-		"OpenAI":           "gpt-4.1",
-		"Anthropic Claude": "claude-4.5-haiku",
-		"Mistral":          "mistral-large-latest",
-		"DeepSeek":         "deepseek-chat",
-		"GLM":              "glm-4.5-air",
-		"google gemini":    "gemini-2.5-flash",
-		"Qwen":             "qwen3-max",
-		"GitHub Models":    "gpt-4.1",
-		"Grok":             "grok-3",
-		"openrouter":       "google/gemma-3-27b-it:free",
+	if cfg := config.GetCurrentConfig(); cfg != nil && cfg.LLMProvider == providerName {
+		if cfg.LLMConfig != nil {
+			if model := strings.TrimSpace(cfg.LLMConfig["default_model"]); model != "" {
+				return model
+			}
+			if model := strings.TrimSpace(cfg.LLMConfig["model"]); model != "" {
+				return model
+			}
+		}
 	}
 
-	if model, exists := defaultModels[s.providerName]; exists {
+	if model, exists := providerDefaultModels[providerName]; exists {
+		if trimmed := strings.TrimSpace(model); trimmed != "" {
+			return trimmed
+		}
+	}
+
+	return "gpt-4.1"
+}
+
+func extractDefaultModel(cfg map[string]string) string {
+	if cfg == nil {
+		return ""
+	}
+	if model := strings.TrimSpace(cfg["default_model"]); model != "" {
 		return model
 	}
-
-	return "gpt-4.1" // 兜底默认值
+	if model := strings.TrimSpace(cfg["model"]); model != "" {
+		return model
+	}
+	return ""
 }
 
 // 统一的缓存操作方法
