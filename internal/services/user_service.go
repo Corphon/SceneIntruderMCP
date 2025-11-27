@@ -159,25 +159,35 @@ func (s *UserService) CreateUser(username string, email string) (*models.User, e
 
 // ensureDefaultUser 会在缺少指定用户时创建一个基础用户，保证控制台功能可用
 func (s *UserService) ensureDefaultUser(userID string) {
-	if userID == "" {
-		return
+	if err := s.EnsureUserExists(userID); err != nil {
+		fmt.Printf("警告: 创建默认用户失败: %v\n", err)
 	}
+}
+
+// EnsureUserExists 确保给定用户存在，如不存在则创建一个带默认偏好的用户
+func (s *UserService) EnsureUserExists(userID string) error {
+	if userID == "" {
+		return fmt.Errorf("用户ID不能为空")
+	}
+
+	lock := s.getUserLock(userID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	userPath := filepath.Join(s.BasePath, userID+".json")
 	if _, err := os.Stat(userPath); err == nil {
-		return
+		return nil
 	} else if !os.IsNotExist(err) {
-		fmt.Printf("警告: 检查默认用户失败: %v\n", err)
-		return
+		return fmt.Errorf("检查用户数据失败: %w", err)
 	}
 
 	now := time.Now()
 	user := &models.User{
-		ID:        userID,
-		Username:  userID,
-		Email:     fmt.Sprintf("%s@local", userID),
-		CreatedAt: now,
-		LastLogin: now,
+		ID:          userID,
+		Username:    userID,
+		Email:       fmt.Sprintf("%s@local", userID),
+		CreatedAt:   now,
+		LastLogin:   now,
 		LastUpdated: now,
 		Preferences: models.UserPreferences{
 			CreativityLevel:   models.CreativityBalanced,
@@ -193,9 +203,7 @@ func (s *UserService) ensureDefaultUser(userID string) {
 		Skills: []models.UserSkill{},
 	}
 
-	if err := s.saveUserDirect(user); err != nil {
-		fmt.Printf("警告: 创建默认用户失败: %v\n", err)
-	}
+	return s.saveUserDirect(user)
 }
 
 // SaveUser 保存用户信息（线程安全）
