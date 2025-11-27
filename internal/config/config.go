@@ -146,13 +146,16 @@ func Load() (*Config, error) {
 	// Initialize encryption key
 	encryptionKey = generateEncryptionKey()
 
+	defaultStaticDir := filepath.Join("frontend", "dist", "assets")
+	defaultTemplatesDir := filepath.Join("frontend", "dist")
+
 	// 创建配置
 	config := &Config{
 		Port:         getEnv("PORT", "8080"),
 		OpenAIAPIKey: getEnv("OPENAI_API_KEY", ""),
 		DataDir:      getEnvPath("DATA_DIR", "data"),
-		StaticDir:    getEnvPath("STATIC_DIR", "static"),
-		TemplatesDir: getEnvPath("TEMPLATES_DIR", "web/templates"),
+		StaticDir:    getEnv("STATIC_DIR", defaultStaticDir),
+		TemplatesDir: getEnv("TEMPLATES_DIR", defaultTemplatesDir),
 		LogDir:       getEnvPath("LOG_DIR", "logs"),
 		DebugMode:    getEnvBool("DEBUG_MODE", true),
 	}
