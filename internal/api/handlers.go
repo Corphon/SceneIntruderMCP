@@ -56,6 +56,16 @@ type SimulateConversationRequest struct {
 	NumberOfTurns    int      `json:"number_of_turns"`   // 对话轮数
 }
 
+// SceneCommandRequest 大屏互动指令
+type SceneCommandRequest struct {
+	Input        string   `json:"input"`
+	Mode         string   `json:"mode"`
+	CharacterIDs []string `json:"character_ids"`
+	ItemHints    []string `json:"item_hints"`
+	SkillHints   []string `json:"skill_hints"`
+	LocationIDs  []string `json:"location_ids"`
+}
+
 // APIResponse 标准API响应格式
 type APIResponse struct {
 	Success   bool        `json:"success"`
@@ -448,6 +458,31 @@ func (h *Handler) CreateScene(c *gin.Context) {
 		return
 	}
 
+	// 自动初始化故事数据
+	storyService := h.getStoryService()
+	if storyService != nil {
+		// 使用默认偏好设置
+		defaultPrefs := &models.UserPreferences{
+			CreativityLevel: models.CreativityBalanced,
+			AllowPlotTwists: true,
+		}
+
+		// 异步初始化故事，避免阻塞响应
+		go func() {
+			_, err := storyService.InitializeStoryForScene(scene.ID, defaultPrefs)
+			if err != nil {
+				h.Logger.Error("Failed to auto-initialize story for new scene", map[string]interface{}{
+					"scene_id": scene.ID,
+					"error":    err.Error(),
+				})
+			} else {
+				h.Logger.Info("Successfully auto-initialized story for new scene", map[string]interface{}{
+					"scene_id": scene.ID,
+				})
+			}
+		}()
+	}
+
 	duration := time.Since(startTime)
 	h.Logger.Info("Scene created successfully", map[string]interface{}{
 		"scene_id":    scene.ID,
@@ -460,6 +495,56 @@ func (h *Handler) CreateScene(c *gin.Context) {
 	h.Metrics.RecordSceneInteraction(scene.ID, "scene_created")
 
 	h.Response.Created(c, scene, "场景创建成功")
+}
+
+// DeleteScene 删除指定场景
+func (h *Handler) DeleteScene(c *gin.Context) {
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		h.Response.BadRequest(c, "场景ID不能为空")
+		return
+	}
+
+	h.Logger.Info("Deleting scene", map[string]interface{}{
+		"scene_id":  sceneID,
+		"client_ip": c.ClientIP(),
+	})
+
+	if err := h.SceneService.DeleteScene(sceneID); err != nil {
+		h.Logger.Error("Failed to delete scene", map[string]interface{}{
+			"scene_id":  sceneID,
+			"error":     err.Error(),
+			"client_ip": c.ClientIP(),
+		})
+
+		if strings.Contains(err.Error(), "不存在") || strings.Contains(strings.ToLower(err.Error()), "not found") {
+			h.Response.NotFound(c, "场景", "场景ID: "+sceneID)
+			return
+		}
+
+		h.Response.InternalError(c, "删除场景失败", err.Error())
+		return
+	}
+
+	storyService := h.getStoryService()
+	if storyService != nil {
+		if err := storyService.DeleteStoryData(sceneID); err != nil {
+			h.Logger.Error("Failed to delete story data for scene", map[string]interface{}{
+				"scene_id":  sceneID,
+				"error":     err.Error(),
+				"client_ip": c.ClientIP(),
+			})
+			h.Response.InternalError(c, "删除故事数据失败", err.Error())
+			return
+		}
+	} else {
+		h.Logger.Warn("Story service unavailable during scene deletion", map[string]interface{}{
+			"scene_id":  sceneID,
+			"client_ip": c.ClientIP(),
+		})
+	}
+
+	h.Response.Success(c, gin.H{"scene_id": sceneID}, "场景删除成功")
 }
 
 // GetCharacters 获取指定场景的所有角色
@@ -667,77 +752,6 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 	// Return success response
 	h.Response.Success(c, responseData, "文件上传成功")
-}
-
-// IndexPage 返回主页
-func (h *Handler) IndexPage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	c.HTML(http.StatusOK, "index.html", gin.H{
-		"Title": "SceneIntruder",
-	})
-}
-
-// SceneSelectorPage 返回场景选择页面
-func (h *Handler) SceneSelectorPage(c *gin.Context) {
-	// 添加缓存控制头，防止浏览器缓存导致页面不更新
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	scenes, err := h.SceneService.GetAllScenes()
-	if err != nil {
-		c.HTML(http.StatusInternalServerError, "error.html", gin.H{
-			"error": "获取场景列表失败: " + err.Error(),
-		})
-		return
-	}
-
-	c.HTML(http.StatusOK, "scene_selector.html", gin.H{
-		"Title":  "场景列表",
-		"Scenes": scenes,
-	})
-}
-
-// CreateScenePage 返回创建场景页面
-func (h *Handler) CreateScenePage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	c.HTML(http.StatusOK, "create_scene.html", gin.H{
-		"Title": "创建场景",
-	})
-}
-
-// ScenePage 返回场景交互页面
-func (h *Handler) ScenePage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	sceneID := c.Param("id")
-	sceneData, err := h.SceneService.LoadScene(sceneID)
-	if err != nil {
-		c.HTML(http.StatusNotFound, "error.html", gin.H{
-			"error":      "Scene not found",
-			"timestamp":  time.Now().Format(time.RFC3339),
-			"request_id": c.GetString("request_id"), // 需要中间件设置
-			"error_code": "404",
-		})
-		return
-	}
-
-	c.HTML(http.StatusOK, "scene.html", gin.H{
-		"Title":      sceneData.Scene.Title,
-		"scene":      sceneData.Scene,
-		"characters": sceneData.Characters,
-	})
 }
 
 // AnalyzeTextWithProgress 处理文本分析请求，返回任务ID
@@ -1164,8 +1178,23 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 	// 推进故事
 	storyUpdate, err := storyService.AdvanceStory(sceneID, preferences)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("推进故事失败: %v", err)})
-		return
+		// 如果错误是"故事数据不存在"，尝试初始化
+		if strings.Contains(err.Error(), "故事数据不存在") {
+			_, initErr := storyService.InitializeStoryForScene(sceneID, preferences)
+			if initErr != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("初始化故事失败: %v", initErr)})
+				return
+			}
+			// 初始化后再次尝试推进
+			storyUpdate, err = storyService.AdvanceStory(sceneID, preferences)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("推进故事失败: %v", err)})
+				return
+			}
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("推进故事失败: %v", err)})
+			return
+		}
 	}
 
 	// 获取更新后的故事数据
@@ -1188,9 +1217,307 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 	})
 }
 
+// HandleSceneCommand 统一处理网页端的自由指令
+func (h *Handler) HandleSceneCommand(c *gin.Context) {
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	var req SceneCommandRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "参数格式错误", err.Error())
+		return
+	}
+
+	input := strings.TrimSpace(req.Input)
+	if input == "" {
+		h.Response.BadRequest(c, "指令内容不能为空")
+		return
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(req.Mode))
+	if mode == "" {
+		mode = "story"
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	sceneData, err := h.SceneService.LoadScene(sceneID)
+	if err != nil {
+		h.Response.InternalError(c, "加载场景失败", err.Error())
+		return
+	}
+
+	var storyData *models.StoryData
+	storyData, _ = storyService.GetStoryData(sceneID, nil)
+
+	container := di.GetContainer()
+	llmService, ok := container.Get("llm").(*services.LLMService)
+	if !ok || llmService == nil {
+		h.Response.InternalError(c, "LLM服务未初始化", "无法获取LLM服务实例")
+		return
+	}
+	if !llmService.IsReady() {
+		h.Response.Error(c, http.StatusServiceUnavailable, "LLM_NOT_READY",
+			"LLM服务未就绪", llmService.GetReadyState())
+		return
+	}
+
+	contextPrompt, systemPrompt := buildSceneCommandContext(sceneData, storyData, mode, &req)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	defer cancel()
+
+	request := services.ChatCompletionRequest{
+		Messages: []services.ChatCompletionMessage{
+			{Role: services.RoleSystem, Content: systemPrompt},
+			{Role: services.RoleUser, Content: contextPrompt + "\n\n玩家指令: " + input},
+		},
+		Model:       "",
+		MaxTokens:   700,
+		Temperature: 0.7,
+	}
+
+	resp, err := llmService.CreateChatCompletion(ctx, request)
+	fallbackUsed := false
+	var answer string
+	if err != nil {
+		fallbackUsed = true
+		answer = fmt.Sprintf("[系统提示] LLM 暂不可用: %v\n\n玩家指令：%s", err.Error(), input)
+	} else if len(resp.Choices) == 0 {
+		fallbackUsed = true
+		answer = fmt.Sprintf("[系统提示] LLM 未返回内容，已保留玩家指令：%s", input)
+	} else {
+		answer = strings.TrimSpace(resp.Choices[0].Message.Content)
+		if answer == "" {
+			fallbackUsed = true
+			answer = fmt.Sprintf("[系统提示] LLM 返回空响应，已保留玩家指令：%s", input)
+		}
+	}
+
+	userID, ok := GetUserFromContext(c)
+	if !ok || userID == "" {
+		userID = "web_user"
+	}
+
+	userMeta := map[string]interface{}{
+		"conversation_type": "story_console",
+		"mode":              mode,
+		"channel":           "user",
+		"skill_hints":       req.SkillHints,
+		"item_hints":        req.ItemHints,
+	}
+	if err := h.ContextService.AddConversation(sceneID, userID, input, userMeta); err != nil {
+		h.Logger.Warn("记录用户指令失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID})
+	}
+
+	speakerID := fmt.Sprintf("console_%s", mode)
+	if mode == "character" && len(req.CharacterIDs) == 1 {
+		speakerID = req.CharacterIDs[0]
+	}
+	aiMeta := map[string]interface{}{
+		"conversation_type": "story_console",
+		"mode":              mode,
+		"channel":           "ai",
+	}
+	if err := h.ContextService.AddConversation(sceneID, speakerID, answer, aiMeta); err != nil {
+		h.Logger.Warn("记录AI回应失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID})
+	}
+
+	result := map[string]interface{}{
+		"reply":         answer,
+		"mode":          mode,
+		"context":       contextPrompt,
+		"characters":    resolveCharacterSummaries(sceneData.Characters, req.CharacterIDs),
+		"skill_hints":   req.SkillHints,
+		"item_hints":    req.ItemHints,
+		"timestamp":     time.Now().Format(time.RFC3339),
+		"fallback_used": fallbackUsed,
+	}
+
+	h.Response.Success(c, result, "互动指令执行成功")
+}
+
+func buildSceneCommandContext(sceneData *services.SceneData, storyData *models.StoryData, mode string, req *SceneCommandRequest) (string, string) {
+	var focusCharacter *models.Character
+	characterLookup := make(map[string]*models.Character)
+	for _, ch := range sceneData.Characters {
+		if ch == nil {
+			continue
+		}
+		characterLookup[ch.ID] = ch
+	}
+
+	selectedNames := make([]string, 0, len(req.CharacterIDs))
+	for _, id := range req.CharacterIDs {
+		if ch, ok := characterLookup[id]; ok {
+			selectedNames = append(selectedNames, fmt.Sprintf("%s（%s）", ch.Name, ch.Role))
+			if focusCharacter == nil {
+				focusCharacter = ch
+			}
+		}
+	}
+
+	var latestNode *models.StoryNode
+	if storyData != nil {
+		for i := len(storyData.Nodes) - 1; i >= 0; i-- {
+			node := storyData.Nodes[i]
+			if node.IsRevealed {
+				latestNode = &storyData.Nodes[i]
+				break
+			}
+		}
+		if latestNode == nil && len(storyData.Nodes) > 0 {
+			latestNode = &storyData.Nodes[len(storyData.Nodes)-1]
+		}
+	}
+
+	var taskHighlights []string
+	var locationHighlights []string
+	if storyData != nil {
+		taskHighlights = summarizeActiveTasks(storyData.Tasks)
+		locationHighlights = summarizeTargetLocations(storyData.Locations, req.LocationIDs)
+	}
+
+	builder := strings.Builder{}
+	builder.WriteString(fmt.Sprintf("场景：%s\n", sceneData.Scene.Title))
+	if sceneData.Scene.Description != "" {
+		builder.WriteString(fmt.Sprintf("背景：%s\n", sceneData.Scene.Description))
+	}
+	if latestNode != nil {
+		builder.WriteString(fmt.Sprintf("最新剧情：%s\n", strings.TrimSpace(latestNode.Content)))
+	}
+	if storyData != nil {
+		builder.WriteString(fmt.Sprintf("当前状态：%s · 进度%d%%\n", storyData.CurrentState, storyData.Progress))
+	}
+	if len(taskHighlights) > 0 {
+		builder.WriteString("关键任务：\n")
+		for _, highlight := range taskHighlights {
+			builder.WriteString(" - " + highlight + "\n")
+		}
+	}
+	if len(locationHighlights) > 0 {
+		builder.WriteString("地点线索：\n")
+		for _, highlight := range locationHighlights {
+			builder.WriteString(" - " + highlight + "\n")
+		}
+	}
+	if len(selectedNames) > 0 {
+		builder.WriteString("关注角色：" + strings.Join(selectedNames, "、") + "\n")
+	}
+	if len(req.SkillHints) > 0 {
+		builder.WriteString("技能提示：" + strings.Join(req.SkillHints, ", ") + "\n")
+	}
+	if len(req.ItemHints) > 0 {
+		builder.WriteString("物品提示：" + strings.Join(req.ItemHints, ", ") + "\n")
+	}
+	builder.WriteString("请结合上述信息，用沉浸式叙事或对话推动剧情。")
+
+	systemPrompt := buildSceneCommandSystemPrompt(mode, focusCharacter, selectedNames)
+	return builder.String(), systemPrompt
+}
+
+func buildSceneCommandSystemPrompt(mode string, focus *models.Character, selectedNames []string) string {
+	switch mode {
+	case "character":
+		if focus != nil {
+			return fmt.Sprintf("你正在扮演角色“%s”。请以第一人称，保持其性格（%s）与背景（%s），针对玩家输入给出生动回应。",
+				focus.Name, focus.Personality, focus.Description)
+		}
+		return "你是当前被选中的角色，请以第一人称视角回应玩家。"
+	case "group":
+		if len(selectedNames) > 0 {
+			return fmt.Sprintf("你是叙事者，负责描绘这些角色之间的互动：%s。请以剧本化的方式描写他们的举动与台词，并给出下一步建议。",
+				strings.Join(selectedNames, "、"))
+		}
+		return "你是叙事者，编排多个角色的互动场景。"
+	case "skill":
+		return "你是剧情主持人，重点描述技能发动带来的影响，并提示可以探索的方向。"
+	default:
+		return "你是沉浸式故事主持人，请扮演旁白或世界，引导玩家并适时提供下一步行动建议。"
+	}
+}
+
+func summarizeActiveTasks(tasks []models.Task) []string {
+	highlights := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task.Completed {
+			continue
+		}
+		nextObjective := ""
+		for _, obj := range task.Objectives {
+			if !obj.Completed {
+				nextObjective = obj.Description
+				break
+			}
+		}
+		highlight := task.Title
+		if nextObjective != "" {
+			highlight = fmt.Sprintf("%s → %s", task.Title, nextObjective)
+		} else if task.Description != "" {
+			highlight = fmt.Sprintf("%s → %s", task.Title, task.Description)
+		}
+		highlights = append(highlights, highlight)
+		if len(highlights) >= 3 {
+			break
+		}
+	}
+	return highlights
+}
+
+func summarizeTargetLocations(locations []models.StoryLocation, targetIDs []string) []string {
+	if len(targetIDs) == 0 {
+		return nil
+	}
+	lookup := make(map[string]models.StoryLocation)
+	for _, loc := range locations {
+		lookup[loc.ID] = loc
+	}
+	highlights := make([]string, 0, len(targetIDs))
+	for _, id := range targetIDs {
+		if loc, ok := lookup[id]; ok {
+			status := "未解锁"
+			if loc.Accessible {
+				status = "可探索"
+			}
+			highlights = append(highlights, fmt.Sprintf("%s（%s）", loc.Name, status))
+		}
+	}
+	return highlights
+}
+
+func resolveCharacterSummaries(characters []*models.Character, ids []string) []map[string]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	lookup := make(map[string]*models.Character)
+	for _, ch := range characters {
+		if ch != nil {
+			lookup[ch.ID] = ch
+		}
+	}
+	result := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		if ch, ok := lookup[id]; ok {
+			result = append(result, map[string]string{
+				"id":   ch.ID,
+				"name": ch.Name,
+				"role": ch.Role,
+				"mood": ch.Personality,
+			})
+		}
+	}
+	return result
+}
+
 // RewindStory 回溯故事到指定节点
 func (h *Handler) RewindStory(c *gin.Context) {
-	sceneID := c.Param("scene_id")
+	sceneID := c.Param("id")
 
 	var req struct {
 		NodeID string `json:"node_id" binding:"required"` // 目标节点ID
@@ -1492,27 +1819,6 @@ func (h *Handler) RewindStoryToNode(c *gin.Context) {
 	})
 }
 
-// SettingsPage 返回设置页面
-func (h *Handler) SettingsPage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	// 从配置服务获取当前设置
-	config := h.ConfigService.GetCurrentConfig()
-	stats := h.StatsService.GetUsageStats()
-
-	c.HTML(http.StatusOK, "settings.html", gin.H{
-		"Title":            "系统设置",
-		"current_provider": config.LLMProvider,
-		"current_model":    config.LLMConfig["model"],
-		"debug_mode":       config.DebugMode,
-		"today_requests":   stats.TodayRequests,
-		"monthly_tokens":   stats.MonthlyTokens,
-	})
-}
-
 // 添加这个方法，作为前端 API.getSettings() 的对应接口
 func (h *Handler) GetSettings(c *gin.Context) {
 	cfg := config.GetCurrentConfig()
@@ -1638,6 +1944,11 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		}
 
 		// 执行测试请求
+		modelName := strings.TrimSpace(testRequest.LLMConfig["default_model"])
+		if modelName == "" {
+			modelName = strings.TrimSpace(testRequest.LLMConfig["model"])
+		}
+
 		request := services.ChatCompletionRequest{
 			Messages: []services.ChatCompletionMessage{
 				{
@@ -1649,7 +1960,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 					Content: "Hello",
 				},
 			},
-			Model:       "", // Use default model
+			Model:       modelName,
 			Temperature: 0.1,
 			MaxTokens:   5,
 		}
@@ -2181,6 +2492,321 @@ func (h *Handler) UpdateStoryProgress(c *gin.Context) {
 	h.Response.Success(c, progressUpdate, "Story progress updated successfully")
 }
 
+// ========================================
+// 场景物品管理 API
+// ========================================
+
+// GetSceneItems 获取场景所有物品
+func (h *Handler) GetSceneItems(c *gin.Context) {
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		h.Response.BadRequest(c, "场景ID不能为空")
+		return
+	}
+
+	// 获取物品服务
+	container := di.GetContainer()
+	itemService, ok := container.Get("item").(*services.ItemService)
+	if !ok || itemService == nil {
+		h.Response.InternalError(c, "物品服务未初始化", "无法获取物品服务实例")
+		return
+	}
+
+	items, err := itemService.GetAllItems(sceneID)
+	if err != nil {
+		h.Response.InternalError(c, "获取物品列表失败", err.Error())
+		return
+	}
+
+	sceneItems := make([]*models.Item, 0, len(items))
+	ownedItems := make([]*models.Item, 0)
+	for _, item := range items {
+		if item.IsInventoryOnly() {
+			ownedItems = append(ownedItems, item)
+		} else {
+			sceneItems = append(sceneItems, item)
+		}
+	}
+
+	response := struct {
+		SceneItems []*models.Item `json:"scene_items"`
+		OwnedItems []*models.Item `json:"owned_items"`
+		Total      int            `json:"total"`
+	}{
+		SceneItems: sceneItems,
+		OwnedItems: ownedItems,
+		Total:      len(items),
+	}
+
+	h.Response.Success(c, response, "物品列表获取成功")
+}
+
+// GetSceneItem 获取场景指定物品
+func (h *Handler) GetSceneItem(c *gin.Context) {
+	sceneID := c.Param("id")
+	itemID := c.Param("item_id")
+
+	if sceneID == "" || itemID == "" {
+		h.Response.BadRequest(c, "场景ID和物品ID不能为空")
+		return
+	}
+
+	// 获取物品服务
+	container := di.GetContainer()
+	itemService, ok := container.Get("item").(*services.ItemService)
+	if !ok || itemService == nil {
+		h.Response.InternalError(c, "物品服务未初始化", "无法获取物品服务实例")
+		return
+	}
+
+	item, err := itemService.GetItem(sceneID, itemID)
+	if err != nil {
+		h.Response.NotFound(c, "物品", "物品ID: "+itemID)
+		return
+	}
+
+	h.Response.Success(c, item, "物品信息获取成功")
+}
+
+// AddSceneItem 添加物品到场景
+func (h *Handler) AddSceneItem(c *gin.Context) {
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		h.Response.BadRequest(c, "场景ID不能为空")
+		return
+	}
+
+	var item models.Item
+	if err := c.ShouldBindJSON(&item); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	// 设置场景ID
+	item.SceneID = sceneID
+	item.ID = fmt.Sprintf("item_%d", time.Now().UnixNano())
+	item.CreatedAt = time.Now()
+	item.LastUpdated = time.Now()
+
+	// 获取物品服务
+	container := di.GetContainer()
+	itemService, ok := container.Get("item").(*services.ItemService)
+	if !ok || itemService == nil {
+		h.Response.InternalError(c, "物品服务未初始化", "无法获取物品服务实例")
+		return
+	}
+
+	if err := itemService.AddItem(sceneID, &item); err != nil {
+		h.Response.InternalError(c, "添加物品失败", err.Error())
+		return
+	}
+
+	h.Response.Created(c, item, "物品添加成功")
+}
+
+// UpdateSceneItem 更新场景物品
+func (h *Handler) UpdateSceneItem(c *gin.Context) {
+	sceneID := c.Param("id")
+	itemID := c.Param("item_id")
+
+	if sceneID == "" || itemID == "" {
+		h.Response.BadRequest(c, "场景ID和物品ID不能为空")
+		return
+	}
+
+	var item models.Item
+	if err := c.ShouldBindJSON(&item); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	// 确保ID一致
+	item.ID = itemID
+	item.SceneID = sceneID
+	item.LastUpdated = time.Now()
+
+	// 获取物品服务
+	container := di.GetContainer()
+	itemService, ok := container.Get("item").(*services.ItemService)
+	if !ok || itemService == nil {
+		h.Response.InternalError(c, "物品服务未初始化", "无法获取物品服务实例")
+		return
+	}
+
+	if err := itemService.UpdateItem(sceneID, &item); err != nil {
+		h.Response.InternalError(c, "更新物品失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, item, "物品更新成功")
+}
+
+// DeleteSceneItem 删除场景物品
+func (h *Handler) DeleteSceneItem(c *gin.Context) {
+	sceneID := c.Param("id")
+	itemID := c.Param("item_id")
+
+	if sceneID == "" || itemID == "" {
+		h.Response.BadRequest(c, "场景ID和物品ID不能为空")
+		return
+	}
+
+	// 获取物品服务
+	container := di.GetContainer()
+	itemService, ok := container.Get("item").(*services.ItemService)
+	if !ok || itemService == nil {
+		h.Response.InternalError(c, "物品服务未初始化", "无法获取物品服务实例")
+		return
+	}
+
+	if err := itemService.DeleteItem(sceneID, itemID); err != nil {
+		h.Response.InternalError(c, "删除物品失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, nil, "物品删除成功")
+}
+
+// ========================================
+// 故事高级功能 API
+// ========================================
+
+// CompleteTaskObjective 完成任务目标
+func (h *Handler) CompleteTaskObjective(c *gin.Context) {
+	sceneID := c.Param("id")
+	taskID := c.Param("task_id")
+	objectiveID := c.Param("objective_id")
+
+	if sceneID == "" || taskID == "" || objectiveID == "" {
+		h.Response.BadRequest(c, "场景ID、任务ID和目标ID不能为空")
+		return
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	if err := storyService.CompleteObjective(sceneID, taskID, objectiveID); err != nil {
+		h.Response.InternalError(c, "完成目标失败", err.Error())
+		return
+	}
+
+	// 获取更新后的故事数据
+	storyData, err := storyService.GetStoryForScene(sceneID)
+	if err != nil {
+		h.Response.InternalError(c, "获取故事数据失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, storyData, "目标完成成功")
+}
+
+// UnlockStoryLocation 解锁故事地点
+func (h *Handler) UnlockStoryLocation(c *gin.Context) {
+	sceneID := c.Param("id")
+	locationID := c.Param("location_id")
+
+	if sceneID == "" || locationID == "" {
+		h.Response.BadRequest(c, "场景ID和地点ID不能为空")
+		return
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	if err := storyService.UnlockLocation(sceneID, locationID); err != nil {
+		h.Response.InternalError(c, "解锁地点失败", err.Error())
+		return
+	}
+
+	// 获取更新后的故事数据
+	storyData, err := storyService.GetStoryForScene(sceneID)
+	if err != nil {
+		h.Response.InternalError(c, "获取故事数据失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, storyData, "地点解锁成功")
+}
+
+// ExploreStoryLocation 探索故事地点
+func (h *Handler) ExploreStoryLocation(c *gin.Context) {
+	sceneID := c.Param("id")
+	locationID := c.Param("location_id")
+
+	if sceneID == "" || locationID == "" {
+		h.Response.BadRequest(c, "场景ID和地点ID不能为空")
+		return
+	}
+
+	// 解析用户偏好（如果提供）
+	var preferences *models.UserPreferences
+	if prefJSON := c.Query("preferences"); prefJSON != "" {
+		preferences = &models.UserPreferences{}
+		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
+			preferences = nil
+		}
+	}
+
+	if preferences == nil {
+		preferences = &models.UserPreferences{
+			CreativityLevel: models.CreativityBalanced,
+			AllowPlotTwists: true,
+		}
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	// 创建带超时的上下文
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	result, err := storyService.ExploreLocation(sceneID, locationID, preferences)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			h.Response.Error(c, http.StatusRequestTimeout, "REQUEST_TIMEOUT",
+				"探索操作超时", "请稍后重试")
+			return
+		}
+		h.Response.InternalError(c, "探索地点失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, result, "地点探索成功")
+}
+
+// GetAvailableStoryChoices 获取当前可用的故事选择
+func (h *Handler) GetAvailableStoryChoices(c *gin.Context) {
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		h.Response.BadRequest(c, "场景ID不能为空")
+		return
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	choices, err := storyService.GetAvailableChoices(sceneID)
+	if err != nil {
+		h.Response.InternalError(c, "获取故事选择失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, choices, "故事选择获取成功")
+}
+
 // GetSceneStats 获取场景统计
 func (h *Handler) GetSceneStats(c *gin.Context) {
 	sceneIDStr := c.Param("id")
@@ -2208,32 +2834,35 @@ func (h *Handler) GetSceneStats(c *gin.Context) {
 
 // GetSceneConversations 获取场景对话
 func (h *Handler) GetSceneConversations(c *gin.Context) {
-	sceneIDStr := c.Param("id")
-	_, err := strconv.ParseUint(sceneIDStr, 10, 32)
-	if err != nil {
-		h.Response.Error(c, http.StatusBadRequest, "INVALID_SCENE_ID", "Invalid scene ID", err.Error())
+	sceneID := c.Param("id")
+	if sceneID == "" {
+		h.Response.BadRequest(c, "场景ID不能为空")
 		return
 	}
 
 	limit := 50
 	if limitStr := c.Query("limit"); limitStr != "" {
 		if parsedLimit, err := strconv.Atoi(limitStr); err == nil && parsedLimit > 0 {
+			if parsedLimit > 200 {
+				parsedLimit = 200
+			}
 			limit = parsedLimit
 		}
 	}
 
-	conversations := []interface{}{}
-
+	conversations := make([]models.Conversation, 0)
 	if h.ContextService != nil {
-		if convs, err := h.ContextService.GetRecentConversations(sceneIDStr, limit); err == nil {
-			for _, conv := range convs {
-				conversations = append(conversations, conv)
-			}
+		if convs, err := h.ContextService.GetRecentConversations(sceneID, limit); err == nil {
+			conversations = convs
+		} else {
+			log.Printf("警告: 获取场景(%s)对话失败: %v", sceneID, err)
 		}
+	} else {
+		log.Printf("警告: ContextService 未初始化，无法获取场景(%s)对话", sceneID)
 	}
 
 	h.Response.Success(c, map[string]interface{}{
-		"scene_id":      sceneIDStr,
+		"scene_id":      sceneID,
 		"conversations": conversations,
 		"total":         len(conversations),
 		"limit":         limit,
@@ -2374,80 +3003,6 @@ func (h *Handler) ExportInteractionSummary(c *gin.Context) {
 	}
 }
 
-// 故事视图页面处理器
-func (h *Handler) StoryViewPage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	sceneID := c.Param("id")
-	sceneData, err := h.SceneService.LoadScene(sceneID)
-	if err != nil {
-		c.HTML(http.StatusNotFound, "error.html", gin.H{
-			"error": "Scene not found",
-		})
-		return
-	}
-
-	c.HTML(http.StatusOK, "story_view.html", gin.H{
-		"Title":      "故事视图 - " + sceneData.Scene.Title,
-		"scene":      sceneData.Scene,
-		"characters": sceneData.Characters,
-	})
-}
-
-// UserProfilePage 返回用户档案页面
-func (h *Handler) UserProfilePage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	// 获取用户ID（从query参数或默认值）
-	userID := c.Query("user_id")
-	if userID == "" {
-		userID = "user_default" // 默认用户ID
-	}
-
-	// 获取配置
-	cfg := config.GetCurrentConfig()
-
-	// 渲染用户档案页面
-	c.HTML(http.StatusOK, "user_profile.html", gin.H{
-		"Title":      "用户档案",
-		"title":      "用户档案 - SceneIntruderMCP",
-		"user_id":    userID,
-		"debug":      cfg.DebugMode,
-		"static_url": "/static",
-	})
-}
-
-// LoginPage 返回登录页面
-func (h *Handler) LoginPage(c *gin.Context) {
-	// 添加缓存控制头
-	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
-	c.Header("Pragma", "no-cache")
-	c.Header("Expires", "0")
-
-	// 检查是否已认证 - if authenticated, redirect to scenes page instead of root
-	if _, isAuthenticated := GetUserFromContext(c); isAuthenticated {
-		c.Redirect(http.StatusTemporaryRedirect, "/scenes")
-		return
-	}
-
-	// 获取配置
-	cfg := config.GetCurrentConfig()
-
-	// 渲染登录页面
-	c.HTML(http.StatusOK, "login.html", gin.H{
-		"Title":      "登录",
-		"title":      "登录 - SceneIntruderMCP",
-		"debug":      cfg.DebugMode,
-		"static_url": "/static",
-	})
-}
-
 // Login 处理用户登录请求
 func (h *Handler) Login(c *gin.Context) {
 	// 从请求体获取登录凭据
@@ -2532,4 +3087,447 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	h.Response.Success(c, nil, "登出成功")
+}
+
+// ========================================
+// 用户管理 API Handlers
+// ========================================
+
+// GetUserProfile 获取用户档案
+func (h *Handler) GetUserProfile(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	// 权限检查 - 确保用户只能访问自己的档案
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权访问其他用户的档案", "")
+		return
+	}
+
+	user, err := h.UserService.GetUser(userID)
+	if err != nil {
+		h.Response.NotFound(c, "用户", "用户ID: "+userID)
+		return
+	}
+
+	h.Response.Success(c, user, "用户档案获取成功")
+}
+
+// UpdateUserProfile 更新用户档案
+func (h *Handler) UpdateUserProfile(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	// 权限检查
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权修改其他用户的档案", "")
+		return
+	}
+
+	var req struct {
+		Username    string                  `json:"username,omitempty"`
+		DisplayName string                  `json:"display_name,omitempty"`
+		Bio         string                  `json:"bio,omitempty"`
+		Avatar      string                  `json:"avatar,omitempty"`
+		Preferences *models.UserPreferences `json:"preferences,omitempty"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	user, err := h.UserService.GetUser(userID)
+	if err != nil {
+		h.Response.NotFound(c, "用户", "用户ID: "+userID)
+		return
+	}
+
+	if req.Username != "" {
+		user.Username = req.Username
+	}
+	if req.DisplayName != "" {
+		user.DisplayName = req.DisplayName
+	}
+	if req.Bio != "" {
+		user.Bio = req.Bio
+	}
+	if req.Avatar != "" {
+		user.Avatar = req.Avatar
+	}
+	if req.Preferences != nil {
+		user.Preferences = *req.Preferences
+	}
+
+	if err := h.UserService.SaveUser(user); err != nil {
+		h.Response.InternalError(c, "更新用户档案失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, user, "用户档案更新成功")
+}
+
+// GetUserPreferences 获取用户偏好
+func (h *Handler) GetUserPreferences(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权访问其他用户的偏好设置", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	preferences, err := h.UserService.GetUserPreferences(userID)
+	if err != nil {
+		h.Response.InternalError(c, "获取用户偏好失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, preferences, "用户偏好获取成功")
+}
+
+// UpdateUserPreferences 更新用户偏好
+func (h *Handler) UpdateUserPreferences(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权修改其他用户的偏好设置", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	var preferences models.UserPreferences
+	if err := c.ShouldBindJSON(&preferences); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	if err := h.UserService.UpdateUserPreferences(userID, preferences); err != nil {
+		h.Response.InternalError(c, "更新用户偏好失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, preferences, "用户偏好更新成功")
+}
+
+// GetUserItems 获取用户物品
+func (h *Handler) GetUserItems(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权访问其他用户的物品", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	items, err := h.UserService.GetUserItems(userID)
+	if err != nil {
+		h.Response.InternalError(c, "获取用户物品失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, items, "用户物品列表获取成功")
+}
+
+// AddUserItem 添加用户物品
+func (h *Handler) AddUserItem(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权为其他用户添加物品", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	var item models.UserItem
+	if err := c.ShouldBindJSON(&item); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	if item.ID == "" {
+		item.ID = fmt.Sprintf("item_%d", time.Now().UnixNano())
+	}
+
+	if err := h.UserService.AddUserItem(userID, item); err != nil {
+		h.Response.InternalError(c, "添加物品失败", err.Error())
+		return
+	}
+
+	created, err := h.UserService.GetUserItem(userID, item.ID)
+	if err != nil {
+		h.Response.Created(c, item, "物品添加成功")
+		return
+	}
+
+	h.Response.Created(c, created, "物品添加成功")
+}
+
+// GetUserItem 获取单个用户物品
+func (h *Handler) GetUserItem(c *gin.Context) {
+	userID := c.Param("user_id")
+	itemID := c.Param("item_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权访问其他用户的物品", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	item, err := h.UserService.GetUserItem(userID, itemID)
+	if err != nil {
+		h.Response.NotFound(c, "物品", "物品ID: "+itemID)
+		return
+	}
+
+	h.Response.Success(c, item, "物品信息获取成功")
+}
+
+// UpdateUserItem 更新用户物品
+func (h *Handler) UpdateUserItem(c *gin.Context) {
+	userID := c.Param("user_id")
+	itemID := c.Param("item_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权修改其他用户的物品", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	var item models.UserItem
+	if err := c.ShouldBindJSON(&item); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	item.ID = itemID
+	if err := h.UserService.UpdateUserItem(userID, itemID, item); err != nil {
+		h.Response.InternalError(c, "更新物品失败", err.Error())
+		return
+	}
+
+	updated, err := h.UserService.GetUserItem(userID, itemID)
+	if err != nil {
+		h.Response.Success(c, item, "物品更新成功")
+		return
+	}
+
+	h.Response.Success(c, updated, "物品更新成功")
+}
+
+// DeleteUserItem 删除用户物品
+func (h *Handler) DeleteUserItem(c *gin.Context) {
+	userID := c.Param("user_id")
+	itemID := c.Param("item_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权删除其他用户的物品", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	if err := h.UserService.DeleteUserItem(userID, itemID); err != nil {
+		h.Response.InternalError(c, "删除物品失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, nil, "物品删除成功")
+}
+
+// GetUserSkills 获取用户技能
+func (h *Handler) GetUserSkills(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权访问其他用户的技能", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	skills, err := h.UserService.GetUserSkills(userID)
+	if err != nil {
+		h.Response.InternalError(c, "获取用户技能失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, skills, "用户技能列表获取成功")
+}
+
+// AddUserSkill 添加用户技能
+func (h *Handler) AddUserSkill(c *gin.Context) {
+	userID := c.Param("user_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权为其他用户添加技能", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	var skill models.UserSkill
+	if err := c.ShouldBindJSON(&skill); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	if skill.ID == "" {
+		skill.ID = fmt.Sprintf("skill_%d", time.Now().UnixNano())
+	}
+
+	if err := h.UserService.AddUserSkill(userID, skill); err != nil {
+		h.Response.InternalError(c, "添加技能失败", err.Error())
+		return
+	}
+
+	saved, err := h.UserService.GetUserSkill(userID, skill.ID)
+	if err != nil {
+		h.Response.Created(c, skill, "技能添加成功")
+		return
+	}
+
+	h.Response.Created(c, saved, "技能添加成功")
+}
+
+// GetUserSkill 获取单个用户技能
+func (h *Handler) GetUserSkill(c *gin.Context) {
+	userID := c.Param("user_id")
+	skillID := c.Param("skill_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权访问其他用户的技能", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	skill, err := h.UserService.GetUserSkill(userID, skillID)
+	if err != nil {
+		h.Response.NotFound(c, "技能", "技能ID: "+skillID)
+		return
+	}
+
+	h.Response.Success(c, skill, "技能信息获取成功")
+}
+
+// UpdateUserSkill 更新用户技能
+func (h *Handler) UpdateUserSkill(c *gin.Context) {
+	userID := c.Param("user_id")
+	skillID := c.Param("skill_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权修改其他用户的技能", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	var skill models.UserSkill
+	if err := c.ShouldBindJSON(&skill); err != nil {
+		h.Response.BadRequest(c, "无效的请求数据", err.Error())
+		return
+	}
+
+	skill.ID = skillID
+	if err := h.UserService.UpdateUserSkill(userID, skillID, skill); err != nil {
+		h.Response.InternalError(c, "更新技能失败", err.Error())
+		return
+	}
+
+	updated, err := h.UserService.GetUserSkill(userID, skillID)
+	if err != nil {
+		h.Response.Success(c, skill, "技能更新成功")
+		return
+	}
+
+	h.Response.Success(c, updated, "技能更新成功")
+}
+
+// DeleteUserSkill 删除用户技能
+func (h *Handler) DeleteUserSkill(c *gin.Context) {
+	userID := c.Param("user_id")
+	skillID := c.Param("skill_id")
+
+	currentUserID, _ := GetUserFromContext(c)
+	if currentUserID != userID {
+		h.Response.Error(c, http.StatusForbidden, "FORBIDDEN",
+			"无权删除其他用户的技能", "")
+		return
+	}
+
+	if err := h.UserService.EnsureUserExists(userID); err != nil {
+		h.Response.InternalError(c, "初始化用户数据失败", err.Error())
+		return
+	}
+
+	if err := h.UserService.DeleteUserSkill(userID, skillID); err != nil {
+		h.Response.InternalError(c, "删除技能失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, nil, "技能删除成功")
 }
