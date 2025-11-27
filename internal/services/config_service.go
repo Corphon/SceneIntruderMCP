@@ -338,7 +338,7 @@ func (s *ConfigService) updateNotificationStats(success bool) {
 func (s *ConfigService) validateLLMConfig(provider string, configMap map[string]string) error {
 	// 验证提供商
 	supportedProviders := []string{
-		"openai", "anthropic", "google", "github", "grok",
+		"openai", "anthropic", "google", "githubmodels", "grok",
 		"mistral", "qwen", "glm", "deepseek", "openrouter",
 	}
 
@@ -386,42 +386,41 @@ func (s *ConfigService) validateLLMConfig(provider string, configMap map[string]
 func (s *ConfigService) getDefaultModelForProvider(provider string) string {
 	switch provider {
 	case "openai":
-		return "gpt-4o"
+		return "gpt-4.1"
 	case "anthropic":
-		return "claude-3.5-sonnet"
+		return "claude-4.5-haiku"
 	case "google":
-		return "gemini-2.0-pro-exp"
-	case "github":
+		return "gemini-3.0-pro"
+	case "githubmodels":
 		return "gpt-4.1"
 	case "grok":
-		return "grok-3"
+		return "grok-4.1-fast"
 	case "mistral":
 		return "mistral-large-latest"
 	case "qwen":
-		return "qwen2.5-max"
+		return "qwen3-max"
 	case "glm":
 		return "glm-4-plus"
 	case "deepseek":
 		return "deepseek-chat"
 	case "openrouter":
-		return "openai/gpt-4o"
+		return "x-ai/grok-4.1-fast:free"
 	default:
-		return "gpt-4o" // 默认回退
+		return "gpt-4.1" // 默认回退
 	}
 }
 
 // 模型验证方法
 func (s *ConfigService) isValidOpenAIModel(model string) bool {
 	validModels := []string{
-		"gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-4-turbo",
-		"gpt-3.5-turbo", "o1-preview", "o1-mini",
+		"gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini",
 	}
 	return s.contains(validModels, model)
 }
 
 func (s *ConfigService) isValidAnthropicModel(model string) bool {
 	validModels := []string{
-		"claude-3.5-sonnet", "claude-3-opus", "claude-3-sonnet", "claude-3-haiku",
+		"claude-haiku-4.5", "claude-sonnet-4.5",
 	}
 	return s.contains(validModels, model)
 }
