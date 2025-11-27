@@ -81,12 +81,14 @@ func InitServices() error {
 	userService := services.NewUserService()
 	container.Register("user", userService)
 
-	itemService := services.NewItemService()
+	cfg := config.GetCurrentConfig()
+
+	itemService := services.NewItemService(cfg.DataDir + "/scenes")
 	container.Register("item", itemService)
 
 	// 2. 依赖基础服务的服务
-	cfg := config.GetCurrentConfig()
 	sceneService := services.NewSceneService(cfg.DataDir + "/scenes")
+	sceneService.ItemService = itemService
 	container.Register("scene", sceneService)
 
 	contextService := services.NewContextService(sceneService)
