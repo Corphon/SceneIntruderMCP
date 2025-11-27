@@ -4,7 +4,7 @@
 
 **🎭 AI-Powered Immersive Interactive Storytelling Platform API Reference**
 
-Version: v1.0.0 | Updated: 2025-06-20
+Version: v1.2.2 | Updated: 2025-11-27
 
 [Back to Home](../README.md) | [中文版本](api_CN.md)
 
@@ -108,11 +108,18 @@ Content-Type: application/json
 #### Scene Management
 ```http
 GET    /api/scenes                      # Get scene list
-POST   /api/scenes                      # Create scene  
+POST   /api/scenes                      # Create scene
 GET    /api/scenes/{id}                 # Get scene details
 GET    /api/scenes/{id}/characters      # Get scene characters
 GET    /api/scenes/{id}/conversations   # Get scene conversations
 GET    /api/scenes/{id}/aggregate       # Get scene aggregate data
+
+# Scene Items Management (NEW)
+GET    /api/scenes/{id}/items           # Get scene items
+POST   /api/scenes/{id}/items           # Add item to scene
+GET    /api/scenes/{id}/items/{item_id} # Get specific item
+PUT    /api/scenes/{id}/items/{item_id} # Update scene item
+DELETE /api/scenes/{id}/items/{item_id} # Delete scene item
 ```
 
 #### Story System
@@ -122,6 +129,17 @@ POST   /api/scenes/{id}/story/choice    # Make story choice
 POST   /api/scenes/{id}/story/advance   # Advance story
 POST   /api/scenes/{id}/story/rewind    # Rewind story
 GET    /api/scenes/{id}/story/branches  # Get story branches
+GET    /api/scenes/{id}/story/choices   # Get available choices (NEW)
+
+# Task & Objective Management (NEW)
+POST   /api/scenes/{id}/story/tasks/{task_id}/objectives/{objective_id}/complete
+       # Complete task objective
+
+# Location Management (NEW)
+POST   /api/scenes/{id}/story/locations/{location_id}/unlock
+       # Unlock story location
+POST   /api/scenes/{id}/story/locations/{location_id}/explore
+       # Explore story location (trigger events, find items)
 ```
 
 #### Export Features
@@ -359,6 +377,27 @@ GET /api/scenes/{scene_id}/aggregate?conversation_limit=50&include_story=true&in
 | `include_story` | boolean | Whether to include story data |
 | `include_ui_state` | boolean | Whether to include UI state |
 
+### Delete Scene
+
+Remove a scene alongside all cached data and story timelines.
+
+```http
+DELETE /api/scenes/{scene_id}
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "scene_id": "scene_001"
+  },
+  "message": "场景删除成功"
+}
+```
+
+> **v1.2.2 update**: the endpoint now also deletes `data/stories/<scene_id>/story.json` and invalidates the story cache to prevent orphaned files.
+
 ---
 
 ## 🎭 Character Interaction API
@@ -537,6 +576,160 @@ Get all story branches and paths.
 GET /api/scenes/{scene_id}/story/branches
 ```
 
+### Get Available Story Choices
+
+Get currently available story choices for the player.
+
+```http
+GET /api/scenes/{scene_id}/story/choices
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "current_node_id": "node_005",
+    "available_choices": [
+      {
+        "id": "choice_a",
+        "text": "Investigate the mysterious sound",
+        "requirements": ["courage >= 5"],
+        "consequences": "May trigger combat encounter"
+      },
+      {
+        "id": "choice_b",
+        "text": "Continue down the main corridor",
+        "requirements": [],
+        "consequences": "Safe path, slower progress"
+      }
+    ]
+  },
+  "message": "故事选择获取成功"
+}
+```
+
+### Complete Task Objective
+
+Mark a task objective as completed.
+
+```http
+POST /api/scenes/{scene_id}/story/tasks/{task_id}/objectives/{objective_id}/complete
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "tasks": [
+      {
+        "id": "task_001",
+        "title": "Explore the Castle",
+        "description": "Search every room for clues",
+        "objectives": [
+          {
+            "id": "obj_001",
+            "description": "Find the main hall",
+            "completed": true,
+            "completed_at": "2025-11-22T10:15:00Z"
+          },
+          {
+            "id": "obj_002",
+            "description": "Locate the library",
+            "completed": false
+          }
+        ],
+        "progress": 50,
+        "rewards": {
+          "experience": 100,
+          "items": ["map_fragment"]
+        }
+      }
+    ]
+  },
+  "message": "目标完成成功"
+}
+```
+
+### Unlock Story Location
+
+Unlock a previously locked location.
+
+```http
+POST /api/scenes/{scene_id}/story/locations/{location_id}/unlock
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "locations": [
+      {
+        "id": "loc_library",
+        "name": "Ancient Library",
+        "description": "Rows of dusty bookshelves line the walls",
+        "accessible": true,
+        "unlocked_at": "2025-11-22T10:20:00Z",
+        "requirements_met": ["found_library_key"]
+      }
+    ]
+  },
+  "message": "地点解锁成功"
+}
+```
+
+### Explore Story Location
+
+Explore a location to trigger events, find items, or discover clues.
+
+```http
+POST /api/scenes/{scene_id}/story/locations/{location_id}/explore
+```
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `preferences` | JSON | User preferences (optional) |
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "description": "You discover a hidden passage behind the bookshelf. The air grows colder as you peer into the darkness...",
+    "new_clue": "There's a strange symbol carved into the wall - it matches the one from your vision",
+    "found_items": [
+      {
+        "id": "item_ancient_key",
+        "name": "Ancient Key",
+        "description": "A rusty key with mysterious engravings",
+        "type": "key_item"
+      }
+    ],
+    "triggered_event": {
+      "type": "story_node",
+      "node_id": "node_015",
+      "content": "The passage leads deeper into the castle's foundations...",
+      "choices": [
+        {
+          "id": "choice_continue",
+          "text": "Enter the passage"
+        },
+        {
+          "id": "choice_return",
+          "text": "Return to the library"
+        }
+      ]
+    },
+    "location_state_updated": true
+  },
+  "message": "地点探索成功"
+}
+```
+
 ### Get Scene Character List
 
 Get all characters in a specified scene.
@@ -565,6 +758,143 @@ GET /api/scenes/{scene_id}/characters
   ]
 }
 ```
+
+---
+
+## 🎒 Scene Items Management API
+
+### Get Scene Items
+
+Get all items in a specified scene.
+
+```http
+GET /api/scenes/{scene_id}/items
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "item_001",
+      "scene_id": "scene_001",
+      "name": "Magic Sword",
+      "description": "A sword imbued with ancient magic",
+      "type": "weapon",
+      "location": "treasure_room",
+      "is_owned": false,
+      "usable_with": ["shield", "spell_book"],
+      "properties": {
+        "attack": 50,
+        "durability": 100,
+        "rarity": "legendary"
+      },
+      "created_at": "2025-11-22T10:00:00Z",
+      "last_updated": "2025-11-22T10:00:00Z"
+    }
+  ],
+  "message": "物品列表获取成功"
+}
+```
+
+### Add Item to Scene
+
+Add a new item to the scene.
+
+```http
+POST /api/scenes/{scene_id}/items
+```
+
+**Request Body:**
+```json
+{
+  "name": "Healing Potion",
+  "description": "Restores 50 HP when consumed",
+  "type": "consumable",
+  "location": "inventory",
+  "is_owned": true,
+  "usable_with": [],
+  "properties": {
+    "heal_amount": 50,
+    "rarity": "common",
+    "stackable": true,
+    "max_stack": 99
+  }
+}
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "item_002",
+    "scene_id": "scene_001",
+    "name": "Healing Potion",
+    "description": "Restores 50 HP when consumed",
+    "type": "consumable",
+    "location": "inventory",
+    "is_owned": true,
+    "properties": {
+      "heal_amount": 50,
+      "rarity": "common",
+      "stackable": true,
+      "max_stack": 99
+    },
+    "created_at": "2025-11-22T10:05:00Z",
+    "last_updated": "2025-11-22T10:05:00Z"
+  },
+  "message": "物品添加成功"
+}
+```
+
+### Get Specific Item
+
+Get details of a specific item.
+
+```http
+GET /api/scenes/{scene_id}/items/{item_id}
+```
+
+### Update Scene Item
+
+Update an existing item.
+
+```http
+PUT /api/scenes/{scene_id}/items/{item_id}
+```
+
+**Request Body:**
+```json
+{
+  "name": "Healing Potion",
+  "description": "Restores 50 HP when consumed",
+  "location": "inventory",
+  "is_owned": true,
+  "properties": {
+    "heal_amount": 60
+  }
+}
+```
+
+### Delete Scene Item
+
+Delete an item from the scene.
+
+```http
+DELETE /api/scenes/{scene_id}/items/{item_id}
+```
+
+**Response Example:**
+```json
+{
+  "success": true,
+  "message": "物品删除成功"
+}
+```
+
+---
 
 ### Trigger Character Interaction
 
@@ -1247,6 +1577,11 @@ curl -X PUT http://localhost:8080/api/llm/config \
 ---
 
 ## 📋 API Changelog
+
+### v1.2.2 (2025-11-27)
+- `DELETE /api/scenes/{id}` now cascades to story timelines, ensuring `data/stories/<scene_id>` is removed and caches are invalidated
+- GitHub Models and other providers consistently honor the configured `default_model`, resolving previous “connection failed” errors
+- Added operational guidance (encryption key lifecycle, data cleanup checklist) across the docs for release-readiness
 
 ### v1.0.0 (2025-06-20)
 - Initial API version release
