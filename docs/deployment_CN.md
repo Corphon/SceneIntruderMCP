@@ -431,6 +431,13 @@ CORS_ENABLED=true
 RATE_LIMIT_ENABLED=true
 ```
 
+### 持久化加密密钥 (`data/.encryption_key`)
+
+- 当未设置 `CONFIG_ENCRYPTION_KEY` 时，系统会自动生成 32 字节随机密钥并写入 `data/.encryption_key`，用于长期加密 API 凭据。
+- 该文件必须与 `data/config.json` 一起部署；删除它会导致所有已加密的密钥无法解密，需要重新配置。
+- 如需轮换密钥，可删除该文件并重启服务，再立即更新新的 API 密钥，系统会自动生成新的密钥。
+
+
 ### 多环境配置
 
 ```json
@@ -622,6 +629,8 @@ else
     exit 1
 fi
 ```
+
+
 
 ## 🔧 故障排除
 
