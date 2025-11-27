@@ -7,7 +7,7 @@
 **🎭 AI驱动的沉浸式互动叙事平台**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-apache-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
@@ -67,6 +67,8 @@ SceneIntruderMCP 是一个革命性的AI驱动互动叙事平台，它将传统�
 ### 📁 项目结构
 
 ```
+
+> ℹ️ **提示**：当前激活的提供商会读取其 `default_model` 配置。凡是未明确指定模型的 AI 请求都会自动回退到该值，因此只需在配置文件里修改一次即可全局切换模型，无需改动代码。
 SceneIntruderMCP/
 ├── cmd/
 │   └── server/           # 应用程序入口
@@ -102,6 +104,7 @@ SceneIntruderMCP/
 - **存储**: 基于文件系统的JSON存储，支持扩展到数据库
 - **前端**: 原生JavaScript + HTML/CSS，响应式设计
 - **部署**: 容器化支持，云原生架构
+
 
 ## 🚀 快速开始
 
@@ -183,6 +186,12 @@ go build -o sceneintruder cmd/server/main.go
 }
 ```
 
+#### 🔐 配置加密与 `.encryption_key`
+
+- 如果未设置 `CONFIG_ENCRYPTION_KEY`，系统会自动生成 32 字节随机密钥并写入 `data/.encryption_key`，用于长期加密 API 凭据。
+- 该文件必须与 `data/config.json` 同步保留，否则所有已加密的密钥都将无法解密，需要重新在设置页填写。
+- 如需轮换密钥，可删除该文件并重启服务，然后立即更新新的 API 密钥，系统会自动生成并持久化新的密钥。
+
 ## 📖 使用指南
 
 ### 🎬 创建场景
@@ -197,7 +206,18 @@ go build -o sceneintruder cmd/server/main.go
 2. **自然对话**: 与AI角色进行自然语言对话
 3. **情感反馈**: 观察角色的情绪、动作和表情变化
 
-### 📚 故事分支
+### � 控制台 CLI 快速体验
+
+`cmd/demo` 提供了一套无需前端即可跑通完整流程的多语言控制台界面，便于快速联调和压测：
+
+- **开箱即选语言**: 启动后即可在中文/英文界面间切换，所有提示与指令同步更新。
+- **LLM 一键配置**: 菜单默认优先引导配置 LLM，可直接从 `config.json` 读取，无需重复输入密钥。
+- **首节点自动推送**: 进入场景后系统会主动推进首个剧情节点，并用方框高亮展示最新内容。
+- **HUD 式互动看板**: 每轮交互前都会以方框列出可用的角色(@)、地点(@)、物品(/)、技能(/)与系统指令(!)。
+- **符号快捷指令**: `@角色/地点` 聚焦特定对象，`/物品/技能` 引入装备与能力，`!status/!tasks/!advance/...` 可随时查看状态或强制推进剧情。
+- **空输入继续剧情**: 直接回车即可让 AI 自动续写节点，方便快速冒烟测试故事引擎。
+
+### �📚 故事分支
 
 1. **动态选择**: AI根据当前情况生成4种类型的选择
 2. **故事发展**: 基于选择推进非线性故事情节
