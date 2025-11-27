@@ -18,7 +18,7 @@ import (
 func init() {
 	llm.Register("google", func() llm.Provider {
 		return &Provider{
-			models: []string{
+			recommendedModels: []string{
 				"gemini-2.5-pro",
 				"gemini-2.5-flash",
 			},
@@ -34,7 +34,6 @@ type Provider struct {
 	defaultModel      string
 	recommendedModels []string
 	availableModels   []string
-	models            []string
 	projectID         string // 可选，对于某些环境可能需要
 }
 
@@ -49,8 +48,10 @@ func (p *Provider) Initialize(config map[string]string) error {
 
 	if model, exists := config["default_model"]; exists && model != "" {
 		p.defaultModel = model
+	} else if len(p.recommendedModels) > 0 {
+		p.defaultModel = p.recommendedModels[0]
 	} else {
-		p.defaultModel = "gemini-2.0-flash"
+		p.defaultModel = "gemini-2.5-flash"
 	}
 
 	if baseURL, exists := config["base_url"]; exists && baseURL != "" {
@@ -59,6 +60,14 @@ func (p *Provider) Initialize(config map[string]string) error {
 
 	if projectID, exists := config["project_id"]; exists {
 		p.projectID = projectID
+	}
+
+	// 如果配置中包含自定义模型列表
+	if customModels, exists := config["custom_models"]; exists && customModels != "" {
+		var models []string
+		if err := json.Unmarshal([]byte(customModels), &models); err == nil && len(models) > 0 {
+			p.availableModels = models
+		}
 	}
 
 	return nil
