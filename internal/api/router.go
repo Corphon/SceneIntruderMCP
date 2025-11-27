@@ -97,23 +97,27 @@ func SetupRouter() (*gin.Engine, error) {
 		})
 	}
 
-	// 静态文件服务
+	// 静态文件服务 - 兼容新旧路径
+	r.Static("/assets", cfg.StaticDir)
 	r.Static("/static", cfg.StaticDir)
 
-	// HTML模板
-	r.LoadHTMLGlob(filepath.Join(cfg.TemplatesDir, "*.html"))
+	spaIndexPath := filepath.Join(cfg.TemplatesDir, "index.html")
+	spaHandler := serveSPAHandler(spaIndexPath)
+	registerSPARoutes(r, spaHandler)
 
-	// ===============================
-	// 页面路由
-	// ===============================
-	r.GET("/", handler.IndexPage) // 显示欢迎页面
-	r.GET("/scenes", handler.SceneSelectorPage)
-	r.GET("/scenes/create", handler.CreateScenePage)
-	r.GET("/scenes/:id", handler.ScenePage)
-	r.GET("/settings", handler.SettingsPage)
-	r.GET("/user/profile", handler.UserProfilePage) // 添加用户档案页面
-	r.GET("/login", handler.LoginPage)              // 添加登录页面
-	r.GET("/scenes/:id/story", handler.StoryViewPage)
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/api") {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+				"error":   "API endpoint not found",
+				"path":    path,
+				"success": false,
+			})
+			return
+		}
+
+		spaHandler(c)
+	})
 
 	// WebSocket 支持
 	r.GET("/ws/scene/:id", handler.SceneWebSocket)
@@ -144,7 +148,7 @@ func SetupRouter() (*gin.Engine, error) {
 		settingsGroup := api.Group("/settings")
 		{
 			settingsGroup.GET("", handler.GetSettings)
-			settingsGroup.POST("", handler.SaveSettings) // Remove AuthMiddleware for save-settings to allow unauthenticated saving during initial setup
+			settingsGroup.POST("", handler.SaveSettings)                   // Remove AuthMiddleware for save-settings to allow unauthenticated saving during initial setup
 			settingsGroup.POST("/test-connection", handler.TestConnection) // Remove AuthMiddleware for test-connection to allow unauthenticated testing
 		}
 
@@ -166,8 +170,19 @@ func SetupRouter() (*gin.Engine, error) {
 			scenesGroup.GET("", handler.GetScenes)
 			scenesGroup.POST("", AuthMiddleware(), handler.CreateScene)
 			scenesGroup.GET("/:id", RequireAuthForScene(), handler.GetScene)
+			scenesGroup.DELETE("/:id", RequireAuthForScene(), handler.DeleteScene)
 			scenesGroup.GET("/:id/characters", RequireAuthForScene(), handler.GetCharacters)
 			scenesGroup.GET("/:id/conversations", RequireAuthForScene(), handler.GetConversations)
+
+			// 物品管理路由
+			itemsGroup := scenesGroup.Group("/:id/items")
+			{
+				itemsGroup.GET("", RequireAuthForScene(), handler.GetSceneItems)
+				itemsGroup.POST("", RequireAuthForScene(), handler.AddSceneItem)
+				itemsGroup.GET("/:item_id", RequireAuthForScene(), handler.GetSceneItem)
+				itemsGroup.PUT("/:item_id", RequireAuthForScene(), handler.UpdateSceneItem)
+				itemsGroup.DELETE("/:item_id", RequireAuthForScene(), handler.DeleteSceneItem)
+			}
 
 			// 故事相关路由
 			storyGroup := scenesGroup.Group("/:id/story")
@@ -175,9 +190,18 @@ func SetupRouter() (*gin.Engine, error) {
 				storyGroup.GET("", RequireAuthForScene(), handler.GetStoryData)
 				storyGroup.POST("/choice", RequireAuthForScene(), handler.MakeStoryChoice)
 				storyGroup.POST("/advance", RequireAuthForScene(), handler.AdvanceStory)
+				storyGroup.POST("/command", RequireAuthForScene(), handler.HandleSceneCommand)
 				storyGroup.POST("/rewind", RequireAuthForScene(), handler.RewindStory)
 				storyGroup.GET("/branches", RequireAuthForScene(), handler.GetStoryBranches)
+				storyGroup.GET("/choices", RequireAuthForScene(), handler.GetAvailableStoryChoices)
 				storyGroup.POST("/batch", RequireAuthForScene(), handler.BatchStoryOperations)
+
+				// 任务目标完成
+				storyGroup.POST("/tasks/:task_id/objectives/:objective_id/complete", RequireAuthForScene(), handler.CompleteTaskObjective)
+
+				// 地点管理
+				storyGroup.POST("/locations/:location_id/unlock", RequireAuthForScene(), handler.UnlockStoryLocation)
+				storyGroup.POST("/locations/:location_id/explore", RequireAuthForScene(), handler.ExploreStoryLocation)
 			}
 
 			// 导出相关路由 - 保持默认 rate limit
@@ -236,7 +260,7 @@ func SetupRouter() (*gin.Engine, error) {
 		// 用户管理路由
 		// ===============================
 		usersGroup := api.Group("/users/:user_id")
-		usersGroup.Use(RequireAuthForUser()) // Require user authentication for user-specific routes
+		usersGroup.Use(AuthMiddleware(), RequireAuthForUser()) // Require auth and enforce user scoping
 		{
 			// 用户档案
 			usersGroup.GET("", handler.GetUserProfile)
@@ -284,7 +308,7 @@ func corsMiddleware() gin.HandlerFunc {
 		if allowedOrigin == "" {
 			// For development environments, allow current origin or localhost
 			origin := c.GetHeader("Origin")
-			
+
 			// Improved origin validation for security
 			if isValidOrigin(origin) {
 				c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
@@ -315,7 +339,7 @@ func isValidOrigin(origin string) bool {
 	// List of valid origins (add yours here for production)
 	validOrigins := []string{
 		"http://localhost",
-		"https://localhost", 
+		"https://localhost",
 		"http://127.0.0.1",
 		"http://0.0.0.0",
 		"https://127.0.0.1",
@@ -336,4 +360,40 @@ func getEnv(key, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+func registerSPARoutes(r *gin.Engine, spaHandler gin.HandlerFunc) {
+	spaPaths := []string{
+		"/",
+		"/settings",
+		"/login",
+		"/scenes",
+		"/scenes/*path",
+		"/user",
+		"/user/*path",
+	}
+
+	for _, path := range spaPaths {
+		r.GET(path, spaHandler)
+	}
+}
+
+func serveSPAHandler(indexPath string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if err := serveSPA(indexPath, c); err != nil {
+			c.String(http.StatusInternalServerError, fmt.Sprintf("无法加载前端页面: %v", err))
+		}
+	}
+}
+
+func serveSPA(indexPath string, c *gin.Context) error {
+	if _, err := os.Stat(indexPath); err != nil {
+		return fmt.Errorf("SPA 入口文件不存在 (%s): %w", indexPath, err)
+	}
+
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+	c.File(indexPath)
+	return nil
 }
