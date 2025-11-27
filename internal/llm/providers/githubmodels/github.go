@@ -19,11 +19,10 @@ func init() {
 	llm.Register("githubmodels", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"gpt-4o",
-				"o1",
-				"o3-mini",
-				"Phi-4",
-				"Phi-4-multimodal-instruct",
+				"gpt-4.1-mini",
+				"gpt-4.1",
+				"grok-3",
+				"grok-3-mini",
 			},
 			baseURL: "https://models.inference.ai.azure.com",
 		}
@@ -38,14 +37,44 @@ type Provider struct {
 	recommendedModels []string
 	availableModels   []string
 	deploymentID      string // 部署ID
-	apiVersion        string // API版本
+	apiVersion        string // API版本(同时用于GitHub API header)
 	region            string // Azure区域
+}
+
+func (p *Provider) buildURL(path string) string {
+	base := strings.TrimSuffix(p.baseURL, "/")
+	url := base + path
+
+	if p.apiVersion != "" {
+		separator := "?"
+		if strings.Contains(url, "?") {
+			separator = "&"
+		}
+		url = fmt.Sprintf("%s%sapi-version=%s", url, separator, p.apiVersion)
+	}
+
+	return url
+}
+
+func (p *Provider) applyHeaders(req *http.Request) {
+	if p.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+p.apiKey)
+		req.Header.Set("api-key", p.apiKey)
+	}
+
+	if p.apiVersion != "" {
+		req.Header.Set("X-GitHub-Api-Version", p.apiVersion)
+	}
+
+	if p.region != "" {
+		req.Header.Set("azureml-model-deployment", p.region)
+	}
 }
 
 func (p *Provider) Initialize(config map[string]string) error {
 	apiKey, exists := config["api_key"]
 	if !exists || apiKey == "" {
-		return errors.New("azure models api密钥未提供")
+		return errors.New("GitHub Models API密钥未提供")
 	}
 
 	p.apiKey = apiKey
@@ -54,7 +83,7 @@ func (p *Provider) Initialize(config map[string]string) error {
 	if model, exists := config["default_model"]; exists && model != "" {
 		p.defaultModel = model
 	} else {
-		p.defaultModel = "o3-mini"
+		p.defaultModel = "gpt-4.1-mini"
 	}
 
 	if baseURL, exists := config["base_url"]; exists && baseURL != "" {
@@ -66,10 +95,10 @@ func (p *Provider) Initialize(config map[string]string) error {
 		p.deploymentID = deploymentID
 	}
 
-	if apiVersion, exists := config["api_version"]; exists {
+	if apiVersion, exists := config["api_version"]; exists && apiVersion != "" {
 		p.apiVersion = apiVersion
 	} else {
-		p.apiVersion = "2023-08-01" // 默认API版本
+		p.apiVersion = "2023-12-01" // GitHub Models 默认API版本
 	}
 
 	if region, exists := config["region"]; exists {
@@ -88,7 +117,7 @@ func (p *Provider) Initialize(config map[string]string) error {
 }
 
 func (p *Provider) GetName() string {
-	return "Azure AI Models"
+	return "GitHub Models"
 }
 
 func (p *Provider) GetSupportedModels() []string {
@@ -106,18 +135,13 @@ func (p *Provider) FetchAvailableModels(ctx context.Context) error {
 		return errors.New("API密钥未设置，无法获取模型列表")
 	}
 
-	// Azure Models的API可能有变化，这里采用通用查询方式
-	// 构建请求
-	url := fmt.Sprintf("%s/models?api-version=%s", p.baseURL, p.apiVersion)
+	url := p.buildURL("/models")
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return err
 	}
 
-	req.Header.Set("api-key", p.apiKey)
-	if p.region != "" {
-		req.Header.Set("azureml-model-deployment", p.region)
-	}
+	p.applyHeaders(req)
 
 	// 发送请求
 	resp, err := p.client.Do(req)
@@ -126,7 +150,6 @@ func (p *Provider) FetchAvailableModels(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	// 检查响应
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("获取模型列表失败(%d): %s", resp.StatusCode, string(body))
@@ -167,14 +190,9 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 确定要使用的端点
-	var endpoint string
+	endpoint := "/chat/completions"
 	if p.deploymentID != "" {
-		// 如果有特定的部署ID
 		endpoint = fmt.Sprintf("/deployments/%s/chat/completions", p.deploymentID)
-	} else {
-		// 根据模型构建端点
-		modelPath := strings.ReplaceAll(model, "/", "/models/")
-		endpoint = fmt.Sprintf("/models/%s/chat/completions", modelPath)
 	}
 
 	// 构建请求
@@ -221,13 +239,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 		return nil, err
 	}
 
-	// 构建URL，添加API版本参数
-	url := fmt.Sprintf("%s%s", p.baseURL, endpoint)
-	if strings.Contains(url, "?") {
-		url = fmt.Sprintf("%s&api-version=%s", url, p.apiVersion)
-	} else {
-		url = fmt.Sprintf("%s?api-version=%s", url, p.apiVersion)
-	}
+	url := p.buildURL(endpoint)
 
 	// 创建HTTP请求
 	httpReq, err := http.NewRequestWithContext(
@@ -241,12 +253,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("api-key", p.apiKey)
-
-	// 如果特定了区域，添加区域头
-	if p.region != "" {
-		httpReq.Header.Set("azureml-model-deployment", p.region)
-	}
+	p.applyHeaders(httpReq)
 
 	// 发送请求
 	httpResp, err := p.client.Do(httpReq)
@@ -255,10 +262,9 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 	defer httpResp.Body.Close()
 
-	// 检查错误
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("azure models api错误(%d): %s", httpResp.StatusCode, string(body))
+		return nil, fmt.Errorf("GitHub Models API错误(%d): %s", httpResp.StatusCode, string(body))
 	}
 
 	// 解析响应
@@ -286,7 +292,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	if len(response.Choices) == 0 {
-		return nil, errors.New("azure models未返回任何结果")
+		return nil, errors.New("GitHub Models未返回任何结果")
 	}
 
 	return &llm.CompletionResponse{
@@ -308,12 +314,9 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 确定要使用的端点
-	var endpoint string
+	endpoint := "/chat/completions"
 	if p.deploymentID != "" {
 		endpoint = fmt.Sprintf("/deployments/%s/chat/completions", p.deploymentID)
-	} else {
-		modelPath := strings.ReplaceAll(model, "/", "/models/")
-		endpoint = fmt.Sprintf("/models/%s/chat/completions", modelPath)
 	}
 
 	// 构建请求
@@ -360,13 +363,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 		return nil, err
 	}
 
-	// 构建URL，添加API版本参数
-	url := fmt.Sprintf("%s%s", p.baseURL, endpoint)
-	if strings.Contains(url, "?") {
-		url = fmt.Sprintf("%s&api-version=%s", url, p.apiVersion)
-	} else {
-		url = fmt.Sprintf("%s?api-version=%s", url, p.apiVersion)
-	}
+	url := p.buildURL(endpoint)
 
 	// 创建HTTP请求
 	httpReq, err := http.NewRequestWithContext(
@@ -380,12 +377,8 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("api-key", p.apiKey)
 	httpReq.Header.Set("Accept", "text/event-stream")
-
-	if p.region != "" {
-		httpReq.Header.Set("azureml-model-deployment", p.region)
-	}
+	p.applyHeaders(httpReq)
 
 	// 发送请求
 	httpResp, err := p.client.Do(httpReq)
@@ -393,11 +386,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 		return nil, err
 	}
 
-	// 检查错误
 	if httpResp.StatusCode != http.StatusOK {
-		httpResp.Body.Close()
 		body, _ := io.ReadAll(httpResp.Body)
-		return nil, fmt.Errorf("azure models api错误(%d): %s", httpResp.StatusCode, string(body))
+		httpResp.Body.Close()
+		return nil, fmt.Errorf("GitHub Models API错误(%d): %s", httpResp.StatusCode, string(body))
 	}
 
 	// 创建响应通道
@@ -422,7 +414,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 						respChan <- llm.StreamResponse{
 							Text:         contentBuffer.String(),
 							FinishReason: "stop",
-							ModelName:    model, // 添加模型名称
+							ModelName:    model,
 							Done:         true,
 						}
 					}
@@ -444,6 +436,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 					respChan <- llm.StreamResponse{
 						Text:         contentBuffer.String(),
 						FinishReason: "stop",
+						ModelName:    model,
 						Done:         true,
 					}
 					return
@@ -468,8 +461,9 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 					if content != "" {
 						contentBuffer.WriteString(content)
 						respChan <- llm.StreamResponse{
-							Text: content,
-							Done: false,
+							Text:      content,
+							ModelName: model,
+							Done:      false,
 						}
 					}
 
@@ -478,6 +472,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 						respChan <- llm.StreamResponse{
 							Text:         contentBuffer.String(),
 							FinishReason: *streamResp.Choices[0].FinishReason,
+							ModelName:    model,
 							Done:         true,
 						}
 						return
