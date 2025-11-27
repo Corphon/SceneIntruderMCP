@@ -434,6 +434,13 @@ CORS_ENABLED=true
 RATE_LIMIT_ENABLED=true
 ```
 
+### Persistent Encryption Key (`data/.encryption_key`)
+
+- When no `CONFIG_ENCRYPTION_KEY` environment variable is supplied, the server creates a random 32-byte key in `data/.encryption_key` so encrypted API credentials survive restarts.
+- This file must travel with `data/config.json`; if you delete it, every encrypted key becomes unreadable until you re-enter the values through the settings API/UI.
+- To rotate the key intentionally, remove the file, restart the service, and immediately supply fresh API keys—the new key will be persisted automatically.
+
+
 ### Multi-Environment Configuration
 
 ```json
@@ -625,6 +632,7 @@ else
     exit 1
 fi
 ```
+
 
 ## 🔧 Troubleshooting
 
