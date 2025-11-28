@@ -98,12 +98,8 @@ SceneIntruderMCP/
 │   ├── models/           # Data model definitions
 │   ├── services/         # Business logic services
 │   └── storage/          # Storage abstraction layer
-├── static/
-│   ├── css/              # Style files
-│   ├── js/               # Frontend JavaScript
-│   └── images/           # Static images
-├── web/
-│   └── templates/        # HTML templates
+├── frontend/
+│   └── dist/             # assets
 ├── data/                 # Data storage directory
 │   ├── scenes/           # Scene data
 │   ├── stories/          # Story data
