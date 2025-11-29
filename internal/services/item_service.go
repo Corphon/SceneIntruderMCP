@@ -262,12 +262,9 @@ func (s *ItemService) invalidateSceneCache(sceneID string) {
 	s.cacheMutex.Lock()
 	defer s.cacheMutex.Unlock()
 
-	// nil 检查
 	if s.itemCache != nil {
 		delete(s.itemCache, sceneID)
 	}
-
-	delete(s.itemCache, sceneID)
 }
 
 // 清理过期缓存

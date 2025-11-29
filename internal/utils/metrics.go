@@ -4,6 +4,7 @@ package utils
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -12,33 +13,31 @@ type MetricsCollector struct {
 	counters   map[string]*Counter
 	gauges     map[string]*Gauge
 	histograms map[string]*Histogram
-	
+
 	mu sync.RWMutex
 }
 
-// Counter metric
+// Counter metric - using atomic operations for thread-safe value updates
 type Counter struct {
 	name  string
-	value int64
-	mu    sync.Mutex
+	value int64 // Use atomic operations for this field
 }
 
-// Gauge metric
+// Gauge metric - using atomic operations for thread-safe value updates
 type Gauge struct {
 	name  string
-	value int64
-	mu    sync.Mutex
+	value int64 // Use atomic operations for this field
 }
 
 // Histogram metric (simple implementation tracking count, sum, min, max)
 type Histogram struct {
-	name        string
-	count       int64
-	sum         int64
-	min         int64
-	max         int64
-	buckets     []int64 // For future expansion
-	mu          sync.Mutex
+	name    string
+	count   int64
+	sum     int64
+	min     int64
+	max     int64
+	buckets []int64 // For future expansion
+	mu      sync.Mutex
 }
 
 var (
@@ -58,100 +57,155 @@ func GetMetricsCollector() *MetricsCollector {
 	return globalMetrics
 }
 
-// IncrementCounter increments a counter metric
+// IncrementCounter increments a counter metric using atomic operations to reduce lock contention
 func (m *MetricsCollector) IncrementCounter(name string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
+	// First try with read lock (fast path for existing counters)
+	m.mu.RLock()
 	counter, exists := m.counters[name]
+	m.mu.RUnlock()
+
+	if exists {
+		atomic.AddInt64(&counter.value, 1)
+		return
+	}
+
+	// Slow path: need to create new counter
+	m.mu.Lock()
+	// Double-check after acquiring write lock
+	counter, exists = m.counters[name]
 	if !exists {
 		counter = &Counter{name: name}
 		m.counters[name] = counter
 	}
-	
-	counter.mu.Lock()
-	defer counter.mu.Unlock()
-	counter.value++
+	m.mu.Unlock()
+
+	atomic.AddInt64(&counter.value, 1)
 }
 
-// AddCounter adds a value to a counter metric
+// AddCounter adds a value to a counter metric using atomic operations
 func (m *MetricsCollector) AddCounter(name string, value int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
+	// First try with read lock (fast path for existing counters)
+	m.mu.RLock()
 	counter, exists := m.counters[name]
+	m.mu.RUnlock()
+
+	if exists {
+		atomic.AddInt64(&counter.value, value)
+		return
+	}
+
+	// Slow path: need to create new counter
+	m.mu.Lock()
+	// Double-check after acquiring write lock
+	counter, exists = m.counters[name]
 	if !exists {
 		counter = &Counter{name: name}
 		m.counters[name] = counter
 	}
-	
-	counter.mu.Lock()
-	defer counter.mu.Unlock()
-	counter.value += value
+	m.mu.Unlock()
+
+	atomic.AddInt64(&counter.value, value)
 }
 
-// SetGauge sets a gauge metric
+// SetGauge sets a gauge metric using atomic operations
 func (m *MetricsCollector) SetGauge(name string, value int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
+	// First try with read lock (fast path for existing gauges)
+	m.mu.RLock()
 	gauge, exists := m.gauges[name]
+	m.mu.RUnlock()
+
+	if exists {
+		atomic.StoreInt64(&gauge.value, value)
+		return
+	}
+
+	// Slow path: need to create new gauge
+	m.mu.Lock()
+	// Double-check after acquiring write lock
+	gauge, exists = m.gauges[name]
 	if !exists {
 		gauge = &Gauge{name: name}
 		m.gauges[name] = gauge
 	}
-	
-	gauge.mu.Lock()
-	defer gauge.mu.Unlock()
-	gauge.value = value
+	m.mu.Unlock()
+
+	atomic.StoreInt64(&gauge.value, value)
 }
 
 // IncGauge increments a gauge metric
 func (m *MetricsCollector) IncGauge(name string) {
-	m.SetGauge(name, m.GetGauge(name)+1)
+	// First try with read lock (fast path for existing gauges)
+	m.mu.RLock()
+	gauge, exists := m.gauges[name]
+	m.mu.RUnlock()
+
+	if exists {
+		atomic.AddInt64(&gauge.value, 1)
+		return
+	}
+
+	// Slow path: gauge doesn't exist, use SetGauge to create and set
+	m.SetGauge(name, 1)
 }
 
 // DecGauge decrements a gauge metric
 func (m *MetricsCollector) DecGauge(name string) {
-	m.SetGauge(name, m.GetGauge(name)-1)
+	// First try with read lock (fast path for existing gauges)
+	m.mu.RLock()
+	gauge, exists := m.gauges[name]
+	m.mu.RUnlock()
+
+	if exists {
+		atomic.AddInt64(&gauge.value, -1)
+		return
+	}
+
+	// Slow path: gauge doesn't exist, use SetGauge to create and set
+	m.SetGauge(name, -1)
 }
 
-// GetGauge gets the current value of a gauge
+// GetGauge gets the current value of a gauge using atomic load
 func (m *MetricsCollector) GetGauge(name string) int64 {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	
 	gauge, exists := m.gauges[name]
+	m.mu.RUnlock()
+
 	if !exists {
 		return 0
 	}
-	
-	gauge.mu.Lock()
-	defer gauge.mu.Unlock()
-	return gauge.value
+
+	return atomic.LoadInt64(&gauge.value)
 }
 
 // RecordHistogram records a value in a histogram
 func (m *MetricsCollector) RecordHistogram(name string, value int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	
+	// First try with read lock (fast path for existing histograms)
+	m.mu.RLock()
 	histogram, exists := m.histograms[name]
+	m.mu.RUnlock()
+
 	if !exists {
-		histogram = &Histogram{
-			name:  name,
-			min:   value,
-			max:   value,
+		// Slow path: need to create new histogram
+		m.mu.Lock()
+		// Double-check after acquiring write lock
+		histogram, exists = m.histograms[name]
+		if !exists {
+			histogram = &Histogram{
+				name: name,
+				min:  value,
+				max:  value,
+			}
+			m.histograms[name] = histogram
 		}
-		m.histograms[name] = histogram
+		m.mu.Unlock()
 	}
-	
+
 	histogram.mu.Lock()
 	defer histogram.mu.Unlock()
-	
+
 	histogram.count++
 	histogram.sum += value
-	
+
 	if value < histogram.min {
 		histogram.min = value
 	}
@@ -164,28 +218,24 @@ func (m *MetricsCollector) RecordHistogram(name string, value int64) {
 func (m *MetricsCollector) GetMetrics() map[string]interface{} {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
+
 	metrics := make(map[string]interface{})
-	
-	// Collect counters
+
+	// Collect counters using atomic load
 	counters := make(map[string]int64)
 	for name, counter := range m.counters {
-		counter.mu.Lock()
-		counters[name] = counter.value
-		counter.mu.Unlock()
+		counters[name] = atomic.LoadInt64(&counter.value)
 	}
 	metrics["counters"] = counters
-	
-	// Collect gauges
+
+	// Collect gauges using atomic load
 	gauges := make(map[string]int64)
 	for name, gauge := range m.gauges {
-		gauge.mu.Lock()
-		gauges[name] = gauge.value
-		gauge.mu.Unlock()
+		gauges[name] = atomic.LoadInt64(&gauge.value)
 	}
 	metrics["gauges"] = gauges
-	
-	// Collect histograms
+
+	// Collect histograms (still needs mutex for min/max consistency)
 	histograms := make(map[string]map[string]int64)
 	for name, histogram := range m.histograms {
 		histogram.mu.Lock()
@@ -198,23 +248,21 @@ func (m *MetricsCollector) GetMetrics() map[string]interface{} {
 		histogram.mu.Unlock()
 	}
 	metrics["histograms"] = histograms
-	
+
 	return metrics
 }
 
-// GetCounterValue gets the current value of a counter
+// GetCounterValue gets the current value of a counter using atomic load
 func (m *MetricsCollector) GetCounterValue(name string) int64 {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	
 	counter, exists := m.counters[name]
+	m.mu.RUnlock()
+
 	if !exists {
 		return 0
 	}
-	
-	counter.mu.Lock()
-	defer counter.mu.Unlock()
-	return counter.value
+
+	return atomic.LoadInt64(&counter.value)
 }
 
 // APIMetrics represents API-specific metrics
