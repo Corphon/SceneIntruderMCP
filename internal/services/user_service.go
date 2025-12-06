@@ -3,10 +3,12 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,6 +33,8 @@ type CachedUserData struct {
 	User      *models.User
 	Timestamp time.Time
 }
+
+var ErrSkillValidation = errors.New("skill validation failed")
 
 // ---------------------------------
 // NewUserService 创建用户服务
@@ -495,6 +499,11 @@ func (s *UserService) AddUserSkill(userID string, skill models.UserSkill) error 
 		return err
 	}
 
+	sanitizeUserSkill(&skill)
+	if err := validateUserSkill(&skill); err != nil {
+		return err
+	}
+
 	// 生成唯一ID
 	if skill.ID == "" {
 		skill.ID = s.generateUniqueSkillID(userID)
@@ -557,6 +566,10 @@ func (s *UserService) UpdateUserSkill(userID string, skillID string, updatedSkil
 	found := false
 	for i, skill := range user.Skills {
 		if skill.ID == skillID {
+			sanitizeUserSkill(&updatedSkill)
+			if err := validateUserSkill(&updatedSkill); err != nil {
+				return err
+			}
 			updatedSkill.ID = skillID
 			updatedSkill.Created = skill.Created
 			updatedSkill.Updated = time.Now()
@@ -666,4 +679,81 @@ func (s *UserService) cleanupExpiredCache() {
 			delete(s.userCache, userID)
 		}
 	}
+}
+
+func sanitizeUserSkill(skill *models.UserSkill) {
+	skill.Name = strings.TrimSpace(skill.Name)
+	skill.Description = strings.TrimSpace(skill.Description)
+	skill.Category = strings.TrimSpace(skill.Category)
+	skill.IconURL = strings.TrimSpace(skill.IconURL)
+	skill.Tags = sanitizeStringSlice(skill.Tags)
+	skill.Requirements = sanitizeStringSlice(skill.Requirements)
+
+	if len(skill.Effects) == 0 {
+		skill.Effects = []models.SkillEffect{}
+	}
+	for i := range skill.Effects {
+		effect := &skill.Effects[i]
+		effect.Target = strings.TrimSpace(effect.Target)
+		effect.Type = strings.TrimSpace(effect.Type)
+		effect.Description = strings.TrimSpace(effect.Description)
+		if effect.Target == "" {
+			effect.Target = "self"
+		}
+		if effect.Type == "" {
+			effect.Type = "custom"
+		}
+		if effect.Probability < 0 {
+			effect.Probability = 0
+		} else if effect.Probability > 1 {
+			effect.Probability = 1
+		}
+		if effect.Value < 0 {
+			effect.Value = 0
+		}
+		if effect.Duration < 0 {
+			effect.Duration = 0
+		}
+	}
+
+	if skill.Cooldown < 0 {
+		skill.Cooldown = 0
+	}
+}
+
+func sanitizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return values
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	return result
+}
+
+func validateUserSkill(skill *models.UserSkill) error {
+	if strings.TrimSpace(skill.Name) == "" {
+		return fmt.Errorf("%w: 技能名称不能为空", ErrSkillValidation)
+	}
+	if len(skill.Effects) == 0 {
+		return fmt.Errorf("%w: 至少需要一个技能效果", ErrSkillValidation)
+	}
+	for idx, effect := range skill.Effects {
+		if strings.TrimSpace(effect.Description) == "" && strings.TrimSpace(effect.Type) == "" {
+			return fmt.Errorf("%w: 第 %d 个技能效果缺少描述或类型", ErrSkillValidation, idx+1)
+		}
+		if effect.Value < 0 {
+			return fmt.Errorf("%w: 第 %d 个技能效果的数值不能为负", ErrSkillValidation, idx+1)
+		}
+		if effect.Duration < 0 {
+			return fmt.Errorf("%w: 第 %d 个技能效果的持续时间不能为负", ErrSkillValidation, idx+1)
+		}
+		if effect.Probability < 0 || effect.Probability > 1 {
+			return fmt.Errorf("%w: 第 %d 个技能效果的概率必须在 0-1 之间", ErrSkillValidation, idx+1)
+		}
+	}
+	return nil
 }
