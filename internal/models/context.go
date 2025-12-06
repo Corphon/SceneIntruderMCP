@@ -17,6 +17,7 @@ type Conversation struct {
 	ID        string                 `json:"id"`
 	SceneID   string                 `json:"scene_id"`
 	SpeakerID string                 `json:"speaker_id"`
+	NodeID    string                 `json:"node_id,omitempty"`
 	Content   string                 `json:"content"`
 	Timestamp time.Time              `json:"timestamp"`
 	Speaker   string                 `json:"speaker"`
