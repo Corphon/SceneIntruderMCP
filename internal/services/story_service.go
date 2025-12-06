@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
@@ -20,35 +23,14 @@ import (
 // 角色互动触发条件常量
 const (
 	TriggerTypeCharacterInteraction = "character_interaction"
+	maxInitialSegmentNodes          = 12
+	defaultSegmentRuneLimit         = 900
 )
-
-// sanitizeLLMJSONResponse 移除LLM响应中的Markdown代码块或反引号，确保可以解析为JSON
-func sanitizeLLMJSONResponse(raw string) string {
-	cleaned := strings.TrimSpace(raw)
-	if cleaned == "" {
-		return cleaned
-	}
-
-	if strings.HasPrefix(cleaned, "```") {
-		cleaned = strings.TrimPrefix(cleaned, "```")
-		cleaned = strings.TrimSpace(cleaned)
-		lower := strings.ToLower(cleaned)
-		if strings.HasPrefix(lower, "json") {
-			cleaned = strings.TrimSpace(cleaned[4:])
-		}
-		if idx := strings.LastIndex(cleaned, "```"); idx != -1 {
-			cleaned = cleaned[:idx]
-		}
-	}
-
-	cleaned = strings.TrimSpace(cleaned)
-	cleaned = strings.Trim(cleaned, "`")
-	return strings.TrimSpace(cleaned)
-}
 
 // StoryService 管理故事进展和剧情分支
 type StoryService struct {
 	SceneService     *SceneService
+	ContextService   *ContextService
 	LLMService       *LLMService
 	FileStorage      *storage.FileStorage
 	ItemService      *ItemService
@@ -87,6 +69,7 @@ func NewStoryService(llmService *LLMService) *StoryService {
 	// 创建场景服务(如果需要)
 	scenesPath := "data/scenes"
 	sceneService := NewSceneService(scenesPath)
+	contextService := NewContextService(sceneService)
 
 	// 创建物品服务(如果需要)
 	itemService := NewItemService("data/items")
@@ -101,6 +84,7 @@ func NewStoryService(llmService *LLMService) *StoryService {
 
 	service := &StoryService{
 		SceneService:     sceneService,
+		ContextService:   contextService,
 		LLMService:       llmService,
 		FileStorage:      fileStorage,
 		ItemService:      itemService,
@@ -146,26 +130,447 @@ func (s *StoryService) cleanupExpiredCache() {
 	}
 }
 
+// GetStoryNode 根据场景和节点ID获取对应的故事节点
+func (s *StoryService) GetStoryNode(sceneID, nodeID string) (*models.StoryNode, error) {
+	if sceneID == "" {
+		return nil, fmt.Errorf("scene_id 不能为空")
+	}
+	if nodeID == "" {
+		return nil, fmt.Errorf("node_id 不能为空")
+	}
+
+	storyData, err := s.loadStoryDataSafe(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载故事数据失败: %w", err)
+	}
+
+	for i := range storyData.Nodes {
+		node := storyData.Nodes[i]
+		if node.ID == nodeID {
+			result := node
+			return &result, nil
+		}
+	}
+
+	return nil, fmt.Errorf("未找到指定的故事节点: %s", nodeID)
+}
+
 // InitializeStoryForScene 初始化场景的故事线
 func (s *StoryService) InitializeStoryForScene(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
-	// 加载场景
+	storyData, err := s.initializeStoryForSceneFast(sceneID, preferences)
+	if err == nil {
+		return storyData, nil
+	}
+	log.Printf("fast story initialization failed for %s: %v, falling back to legacy pipeline", sceneID, err)
+	return s.initializeStoryForSceneLegacy(sceneID, preferences)
+}
+
+// InitializeStoryForSceneFull 强制使用完整分析流程（保留旧实现）
+func (s *StoryService) InitializeStoryForSceneFull(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
+	return s.initializeStoryForSceneLegacy(sceneID, preferences)
+}
+
+func (s *StoryService) initializeStoryForSceneLegacy(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
 	sceneData, err := s.SceneService.LoadScene(sceneID)
 	if err != nil {
 		return nil, fmt.Errorf("加载场景失败: %w", err)
 	}
 
-	// 从场景内容中提取故事节点
 	storyData, err := s.extractInitialStoryFromText(sceneData, preferences)
 	if err != nil {
-		return nil, fmt.Errorf("提取故事信息失败: %w", err)
+		log.Printf("story initialization via LLM failed for %s: %v, using fallback synthesis", sceneID, err)
+		storyData, err = s.buildFallbackStoryData(sceneData)
+		if err != nil {
+			return nil, fmt.Errorf("提取故事信息失败: %w", err)
+		}
 	}
 
-	// 保存故事数据
 	if err := s.saveStoryData(sceneID, storyData); err != nil {
 		return nil, fmt.Errorf("保存故事数据失败: %w", err)
 	}
 
 	return storyData, nil
+}
+
+func (s *StoryService) initializeStoryForSceneFast(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return nil, fmt.Errorf("加载场景失败: %w", err)
+	}
+
+	isEnglish := isEnglishText(sceneData.Scene.Name + " " + sceneData.Scene.Description)
+	segments := s.prepareInitialSegments(sceneData, maxInitialSegmentNodes, isEnglish)
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("无法生成原文片段用于快速初始化")
+	}
+	if len(segments) > maxInitialSegmentNodes {
+		segments = segments[:maxInitialSegmentNodes]
+	}
+	if len(sceneData.OriginalSegments) == 0 {
+		s.persistOriginalSegmentsForScene(sceneData, segments)
+	}
+
+	intro := strings.TrimSpace(sceneData.Scene.Description)
+	if intro == "" {
+		intro = pickLocale(isEnglish, "An urgent tale is unfolding.", "一段紧张剧情正在展开。")
+	}
+	mainObjective := strings.TrimSpace(sceneData.Scene.Summary)
+	if mainObjective == "" {
+		mainObjective = pickLocale(isEnglish, "Guide your allies through the crisis.", "引导同伴走出当前危局。")
+	}
+
+	storyData := &models.StoryData{
+		SceneID:       sceneID,
+		Intro:         intro,
+		MainObjective: mainObjective,
+		CurrentState:  pickLocale(isEnglish, "Initial", "初始"),
+		Progress:      0,
+		Nodes:         make([]models.StoryNode, 0, len(segments)),
+		Tasks:         s.buildFallbackTasks(sceneData, isEnglish),
+		Locations:     s.buildFallbackLocations(sceneData),
+		LastUpdated:   time.Now(),
+	}
+
+	storyContext := s.buildQuickStoryContext(sceneData, storyData, isEnglish)
+
+	for i, segment := range segments {
+		original := strings.TrimSpace(segment.OriginalText)
+		if original == "" {
+			continue
+		}
+		node := models.StoryNode{
+			ID:              fmt.Sprintf("node_%s_%d", sceneID, i+1),
+			SceneID:         sceneID,
+			OriginalContent: original,
+			Content:         "",
+			Type:            inferNodeType(i, len(segments)),
+			Choices:         nil,
+			IsRevealed:      i == 0,
+			CreatedAt:       time.Now(),
+			Source:          models.SourceSystem,
+			Metadata: map[string]interface{}{
+				"segment_strategy": "quick_init",
+				"analyzed":         false,
+			},
+		}
+		node.Choices = s.buildFallbackChoicesForSegment(&node, isEnglish)
+		storyData.Nodes = append(storyData.Nodes, node)
+	}
+
+	if len(storyData.Nodes) == 0 {
+		return nil, fmt.Errorf("快速初始化未能生成任何故事节点")
+	}
+
+	immediateNodes := 2
+	if immediateNodes > len(storyData.Nodes) {
+		immediateNodes = len(storyData.Nodes)
+	}
+
+	for i := 0; i < immediateNodes; i++ {
+		s.enrichNodeFromSegment(&storyData.Nodes[i], storyContext, preferences, isEnglish)
+		if storyData.Nodes[i].Metadata == nil {
+			storyData.Nodes[i].Metadata = map[string]interface{}{}
+		}
+		storyData.Nodes[i].Metadata["analyzed"] = true
+		delete(storyData.Nodes[i].Metadata, "pending_analysis")
+	}
+
+	for i := immediateNodes; i < len(storyData.Nodes); i++ {
+		node := &storyData.Nodes[i]
+		if strings.TrimSpace(node.Content) == "" {
+			node.Content = s.synthesizeNarrationFromOriginal(node.OriginalContent, isEnglish)
+		}
+		if node.Metadata == nil {
+			node.Metadata = map[string]interface{}{}
+		}
+		node.Metadata["pending_analysis"] = true
+		node.Metadata["analyzed"] = false
+	}
+
+	if err := s.saveStoryData(sceneID, storyData); err != nil {
+		return nil, fmt.Errorf("保存故事数据失败: %w", err)
+	}
+
+	go s.analyzeRemainingNodesAsync(sceneID, preferences)
+
+	return storyData, nil
+}
+
+func (s *StoryService) buildQuickStoryContext(sceneData *SceneData, storyData *models.StoryData, isEnglish bool) string {
+	var contextParts []string
+	if sceneData != nil {
+		title := strings.TrimSpace(sceneData.Scene.Name)
+		if title == "" {
+			title = strings.TrimSpace(sceneData.Scene.Title)
+		}
+		if title != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Scene", "场景"), title))
+		}
+		if desc := strings.TrimSpace(sceneData.Scene.Description); desc != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Description", "描述"), desc))
+		}
+		if era := strings.TrimSpace(sceneData.Scene.Era); era != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Era", "时代"), era))
+		}
+		if len(sceneData.Scene.Locations) > 0 {
+			var locNames []string
+			for _, loc := range sceneData.Scene.Locations {
+				if name := strings.TrimSpace(loc.Name); name != "" {
+					locNames = append(locNames, name)
+				}
+			}
+			if len(locNames) > 0 {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Locations", "关键地点"), strings.Join(locNames, ", ")))
+			}
+		}
+		if len(sceneData.Characters) > 0 {
+			var charNames []string
+			for _, ch := range sceneData.Characters {
+				if ch != nil {
+					if name := strings.TrimSpace(ch.Name); name != "" {
+						charNames = append(charNames, name)
+					}
+				}
+			}
+			if len(charNames) > 0 {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Characters", "角色"), strings.Join(charNames, ", ")))
+			}
+		}
+	}
+	if storyData != nil {
+		if intro := strings.TrimSpace(storyData.Intro); intro != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Intro", "开场"), intro))
+		}
+		if objective := strings.TrimSpace(storyData.MainObjective); objective != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Objective", "目标"), objective))
+		}
+	}
+	return strings.Join(contextParts, "\n")
+}
+
+func (s *StoryService) analyzeRemainingNodesAsync(sceneID string, preferences *models.UserPreferences) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("background analyze crashed for %s: %v", sceneID, r)
+		}
+	}()
+
+	storyData, err := s.loadStoryDataSafe(sceneID)
+	if err != nil {
+		log.Printf("background analyze skipped, load story failed for %s: %v", sceneID, err)
+		return
+	}
+	raw, err := json.Marshal(storyData)
+	if err != nil {
+		log.Printf("background analyze skipped, marshal failed for %s: %v", sceneID, err)
+		return
+	}
+	var working models.StoryData
+	if err := json.Unmarshal(raw, &working); err != nil {
+		log.Printf("background analyze skipped, unmarshal failed for %s: %v", sceneID, err)
+		return
+	}
+
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		log.Printf("background analyze skipped, load scene failed for %s: %v", sceneID, err)
+		return
+	}
+	isEnglish := isEnglishText(sceneData.Scene.Name + " " + sceneData.Scene.Description)
+	storyContext := s.buildQuickStoryContext(sceneData, &working, isEnglish)
+	updated := false
+
+	for i := range working.Nodes {
+		node := &working.Nodes[i]
+		if node.Metadata != nil {
+			if analyzed, ok := node.Metadata["analyzed"].(bool); ok && analyzed {
+				continue
+			}
+		}
+		s.enrichNodeFromSegment(node, storyContext, preferences, isEnglish)
+		if node.Metadata == nil {
+			node.Metadata = map[string]interface{}{}
+		}
+		node.Metadata["analyzed"] = true
+		delete(node.Metadata, "pending_analysis")
+		updated = true
+		working.LastUpdated = time.Now()
+		if err := s.saveStoryData(sceneID, &working); err != nil {
+			log.Printf("background analyze save failed for %s: %v", sceneID, err)
+			return
+		}
+		s.invalidateStoryCache(sceneID)
+		time.Sleep(2 * time.Second)
+	}
+
+	if updated {
+		log.Printf("background node analysis completed for %s", sceneID)
+	}
+}
+
+func (s *StoryService) buildFallbackStoryData(sceneData *SceneData) (*models.StoryData, error) {
+	if sceneData == nil || sceneData.Scene.ID == "" {
+		return nil, fmt.Errorf("缺少有效的场景数据")
+	}
+	isEnglish := isEnglishText(sceneData.Scene.Name + " " + sceneData.Scene.Description)
+	segments := s.fallbackSegmentsFromScene(sceneData, maxInitialSegmentNodes)
+	if len(segments) == 0 {
+		return nil, fmt.Errorf("场景缺少可用的剧情片段")
+	}
+	intro := strings.TrimSpace(sceneData.Scene.Description)
+	if intro == "" {
+		intro = pickLocale(isEnglish, "An urgent tale is unfolding.", "一段紧张剧情正在展开。")
+	}
+	mainObjective := strings.TrimSpace(sceneData.Scene.Summary)
+	if mainObjective == "" {
+		mainObjective = pickLocale(isEnglish, "Guide your allies through the crisis.", "引导同伴走出当前危局。")
+	}
+	storyData := &models.StoryData{
+		SceneID:       sceneData.Scene.ID,
+		Intro:         intro,
+		MainObjective: mainObjective,
+		CurrentState:  pickLocale(isEnglish, "Initial", "初始"),
+		Progress:      0,
+		Nodes:         make([]models.StoryNode, 0, len(segments)),
+		Tasks:         s.buildFallbackTasks(sceneData, isEnglish),
+		Locations:     s.buildFallbackLocations(sceneData),
+		LastUpdated:   time.Now(),
+	}
+
+	for i, segment := range segments {
+		trimmed := strings.TrimSpace(segment)
+		if trimmed == "" {
+			continue
+		}
+		narrative := s.synthesizeNarrationFromOriginal(trimmed, isEnglish)
+		node := models.StoryNode{
+			ID:              fmt.Sprintf("node_%s_%d", sceneData.Scene.ID, i+1),
+			SceneID:         sceneData.Scene.ID,
+			OriginalContent: trimmed,
+			Content:         narrative,
+			Type:            inferNodeType(i, len(segments)),
+			Choices:         nil,
+			IsRevealed:      i == 0,
+			CreatedAt:       time.Now(),
+			Source:          models.SourceSystem,
+			Metadata: map[string]interface{}{
+				"fallback_generated": true,
+			},
+		}
+		node.Choices = s.buildFallbackChoicesForSegment(&node, isEnglish)
+		storyData.Nodes = append(storyData.Nodes, node)
+	}
+
+	if len(storyData.Nodes) == 0 {
+		return nil, fmt.Errorf("无法构建任何故事节点")
+	}
+
+	return storyData, nil
+}
+
+func (s *StoryService) fallbackSegmentsFromScene(sceneData *SceneData, limit int) []string {
+	segments := make([]string, 0, limit)
+	for _, seg := range sceneData.OriginalSegments {
+		text := strings.TrimSpace(seg.OriginalText)
+		if text == "" {
+			continue
+		}
+		segments = append(segments, text)
+		if limit > 0 && len(segments) >= limit {
+			return segments
+		}
+	}
+
+	if len(segments) == 0 && strings.TrimSpace(sceneData.OriginalText) != "" {
+		chunks := splitTextIntoSegments(sceneData.OriginalText, defaultSegmentRuneLimit)
+		for _, chunk := range chunks {
+			trimmed := strings.TrimSpace(chunk)
+			if trimmed == "" {
+				continue
+			}
+			segments = append(segments, trimmed)
+			if limit > 0 && len(segments) >= limit {
+				return segments
+			}
+		}
+	}
+
+	if len(segments) == 0 && strings.TrimSpace(sceneData.Scene.Description) != "" {
+		segments = append(segments, strings.TrimSpace(sceneData.Scene.Description))
+	}
+
+	return segments
+}
+
+func (s *StoryService) buildFallbackLocations(sceneData *SceneData) []models.StoryLocation {
+	if sceneData == nil {
+		return nil
+	}
+	baseLocations := sceneData.Scene.Locations
+	if len(baseLocations) == 0 {
+		if strings.TrimSpace(sceneData.Scene.Title) != "" {
+			baseLocations = []models.Location{{
+				Name:        sceneData.Scene.Title,
+				Description: sceneData.Scene.Description,
+			}}
+		}
+	}
+	locations := make([]models.StoryLocation, 0, len(baseLocations))
+	for i, loc := range baseLocations {
+		name := strings.TrimSpace(loc.Name)
+		if name == "" {
+			name = fmt.Sprintf("Location %d", i+1)
+		}
+		description := strings.TrimSpace(loc.Description)
+		locations = append(locations, models.StoryLocation{
+			ID:           fmt.Sprintf("loc_%s_%d", sceneData.Scene.ID, i+1),
+			SceneID:      sceneData.Scene.ID,
+			Name:         name,
+			Description:  description,
+			Accessible:   i == 0,
+			RequiresItem: "",
+			Source:       models.SourceSystem,
+		})
+	}
+	return locations
+}
+
+func (s *StoryService) buildFallbackTasks(sceneData *SceneData, isEnglish bool) []models.Task {
+	if sceneData == nil {
+		return nil
+	}
+	taskDescription := strings.TrimSpace(sceneData.Scene.Summary)
+	if taskDescription == "" {
+		taskDescription = pickLocale(isEnglish, "Stabilize the retreat and locate key allies.", "稳住撤退阵线并寻找关键同伴。")
+	}
+	objectives := []models.Objective{
+		{
+			ID:          fmt.Sprintf("obj_%s_1", sceneData.Scene.ID),
+			Description: pickLocale(isEnglish, "Assess the battlefield and calm the ranks.", "侦查战场、稳住军心。"),
+			Completed:   false,
+		},
+		{
+			ID:          fmt.Sprintf("obj_%s_2", sceneData.Scene.ID),
+			Description: pickLocale(isEnglish, "Reunite scattered companions or protect civilians.", "寻回失散同伴或保护百姓。"),
+			Completed:   false,
+		},
+	}
+
+	return []models.Task{
+		{
+			ID:          fmt.Sprintf("task_%s_primary", sceneData.Scene.ID),
+			SceneID:     sceneData.Scene.ID,
+			Title:       pickLocale(isEnglish, "Stabilize the Situation", "稳住危局"),
+			Description: taskDescription,
+			Objectives:  objectives,
+			Reward:      pickLocale(isEnglish, "Unlock new strategic opportunities.", "解锁新的行动机会。"),
+			IsRevealed:  true,
+			Source:      models.SourceSystem,
+			Type:        "main",
+			Status:      "active",
+			Priority:    "high",
+		},
+	}
 }
 
 // 统一的故事数据加载方法
@@ -234,6 +639,9 @@ func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, err
 			loadErr = fmt.Errorf("解析故事数据失败: %w", err)
 			return
 		}
+
+		s.ensureNodeRelatedItems(sceneID, &storyData, nil)
+		s.ensureNodeLocations(&storyData)
 
 		loadedData = &storyData
 
@@ -406,6 +814,20 @@ Return in JSON format:
 		systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
 	}
 
+	if s.LLMService == nil {
+		if isEnglish {
+			return nil, fmt.Errorf("LLM service is not configured")
+		}
+		return nil, fmt.Errorf("LLM服务未配置")
+	}
+	if !s.LLMService.IsReady() {
+		state := s.LLMService.GetReadyState()
+		if isEnglish {
+			return nil, fmt.Errorf("LLM service not ready: %s", state)
+		}
+		return nil, fmt.Errorf("LLM服务未就绪: %s", state)
+	}
+
 	// Create a context with timeout for the LLM call
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
@@ -441,7 +863,7 @@ Return in JSON format:
 		}
 	}
 
-	jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
+	jsonStr := SanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 	// 解析返回的JSON
 	var storySetup struct {
@@ -478,6 +900,14 @@ Return in JSON format:
 		}
 	}
 
+	segmentsCache := s.prepareInitialSegments(sceneData, len(storySetup.InitialNodes), isEnglish)
+	if len(sceneData.OriginalSegments) == 0 && len(segmentsCache) > 0 {
+		s.persistOriginalSegmentsForScene(sceneData, segmentsCache)
+	}
+	if len(segmentsCache) == 0 {
+		segmentsCache = s.resolveOriginalSegments(sceneData, len(storySetup.InitialNodes))
+	}
+
 	// 转换为故事数据模型
 	storyData := &models.StoryData{
 		SceneID:       sceneData.Scene.ID,
@@ -509,29 +939,113 @@ Return in JSON format:
 		})
 	}
 
-	// 添加初始节点
-	for i, node := range storySetup.InitialNodes {
-		var choices []models.StoryChoice
-		for j, choice := range node.Choices {
-			choices = append(choices, models.StoryChoice{
-				ID:           fmt.Sprintf("choice_%s_%d_%d", sceneData.Scene.ID, i+1, j+1),
-				Text:         choice.Text,
-				Consequence:  choice.Consequence,
-				NextNodeHint: choice.NextNodeHint,
-				Selected:     false,
-			})
+	if len(segmentsCache) > 0 {
+		effectiveSegments := segmentsCache
+		if len(effectiveSegments) > maxInitialSegmentNodes {
+			effectiveSegments = effectiveSegments[:maxInitialSegmentNodes]
 		}
 
-		storyData.Nodes = append(storyData.Nodes, models.StoryNode{
-			ID:         fmt.Sprintf("node_%s_%d", sceneData.Scene.ID, i+1),
-			SceneID:    sceneData.Scene.ID,
-			Content:    node.Content,
-			Type:       node.Type,
-			Choices:    choices,
-			IsRevealed: i == 0, // 只有第一个节点默认显示
-			CreatedAt:  time.Now(),
-			Source:     models.SourceExplicit,
-		})
+		var contextParts []string
+		if sceneData != nil {
+			title := strings.TrimSpace(sceneData.Scene.Name)
+			if title == "" {
+				title = strings.TrimSpace(sceneData.Scene.Title)
+			}
+			if title != "" {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Scene", "场景"), title))
+			}
+			if desc := strings.TrimSpace(sceneData.Scene.Description); desc != "" {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Description", "描述"), desc))
+			}
+			if era := strings.TrimSpace(sceneData.Scene.Era); era != "" {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Era", "时代"), era))
+			}
+		}
+		if intro := strings.TrimSpace(storySetup.Intro); intro != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Intro", "开场"), intro))
+		}
+		if objective := strings.TrimSpace(storySetup.MainObjective); objective != "" {
+			contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Objective", "目标"), objective))
+		}
+		if len(storySetup.Locations) > 0 {
+			var locNames []string
+			for _, loc := range storySetup.Locations {
+				if strings.TrimSpace(loc.Name) != "" {
+					locNames = append(locNames, strings.TrimSpace(loc.Name))
+				}
+			}
+			if len(locNames) > 0 {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Locations", "关键地点"), strings.Join(locNames, ", ")))
+			}
+		}
+		if sceneData != nil && len(sceneData.Characters) > 0 {
+			var charNames []string
+			for _, ch := range sceneData.Characters {
+				if ch != nil && strings.TrimSpace(ch.Name) != "" {
+					charNames = append(charNames, strings.TrimSpace(ch.Name))
+				}
+			}
+			if len(charNames) > 0 {
+				contextParts = append(contextParts, fmt.Sprintf("%s: %s", pickLocale(isEnglish, "Characters", "角色"), strings.Join(charNames, ", ")))
+			}
+		}
+		storyContext := strings.Join(contextParts, "\n")
+
+		for i := 0; i < len(effectiveSegments); i++ {
+			storyNode := models.StoryNode{
+				ID:         fmt.Sprintf("node_%s_%d", sceneData.Scene.ID, i+1),
+				SceneID:    sceneData.Scene.ID,
+				Content:    "",
+				Type:       inferNodeType(i, len(effectiveSegments)),
+				Choices:    []models.StoryChoice{},
+				IsRevealed: i == 0,
+				CreatedAt:  time.Now(),
+				Source:     models.SourceStory,
+				Metadata:   map[string]interface{}{"segment_strategy": "natural_split"},
+			}
+
+			s.assignOriginalSegmentToNode(sceneData.Scene.ID, sceneData, storyData, &storyNode, effectiveSegments)
+			s.enrichNodeFromSegment(&storyNode, storyContext, preferences, isEnglish)
+
+			if strings.TrimSpace(storyNode.Content) == "" {
+				storyNode.Content = storyNode.OriginalContent
+			}
+			if len(storyNode.Choices) == 0 {
+				storyNode.Choices = s.buildFallbackChoicesForSegment(&storyNode, isEnglish)
+			}
+
+			storyData.Nodes = append(storyData.Nodes, storyNode)
+		}
+	} else {
+		for i, node := range storySetup.InitialNodes {
+			var choices []models.StoryChoice
+			for j, choice := range node.Choices {
+				choices = append(choices, models.StoryChoice{
+					ID:           fmt.Sprintf("choice_%s_%d_%d", sceneData.Scene.ID, i+1, j+1),
+					Text:         choice.Text,
+					Consequence:  choice.Consequence,
+					NextNodeHint: choice.NextNodeHint,
+					Selected:     false,
+				})
+			}
+
+			storyNode := models.StoryNode{
+				ID:              fmt.Sprintf("node_%s_%d", sceneData.Scene.ID, i+1),
+				SceneID:         sceneData.Scene.ID,
+				Content:         node.Content,
+				OriginalContent: node.Content,
+				Type:            node.Type,
+				Choices:         choices,
+				IsRevealed:      i == 0,
+				CreatedAt:       time.Now(),
+				Source:          models.SourceExplicit,
+				Metadata:        map[string]interface{}{},
+			}
+
+			s.assignOriginalSegmentToNode(sceneData.Scene.ID, sceneData, storyData, &storyNode, segmentsCache)
+
+			storyData.Nodes = append(storyData.Nodes, storyNode)
+		}
 	}
 
 	// 添加任务
@@ -610,6 +1124,1223 @@ func (s *StoryService) saveStoryData(sceneID string, storyData *models.StoryData
 	return nil
 }
 
+func (s *StoryService) resolveOriginalSegments(sceneData *SceneData, expectedCount int) []models.OriginalSegment {
+	if sceneData != nil && len(sceneData.OriginalSegments) > 0 {
+		segments := make([]models.OriginalSegment, len(sceneData.OriginalSegments))
+		copy(segments, sceneData.OriginalSegments)
+		if expectedCount > 0 && len(segments) > 0 && len(segments) < expectedCount {
+			last := segments[len(segments)-1]
+			for len(segments) < expectedCount {
+				duplicated := last
+				duplicated.Index = len(segments)
+				segments = append(segments, duplicated)
+			}
+		}
+		return segments
+	}
+
+	if sceneData == nil {
+		return nil
+	}
+	fallbackText := strings.TrimSpace(sceneData.OriginalText)
+	if fallbackText == "" {
+		fallbackText = strings.TrimSpace(sceneData.Scene.Summary)
+	}
+	if fallbackText == "" {
+		fallbackText = strings.TrimSpace(sceneData.Scene.Description)
+	}
+	if fallbackText == "" {
+		return nil
+	}
+	isEnglish := isEnglishText(sceneData.Scene.Title + " " + fallbackText)
+	segment := models.OriginalSegment{
+		Index:        0,
+		Title:        pickLocale(isEnglish, "Original Segment", "原文片段"),
+		Summary:      "",
+		OriginalText: fallbackText,
+	}
+	return []models.OriginalSegment{segment}
+}
+
+func (s *StoryService) assignOriginalSegmentToNode(sceneID string, sceneData *SceneData, storyData *models.StoryData, node *models.StoryNode, cachedSegments []models.OriginalSegment) {
+	if node == nil || storyData == nil {
+		return
+	}
+	if strings.TrimSpace(node.OriginalContent) == "" {
+		node.OriginalContent = node.Content
+	}
+
+	segments := cachedSegments
+	if len(segments) == 0 {
+		if sceneData == nil {
+			loadedScene, err := s.SceneService.LoadScene(sceneID)
+			if err != nil {
+				return
+			}
+			sceneData = loadedScene
+		}
+		segments = s.resolveOriginalSegments(sceneData, 0)
+	}
+	if len(segments) == 0 {
+		return
+	}
+
+	nextIdx := determineNextOriginalSegmentIndex(storyData.Nodes, segments)
+	if nextIdx >= len(segments) {
+		nextIdx = len(segments) - 1
+	}
+	if nextIdx < 0 {
+		nextIdx = 0
+	}
+
+	segment := segments[nextIdx]
+	node.OriginalContent = segment.OriginalText
+	if node.Metadata == nil {
+		node.Metadata = map[string]interface{}{}
+	}
+	node.Metadata["original_segment_index"] = nextIdx
+	if segment.Title != "" {
+		node.Metadata["original_segment_title"] = segment.Title
+	}
+}
+
+func determineNextOriginalSegmentIndex(nodes []models.StoryNode, segments []models.OriginalSegment) int {
+	if len(segments) == 0 {
+		return 0
+	}
+	maxIdx := -1
+	for _, node := range nodes {
+		if idx, ok := extractSegmentIndex(node.Metadata); ok {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+			continue
+		}
+		if idx := matchSegmentIndex(node.OriginalContent, segments); idx >= 0 {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
+		}
+	}
+	return maxIdx + 1
+}
+
+func extractSegmentIndex(metadata map[string]interface{}) (int, bool) {
+	if metadata == nil {
+		return 0, false
+	}
+	value, ok := metadata["original_segment_index"]
+	if !ok {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case json.Number:
+		if parsed, err := v.Int64(); err == nil {
+			return int(parsed), true
+		}
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func matchSegmentIndex(content string, segments []models.OriginalSegment) int {
+	if len(segments) == 0 {
+		return -1
+	}
+	normalizedContent := normalizeComparisonText(content)
+	if normalizedContent == "" {
+		return -1
+	}
+	for idx, segment := range segments {
+		if normalizeComparisonText(segment.OriginalText) == normalizedContent {
+			return idx
+		}
+	}
+	return -1
+}
+
+func normalizeComparisonText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.TrimSpace(text)
+	text = strings.ReplaceAll(text, "\n", "")
+	text = strings.ReplaceAll(text, " ", "")
+	return text
+}
+
+func findNextUnrevealedNode(storyData *models.StoryData) *models.StoryNode {
+	if storyData == nil {
+		return nil
+	}
+	for i := range storyData.Nodes {
+		if !storyData.Nodes[i].IsRevealed {
+			return &storyData.Nodes[i]
+		}
+	}
+	return nil
+}
+
+func findLatestRevealedNode(storyData *models.StoryData) *models.StoryNode {
+	if storyData == nil {
+		return nil
+	}
+	for i := len(storyData.Nodes) - 1; i >= 0; i-- {
+		if storyData.Nodes[i].IsRevealed {
+			return &storyData.Nodes[i]
+		}
+	}
+	return nil
+}
+
+func (s *StoryService) generateContinuationNode(sceneID string, storyData *models.StoryData, preferences *models.UserPreferences, isEnglish bool) (*models.StoryNode, error) {
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return nil, err
+	}
+	segments := s.resolveOriginalSegments(sceneData, 0)
+	summary := buildStorySummary(storyData)
+	consoleEntries := s.fetchRecentConsoleStoryEntries(sceneID, 5)
+	consoleSection := formatConsoleStoryPromptSection(consoleEntries, isEnglish)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	var systemPrompt, prompt string
+	if isEnglish {
+		systemPrompt = "You are a creative story designer who continues the narrative seamlessly."
+		prompt = fmt.Sprintf(`Story so far:
+%s
+
+%s
+
+Please continue the story by creating the next narrative node. Keep characters consistent and introduce new tension or resolution naturally.
+Return JSON:
+{
+  "content": "Rich description",
+  "type": "main/side/continuation",
+  "choices": [
+    {"text": "choice", "consequence": "result", "next_node_hint": "hint"}
+  ]
+}`, summary, consoleSection)
+	} else {
+		systemPrompt = "你是一个负责延续剧情的创意叙事设计师。"
+		prompt = fmt.Sprintf(`目前剧情摘要：
+%s
+
+%s
+
+请继续创作下一段剧情，保持角色性格与世界观一致，适度制造新的矛盾或推进。
+返回JSON：
+{
+  "content": "详细描述",
+  "type": "main/side/continuation",
+  "choices": [
+    {"text": "选项", "consequence": "后果", "next_node_hint": "提示"}
+  ]
+}`, summary, consoleSection)
+	}
+
+	resp, err := s.LLMService.CreateChatCompletion(ctx, ChatCompletionRequest{
+		Model: s.getLLMModel(preferences),
+		Messages: []ChatCompletionMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		ExtraParams: map[string]interface{}{
+			"response_format": map[string]string{"type": "json_object"},
+		},
+	})
+	if err != nil {
+		log.Printf("generateContinuationNode fallback for %s: %v", sceneID, err)
+		return s.generateFallbackContinuationNode(sceneID, sceneData, storyData, segments, isEnglish), nil
+	}
+
+	jsonStr := SanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
+	var payload struct {
+		Content string `json:"content"`
+		Type    string `json:"type"`
+		Choices []struct {
+			Text        string `json:"text"`
+			Consequence string `json:"consequence"`
+			Hint        string `json:"next_node_hint"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(jsonStr), &payload); err != nil {
+		log.Printf("parse continuation node failed for %s: %v", sceneID, err)
+		return s.generateFallbackContinuationNode(sceneID, sceneData, storyData, segments, isEnglish), nil
+	}
+
+	nodeID := fmt.Sprintf("node_%s_%d", sceneID, time.Now().UnixNano())
+	storyNode := models.StoryNode{
+		ID:              nodeID,
+		SceneID:         sceneID,
+		Content:         payload.Content,
+		OriginalContent: payload.Content,
+		Type:            payload.Type,
+		IsRevealed:      false,
+		CreatedAt:       time.Now(),
+		Source:          models.SourceGenerated,
+		Choices:         []models.StoryChoice{},
+		Metadata:        map[string]interface{}{},
+	}
+	if storyNode.Type == "" {
+		storyNode.Type = "continuation"
+	}
+	for i, choice := range payload.Choices {
+		storyNode.Choices = append(storyNode.Choices, models.StoryChoice{
+			ID:           fmt.Sprintf("choice_%s_%d", nodeID, i+1),
+			Text:         choice.Text,
+			Consequence:  choice.Consequence,
+			NextNodeHint: choice.Hint,
+			CreatedAt:    time.Now(),
+		})
+	}
+
+	s.assignOriginalSegmentToNode(sceneID, sceneData, storyData, &storyNode, segments)
+	storyData.Nodes = append(storyData.Nodes, storyNode)
+	return &storyData.Nodes[len(storyData.Nodes)-1], nil
+}
+
+func (s *StoryService) generateContinuationStory(sceneID string, storyData *models.StoryData, preferences *models.UserPreferences, isEnglish bool, reason string) (*models.StoryNode, error) {
+	node, err := s.generateContinuationNode(sceneID, storyData, preferences, isEnglish)
+	if err != nil {
+		return nil, err
+	}
+	if node != nil {
+		if node.Metadata == nil {
+			node.Metadata = make(map[string]interface{})
+		}
+		if strings.TrimSpace(reason) != "" {
+			node.Metadata["continuation_reason"] = reason
+		}
+		node.Metadata["continuation_generated_at"] = time.Now().Format(time.RFC3339Nano)
+	}
+	return node, nil
+}
+
+func (s *StoryService) generateFallbackContinuationNode(sceneID string, sceneData *SceneData, storyData *models.StoryData, segments []models.OriginalSegment, isEnglish bool) *models.StoryNode {
+	if len(segments) == 0 {
+		segments = s.resolveOriginalSegments(sceneData, 0)
+	}
+	marker := fmt.Sprintf("node_%s_auto_%d", sceneID, time.Now().UnixNano())
+	lastSnippet := strings.TrimSpace(extractLastSnippet(storyData, isEnglish))
+	var content string
+	if isEnglish {
+		if lastSnippet != "" {
+			content = fmt.Sprintf("[Auto-progress]\n%s\n\nThe system advances the story conservatively until AI services become available.", lastSnippet)
+		} else {
+			content = "[Auto-progress] The system advances the story while the AI writer is unavailable."
+		}
+	} else {
+		if lastSnippet != "" {
+			content = fmt.Sprintf("【系统临时续写】\n%s\n\n当前AI写作暂不可用，系统根据既有剧情小幅推进，请稍后再试。", lastSnippet)
+		} else {
+			content = "【系统临时续写】AI 剧情生成暂不可用，系统以安全策略自动推进一小段剧情。"
+		}
+	}
+
+	choices := []models.StoryChoice{
+		{
+			ID:           fmt.Sprintf("choice_%s_keep_momentum", marker),
+			Text:         pickLocale(isEnglish, "Hold position and regroup", "暂缓推进，整理队伍"),
+			Consequence:  pickLocale(isEnglish, "Stabilize the team while waiting for new intel.", "稳定军心，等待新的灵感。"),
+			NextNodeHint: pickLocale(isEnglish, "Try generating again once AI is back.", "AI 恢复后可再次推进剧情。"),
+		},
+		{
+			ID:           fmt.Sprintf("choice_%s_push_forward", marker),
+			Text:         pickLocale(isEnglish, "Improvise a bold maneuver", "强行推进剧情"),
+			Consequence:  pickLocale(isEnglish, "Takes a risky step without AI guidance.", "在缺少AI的情况下冒险出招，风险自负。"),
+			NextNodeHint: pickLocale(isEnglish, "Use manual commands to influence the story.", "尝试通过手动指令影响剧情方向。"),
+		},
+	}
+
+	fallback := models.StoryNode{
+		ID:              marker,
+		SceneID:         sceneID,
+		Content:         content,
+		OriginalContent: content,
+		Type:            "system",
+		IsRevealed:      false,
+		CreatedAt:       time.Now(),
+		Source:          models.SourceSystem,
+		Choices:         choices,
+		Metadata:        map[string]interface{}{},
+	}
+
+	s.assignOriginalSegmentToNode(sceneID, sceneData, storyData, &fallback, segments)
+	storyData.Nodes = append(storyData.Nodes, fallback)
+	return &storyData.Nodes[len(storyData.Nodes)-1]
+}
+
+func extractLastSnippet(storyData *models.StoryData, isEnglish bool) string {
+	if storyData == nil {
+		return ""
+	}
+	for i := len(storyData.Nodes) - 1; i >= 0; i-- {
+		node := storyData.Nodes[i]
+		if node.IsRevealed && strings.TrimSpace(node.Content) != "" {
+			return node.Content
+		}
+		if node.IsRevealed && strings.TrimSpace(node.OriginalContent) != "" {
+			return node.OriginalContent
+		}
+	}
+	if len(storyData.Nodes) > 0 {
+		last := storyData.Nodes[len(storyData.Nodes)-1]
+		if strings.TrimSpace(last.Content) != "" {
+			return last.Content
+		}
+		return last.OriginalContent
+	}
+	if isEnglish {
+		return "The army pauses to catch its breath."
+	}
+	return "队伍暂时止步，整理现状。"
+}
+
+func pickLocale(isEnglish bool, en, zh string) string {
+	if isEnglish {
+		return en
+	}
+	return zh
+}
+
+func (s *StoryService) prepareInitialSegments(sceneData *SceneData, expectedCount int, isEnglish bool) []models.OriginalSegment {
+	if sceneData == nil {
+		return nil
+	}
+	if len(sceneData.OriginalSegments) > 0 {
+		segments := make([]models.OriginalSegment, len(sceneData.OriginalSegments))
+		copy(segments, sceneData.OriginalSegments)
+		return segments
+	}
+	baseText := strings.TrimSpace(sceneData.OriginalText)
+	if baseText == "" {
+		baseText = strings.TrimSpace(sceneData.Scene.Summary)
+	}
+	if baseText == "" {
+		baseText = strings.TrimSpace(sceneData.Scene.Description)
+	}
+	if baseText == "" {
+		return nil
+	}
+	segments := generateSegmentsFromText(baseText, isEnglish)
+	if len(segments) == 0 {
+		return nil
+	}
+	if expectedCount > 0 && len(segments) > 0 && len(segments) < expectedCount {
+		last := segments[len(segments)-1]
+		for len(segments) < expectedCount {
+			dup := last
+			dup.Index = len(segments)
+			segments = append(segments, dup)
+		}
+	}
+	return segments
+}
+
+func (s *StoryService) persistOriginalSegmentsForScene(sceneData *SceneData, segments []models.OriginalSegment) {
+	if s == nil || s.SceneService == nil || sceneData == nil || len(segments) == 0 {
+		return
+	}
+	sceneID := strings.TrimSpace(sceneData.Scene.ID)
+	if sceneID == "" {
+		return
+	}
+	sceneDir := filepath.Join(s.SceneService.BasePath, sceneID)
+	if err := os.MkdirAll(sceneDir, 0755); err != nil {
+		log.Printf("警告: 创建场景目录失败 (%s): %v", sceneID, err)
+		return
+	}
+	if err := s.SceneService.saveOriginalSegments(sceneDir, segments); err != nil {
+		log.Printf("警告: 保存原文片段失败 (%s): %v", sceneID, err)
+		return
+	}
+	sceneData.OriginalSegments = make([]models.OriginalSegment, len(segments))
+	copy(sceneData.OriginalSegments, segments)
+}
+
+func splitTextIntoSegments(text string, maxLength int) []string {
+	if maxLength <= 0 {
+		maxLength = defaultSegmentRuneLimit
+	}
+	clean := strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if clean == "" {
+		return nil
+	}
+	paragraphs := strings.Split(clean, "\n\n")
+	filtered := make([]string, 0, len(paragraphs))
+	for _, para := range paragraphs {
+		if trimmed := strings.TrimSpace(para); trimmed != "" {
+			filtered = append(filtered, trimmed)
+		}
+	}
+	if len(filtered) == 0 {
+		filtered = []string{clean}
+	}
+
+	var segments []string
+	var builder strings.Builder
+	appendSegment := func() {
+		segment := strings.TrimSpace(builder.String())
+		if segment != "" {
+			segments = append(segments, segment)
+		}
+		builder.Reset()
+	}
+
+	for _, para := range filtered {
+		chunks := splitParagraphByLength(para, maxLength)
+		for _, chunk := range chunks {
+			if builder.Len() == 0 {
+				builder.WriteString(chunk)
+			} else {
+				runeLen := utf8.RuneCountInString(builder.String())
+				chunkLen := utf8.RuneCountInString(chunk)
+				if runeLen+2+chunkLen > maxLength {
+					appendSegment()
+				}
+				if builder.Len() > 0 {
+					builder.WriteString("\n\n")
+				}
+				builder.WriteString(chunk)
+			}
+			if utf8.RuneCountInString(builder.String()) >= maxLength {
+				appendSegment()
+			}
+		}
+	}
+	appendSegment()
+	if len(segments) == 0 && clean != "" {
+		segments = []string{clean}
+	}
+	return segments
+}
+
+func generateSegmentsFromText(baseText string, isEnglish bool) []models.OriginalSegment {
+	cleanText := strings.TrimSpace(baseText)
+	if cleanText == "" {
+		return nil
+	}
+	rawSegments := splitTextIntoSegments(cleanText, defaultSegmentRuneLimit)
+	if len(rawSegments) == 0 {
+		rawSegments = []string{cleanText}
+	}
+	segments := make([]models.OriginalSegment, len(rawSegments))
+	for i, seg := range rawSegments {
+		segments[i] = models.OriginalSegment{
+			Index:        i,
+			Title:        fmt.Sprintf(pickLocale(isEnglish, "Original Segment %d", "原文片段 %d"), i+1),
+			OriginalText: seg,
+		}
+	}
+	return segments
+}
+
+func splitParagraphByLength(paragraph string, maxLength int) []string {
+	if utf8.RuneCountInString(paragraph) <= maxLength {
+		return []string{paragraph}
+	}
+	runes := []rune(paragraph)
+	var chunks []string
+	start := 0
+	for start < len(runes) {
+		end := start + maxLength
+		if end > len(runes) {
+			end = len(runes)
+		} else {
+			cursor := end
+			for cursor > start+200 && cursor < len(runes) && !isPreferredBoundary(runes[cursor-1]) {
+				cursor--
+			}
+			if cursor > start+200 {
+				end = cursor
+			}
+		}
+		chunk := strings.TrimSpace(string(runes[start:end]))
+		if chunk != "" {
+			chunks = append(chunks, chunk)
+		}
+		start = end
+	}
+	return chunks
+}
+
+func isPreferredBoundary(r rune) bool {
+	switch r {
+	case '。', '！', '？', '.', '!', '?', '；', ';', '”', '"':
+		return true
+	default:
+		return false
+	}
+}
+
+func inferNodeType(position, total int) string {
+	if total <= 2 {
+		return "main"
+	}
+	switch {
+	case position == 0:
+		return "main"
+	case position == total-1:
+		return "main"
+	case position%3 == 0:
+		return "branch"
+	default:
+		return "side"
+	}
+}
+
+func (s *StoryService) enrichNodeFromSegment(node *models.StoryNode, storyContext string, preferences *models.UserPreferences, isEnglish bool) {
+	if node == nil {
+		return
+	}
+	if node.Metadata == nil {
+		node.Metadata = map[string]interface{}{}
+	}
+	originalText := strings.TrimSpace(node.OriginalContent)
+	if originalText == "" {
+		node.Content = ""
+		if len(node.Choices) == 0 {
+			node.Choices = s.buildFallbackChoicesForSegment(node, isEnglish)
+		}
+		return
+	}
+	if s.LLMService == nil || !s.LLMService.IsReady() {
+		node.Content = s.synthesizeNarrationFromOriginal(originalText, isEnglish)
+		node.Metadata["segment_enhanced"] = false
+		if len(node.Choices) == 0 {
+			node.Choices = s.buildFallbackChoicesForSegment(node, isEnglish)
+		}
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	type segmentResponse struct {
+		Content string `json:"content"`
+		Type    string `json:"type"`
+		Choices []struct {
+			Text        string `json:"text"`
+			Consequence string `json:"consequence"`
+			Hint        string `json:"next_node_hint"`
+		} `json:"choices"`
+	}
+
+	systemPrompt, userPrompt := buildSegmentPrompts(storyContext, node.OriginalContent, node.Type, isEnglish)
+	resp, err := s.LLMService.CreateChatCompletion(ctx, ChatCompletionRequest{
+		Model: s.getLLMModel(preferences),
+		Messages: []ChatCompletionMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+		ExtraParams: map[string]interface{}{
+			"response_format": map[string]string{"type": "json_object"},
+		},
+	})
+	if err != nil {
+		node.Content = s.synthesizeNarrationFromOriginal(originalText, isEnglish)
+		node.Choices = s.buildFallbackChoicesForSegment(node, isEnglish)
+		node.Metadata["segment_enhanced"] = false
+		return
+	}
+
+	jsonStr := SanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
+	var payload segmentResponse
+	if err := json.Unmarshal([]byte(jsonStr), &payload); err != nil {
+		node.Content = s.synthesizeNarrationFromOriginal(originalText, isEnglish)
+		node.Choices = s.buildFallbackChoicesForSegment(node, isEnglish)
+		node.Metadata["segment_enhanced"] = false
+		return
+	}
+
+	if strings.TrimSpace(payload.Content) == "" {
+		payload.Content = s.synthesizeNarrationFromOriginal(originalText, isEnglish)
+	}
+	node.Content = strings.TrimSpace(payload.Content)
+	if strings.TrimSpace(payload.Type) != "" {
+		node.Type = strings.TrimSpace(payload.Type)
+	}
+
+	compiled := make([]models.StoryChoice, 0, len(payload.Choices))
+	for i, choice := range payload.Choices {
+		if strings.TrimSpace(choice.Text) == "" {
+			continue
+		}
+		compiled = append(compiled, models.StoryChoice{
+			ID:           fmt.Sprintf("choice_%s_%d", node.ID, i+1),
+			Text:         strings.TrimSpace(choice.Text),
+			Consequence:  strings.TrimSpace(choice.Consequence),
+			NextNodeHint: strings.TrimSpace(choice.Hint),
+			CreatedAt:    time.Now(),
+			Type:         "branch",
+		})
+	}
+	if len(compiled) == 0 {
+		compiled = s.buildFallbackChoicesForSegment(node, isEnglish)
+	}
+	node.Choices = compiled
+	node.Metadata["segment_enhanced"] = true
+}
+
+func (s *StoryService) synthesizeNarrationFromOriginal(original string, isEnglish bool) string {
+	trimmed := strings.TrimSpace(original)
+	if trimmed == "" {
+		return pickLocale(isEnglish, "(No narrative available)", "（暂无剧情内容）")
+	}
+	summary := summarizeTextForNarration(trimmed, 360)
+	hooks := generateActionHooks(isEnglish)
+	if isEnglish {
+		return fmt.Sprintf("Narrative focus:\n%s\n\nSuggested actions: %s.", summary, strings.Join(hooks, "; "))
+	}
+	return fmt.Sprintf("【剧情演绎】%s\n\n【行动提示】%s", summary, strings.Join(hooks, "、"))
+}
+
+func summarizeTextForNarration(text string, limit int) string {
+	sentences := splitIntoSentencesForNarration(text)
+	var builder strings.Builder
+	for _, sentence := range sentences {
+		trimmed := strings.TrimSpace(sentence)
+		if trimmed == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteRune(' ')
+		}
+		builder.WriteString(trimmed)
+		if utf8.RuneCountInString(builder.String()) >= limit {
+			break
+		}
+	}
+	summary := strings.TrimSpace(builder.String())
+	if summary == "" {
+		summary = truncateRunes(text, limit)
+	} else if utf8.RuneCountInString(summary) > limit {
+		summary = truncateRunes(summary, limit)
+	}
+	return summary
+}
+
+func splitIntoSentencesForNarration(text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var sentences []string
+	var current strings.Builder
+	for _, r := range text {
+		current.WriteRune(r)
+		if strings.ContainsRune("。！？!?;；\n", r) {
+			sentences = append(sentences, current.String())
+			current.Reset()
+		}
+	}
+	if current.Len() > 0 {
+		sentences = append(sentences, current.String())
+	}
+	return sentences
+}
+
+func generateActionHooks(isEnglish bool) []string {
+	if isEnglish {
+		return []string{"steady the line", "search for key allies", "stage a bold diversion"}
+	}
+	return []string{"稳住阵线", "寻回关键同伴", "策动佯攻突围"}
+}
+
+func buildSegmentPrompts(storyContext, originalText, nodeType string, isEnglish bool) (string, string) {
+	contextSnippet := truncateRunes(strings.TrimSpace(storyContext), 1200)
+	originalSnippet := truncateRunes(strings.TrimSpace(originalText), 1500)
+	if contextSnippet == "" {
+		contextSnippet = pickLocale(isEnglish, "An interactive drama set in a turbulent era.", "一个发生在动荡时代的互动剧情背景。")
+	}
+	if originalSnippet == "" {
+		originalSnippet = pickLocale(isEnglish, "Original text missing", "原文缺失")
+	}
+	if nodeType == "" {
+		nodeType = "main"
+	}
+	if isEnglish {
+		systemPrompt := "You are an interactive fiction writer who enhances raw passages into immersive narrative nodes while preserving canonical plot beats."
+		userPrompt := fmt.Sprintf(`Story context:
+%s
+
+Original passage:
+%s
+
+Node type: %s
+
+Tasks:
+1. Preserve core events while enriching description and atmosphere.
+2. Maintain continuity with the story context and character motivations.
+3. Provide 2-3 interactive choices with clear consequences and hints.
+Return JSON: {"content":"...","type":"...","choices":[{"text":"...","consequence":"...","next_node_hint":"..."}]}`, contextSnippet, originalSnippet, nodeType)
+		return systemPrompt, userPrompt
+	}
+	systemPrompt := "你是一位资深互动小说作者，需要在保留原剧情核心的基础上进行润色和扩写。"
+	userPrompt := fmt.Sprintf(`剧情背景：
+	%s
+
+	原文片段：
+	%s
+
+	节点类型：%s
+
+	任务：
+	1. 保留关键事件，增强画面与情感。
+	2. 保持与背景设定及角色动机的一致性。
+	3. 生成2-3个可互动的选择，并附上后果与提示。
+	仅返回 JSON：{"content":"...","type":"...","choices":[{"text":"...","consequence":"...","next_node_hint":"..."}]}`,
+		contextSnippet, originalSnippet, nodeType)
+	return systemPrompt, userPrompt
+
+}
+
+func truncateRunes(text string, max int) string {
+	if max <= 0 {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= max {
+		return text
+	}
+	if max > len(runes) {
+		max = len(runes)
+	}
+	return string(runes[:max]) + "..."
+}
+
+func (s *StoryService) buildFallbackChoicesForSegment(node *models.StoryNode, isEnglish bool) []models.StoryChoice {
+	if node == nil {
+		return nil
+	}
+	now := time.Now()
+	return []models.StoryChoice{
+		{
+			ID:           fmt.Sprintf("choice_%s_reflect", node.ID),
+			Text:         pickLocale(isEnglish, "Reflect and assess", "整理局势"),
+			Consequence:  pickLocale(isEnglish, "Gain insight into the current development.", "梳理现状，寻找新的线索。"),
+			NextNodeHint: pickLocale(isEnglish, "Stabilize before the next move.", "稳住阵脚后再做决策。"),
+			CreatedAt:    now,
+			Type:         "main",
+		},
+		{
+			ID:           fmt.Sprintf("choice_%s_act", node.ID),
+			Text:         pickLocale(isEnglish, "Take bold action", "立即行动"),
+			Consequence:  pickLocale(isEnglish, "Push the narrative with a decisive move.", "以果断举动推动剧情发展。"),
+			NextNodeHint: pickLocale(isEnglish, "Expect consequences shaped by this risk.", "此举会引发新的变数。"),
+			CreatedAt:    now,
+			Type:         "branch",
+		},
+	}
+}
+
+func (s *StoryService) fetchRecentConsoleStoryEntries(sceneID string, limit int) []models.Conversation {
+	if limit <= 0 {
+		limit = 3
+	}
+	var source []models.Conversation
+	if s.ContextService != nil {
+		target := limit * 3
+		if target < limit {
+			target = limit
+		}
+		if entries, err := s.ContextService.GetRecentConsoleStoryEntries(sceneID, target); err == nil {
+			source = entries
+		} else {
+			log.Printf("context fetch failed for %s: %v", sceneID, err)
+		}
+	}
+	if len(source) == 0 {
+		sceneData, err := s.SceneService.LoadScene(sceneID)
+		if err != nil {
+			log.Printf("scene load failed for context fallback %s: %v", sceneID, err)
+			return nil
+		}
+		source = sceneData.Context.Conversations
+	}
+	return filterConsoleStoryEntries(source, limit)
+}
+
+func filterConsoleStoryEntries(conversations []models.Conversation, limit int) []models.Conversation {
+	if len(conversations) == 0 || limit <= 0 {
+		return nil
+	}
+	filtered := make([]models.Conversation, 0, limit)
+	for i := len(conversations) - 1; i >= 0 && len(filtered) < limit; i-- {
+		conv := conversations[i]
+		if !isConsoleStorySpeaker(conv.SpeakerID) {
+			continue
+		}
+		if content := resolveConversationContent(conv); content == "" {
+			continue
+		}
+		filtered = append(filtered, conv)
+	}
+	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+		filtered[i], filtered[j] = filtered[j], filtered[i]
+	}
+	return filtered
+}
+
+func isConsoleStorySpeaker(speakerID string) bool {
+	trimmed := strings.ToLower(strings.TrimSpace(speakerID))
+	if trimmed == "" {
+		return false
+	}
+	if trimmed == "story" {
+		return true
+	}
+	return strings.HasPrefix(trimmed, "console_story")
+}
+
+func formatConsoleStoryPromptSection(entries []models.Conversation, isEnglish bool) string {
+	if len(entries) == 0 {
+		return pickLocale(isEnglish,
+			"\nRecent console directives: None provided. Continue from current narrative state.\n",
+			"\n最近没有控制台指令，可直接根据当前剧情继续。\n",
+		)
+	}
+	var builder strings.Builder
+	index := 1
+	for _, conv := range entries {
+		content := resolveConversationContent(conv)
+		if content == "" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("%d. %s\n", index, content))
+		index++
+	}
+	if builder.Len() == 0 {
+		return pickLocale(isEnglish,
+			"\nRecent console directives: None provided. Continue from current narrative state.\n",
+			"\n最近没有控制台指令，可直接根据当前剧情继续。\n",
+		)
+	}
+	if isEnglish {
+		return fmt.Sprintf("\nRecent console directives (oldest → newest):\n%s", builder.String())
+	}
+	return fmt.Sprintf("\n最近的控制台指令（按时间顺序）：\n%s", builder.String())
+}
+
+func summarizeConversations(entries []models.Conversation) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	row := 1
+	for _, conv := range entries {
+		content := resolveConversationContent(conv)
+		if content == "" {
+			continue
+		}
+		label := resolveConversationLabel(conv)
+		builder.WriteString(fmt.Sprintf("[%d|%s] %s\n", row, label, content))
+		row++
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func resolveConversationLabel(conv models.Conversation) string {
+	if conv.Metadata != nil {
+		if speaker, ok := conv.Metadata["speaker_name"].(string); ok && strings.TrimSpace(speaker) != "" {
+			return speaker
+		}
+		if channel, ok := conv.Metadata["channel"].(string); ok && channel == "user" {
+			return "玩家"
+		}
+	}
+	id := strings.ToLower(conv.SpeakerID)
+	switch {
+	case strings.HasPrefix(id, "console_character"):
+		return "角色"
+	case strings.HasPrefix(id, "console_group"):
+		return "群戏"
+	case strings.HasPrefix(id, "console_story"):
+		return "旁白"
+	case id == "web_user" || id == "user":
+		return "玩家"
+	default:
+		if conv.SpeakerID != "" {
+			return conv.SpeakerID
+		}
+		return "旁白"
+	}
+}
+
+func resolveConversationContent(conv models.Conversation) string {
+	if trimmed := strings.TrimSpace(conv.Content); trimmed != "" {
+		return trimmed
+	}
+	if trimmed := strings.TrimSpace(conv.Message); trimmed != "" {
+		return trimmed
+	}
+	if conv.Metadata != nil {
+		if raw, ok := conv.Metadata["content"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+		if raw, ok := conv.Metadata["message"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func (s *StoryService) rewriteNodeWithContext(node *models.StoryNode, contextSummary string, preferences *models.UserPreferences, isEnglish bool) (string, error) {
+	if s.LLMService == nil {
+		return "", fmt.Errorf("LLM service unavailable")
+	}
+	if node == nil {
+		return "", fmt.Errorf("story node is nil")
+	}
+	original := strings.TrimSpace(node.OriginalContent)
+	if original == "" {
+		return "", fmt.Errorf("node original content is empty")
+	}
+	summary := strings.TrimSpace(contextSummary)
+	if summary == "" {
+		summary = "暂无新的上下文变化"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var systemPrompt, userPrompt string
+	if isEnglish {
+		systemPrompt = "You are a senior narrative editor who adapts original passages according to new context."
+		userPrompt = fmt.Sprintf(`context:
+%s
+
+original:
+%s
+
+Task:
+1. Preserve the core plot beats from the original passage.
+2. Adapt details and dialogue so they reflect the new context.
+3. Keep tone and characterization consistent; output rewritten narrative only.`, summary, original)
+	} else {
+		systemPrompt = "你是一位资深剧情编辑，需要根据最新上下文改写原文。"
+		userPrompt = fmt.Sprintf(`上下文：
+%s
+
+原文：
+%s
+
+任务：
+1. 保留原文的关键情节；
+2. 根据上下文调整细节与语气；
+3. 保持人物设定一致，仅输出改写后的正文。
+`, summary, original)
+	}
+
+	resp, err := s.LLMService.CreateChatCompletion(ctx, ChatCompletionRequest{
+		Model: s.getLLMModel(preferences),
+		Messages: []ChatCompletionMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+func (s *StoryService) resolvePendingCommand(sceneID string, currentNode *models.StoryNode) (*models.Conversation, error) {
+	if s.ContextService == nil || currentNode == nil {
+		return nil, nil
+	}
+	commands, err := s.ContextService.GetUserStoryCommandsByNode(sceneID, currentNode.ID, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(commands) == 0 {
+		return nil, nil
+	}
+	latest := commands[len(commands)-1]
+	latestID := strings.TrimSpace(latest.ID)
+	lastConsumed := getLastConsumedCommandID(currentNode)
+	if latestID != "" && lastConsumed != "" && latestID == lastConsumed {
+		return nil, nil
+	}
+	return &latest, nil
+}
+
+func getLastConsumedCommandID(node *models.StoryNode) string {
+	if node == nil || node.Metadata == nil {
+		return ""
+	}
+	if raw, ok := node.Metadata["last_consumed_command_id"].(string); ok {
+		return strings.TrimSpace(raw)
+	}
+	return ""
+}
+
+func markCommandAsConsumed(node *models.StoryNode, commandID string) {
+	commandID = strings.TrimSpace(commandID)
+	if node == nil || commandID == "" {
+		return
+	}
+	if node.Metadata == nil {
+		node.Metadata = make(map[string]interface{})
+	}
+	node.Metadata["last_consumed_command_id"] = commandID
+	node.Metadata["last_consumed_command_at"] = time.Now().Format(time.RFC3339Nano)
+}
+
+func formatStoryProcessingEntries(entries []models.Conversation) string {
+	if len(entries) == 0 {
+		return "（暂无旁白加工）"
+	}
+	var builder strings.Builder
+	index := 1
+	for _, entry := range entries {
+		content := resolveConversationContent(entry)
+		if content == "" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("[%d] %s\n", index, content))
+		index++
+	}
+	formatted := strings.TrimSpace(builder.String())
+	if formatted == "" {
+		return "（暂无旁白加工）"
+	}
+	return formatted
+}
+
+func (s *StoryService) rewriteNodeWithProcessing(originalSegment, processingSummary, userMessage string, preferences *models.UserPreferences, isEnglish bool) (string, error) {
+	if s.LLMService == nil {
+		return "", fmt.Errorf("LLM service unavailable")
+	}
+	original := strings.TrimSpace(originalSegment)
+	if original == "" {
+		return "", fmt.Errorf("original segment is empty")
+	}
+	if strings.TrimSpace(processingSummary) == "" {
+		processingSummary = pickLocale(isEnglish, "(No processing entries available)", "（暂无旁白加工）")
+	}
+	userMessage = strings.TrimSpace(userMessage)
+	if userMessage == "" {
+		userMessage = pickLocale(isEnglish, "(Player provided no additional directive.)", "（玩家未提供新的指令。）")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	var systemPrompt, userPrompt string
+	if isEnglish {
+		systemPrompt = "You are a narrative host who continues the story based on the original and processing sections."
+		userPrompt = fmt.Sprintf(`original:
+%s
+
+processing:
+%s
+
+user_new_message:
+%s
+
+Task:
+1. Continue the story faithfully, incorporating the processing details and the player's latest intent.
+2. Use at most 300 English words.
+3. Keep tension without resolving the main conflict; output narrative only.`, original, processingSummary, userMessage)
+	} else {
+		systemPrompt = "你是互动故事的旁白主持人，需要根据 original 与 processing 顺序续写下一段剧情。"
+		userPrompt = fmt.Sprintf(`original:
+%s
+
+processing:
+%s
+
+user_new_message:
+%s
+
+任务：
+1. 在 original 基础上结合 processing 以及玩家最新指令，续写一段不超过400个汉字的剧情；
+2. 推动事件发展但不要直接结束主要矛盾；
+3. 保持人物语气与世界观一致，仅输出正文。
+`, original, processingSummary, userMessage)
+	}
+
+	resp, err := s.LLMService.CreateChatCompletion(ctx, ChatCompletionRequest{
+		Model: s.getLLMModel(preferences),
+		Messages: []ChatCompletionMessage{
+			{Role: "system", Content: systemPrompt},
+			{Role: "user", Content: userPrompt},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+func updateStoryState(storyData *models.StoryData, isEnglish bool) {
+	if storyData == nil {
+		return
+	}
+	switch {
+	case storyData.Progress >= 100:
+		if isEnglish {
+			storyData.CurrentState = "Ending"
+		} else {
+			storyData.CurrentState = "结局"
+		}
+	case storyData.Progress >= 75:
+		if isEnglish {
+			storyData.CurrentState = "Climax"
+		} else {
+			storyData.CurrentState = "高潮"
+		}
+	case storyData.Progress >= 50:
+		if isEnglish {
+			storyData.CurrentState = "Development"
+		} else {
+			storyData.CurrentState = "发展"
+		}
+	case storyData.Progress >= 25:
+		if isEnglish {
+			storyData.CurrentState = "Conflict"
+		} else {
+			storyData.CurrentState = "冲突"
+		}
+	default:
+		if isEnglish {
+			storyData.CurrentState = "Initial"
+		} else {
+			storyData.CurrentState = "初始"
+		}
+	}
+}
+
+func buildStorySummary(storyData *models.StoryData) string {
+	if storyData == nil {
+		return ""
+	}
+	var parts []string
+	for _, node := range storyData.Nodes {
+		if node.IsRevealed {
+			if strings.TrimSpace(node.Content) != "" {
+				parts = append(parts, node.Content)
+			} else if strings.TrimSpace(node.OriginalContent) != "" {
+				parts = append(parts, node.OriginalContent)
+			}
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
 // GetStoryDataSafe 获取场景的故事数据，线程安全
 func (s *StoryService) GetStoryData(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
 	var storyData *models.StoryData
@@ -625,6 +2356,9 @@ func (s *StoryService) GetStoryData(sceneID string, preferences *models.UserPref
 				return err
 			}
 			storyData = data
+			// 初始化后也补全物品关联
+			s.ensureNodeRelatedItems(sceneID, storyData, nil)
+			s.ensureNodeLocations(storyData)
 			return nil
 		}
 
@@ -640,6 +2374,8 @@ func (s *StoryService) GetStoryData(sceneID string, preferences *models.UserPref
 		}
 
 		storyData = &tempData
+		s.ensureNodeRelatedItems(sceneID, storyData, nil)
+		s.ensureNodeLocations(storyData)
 		return nil
 	})
 
@@ -750,6 +2486,7 @@ func (s *StoryService) generateNextStoryNodeWithData(sceneID string, currentNode
 	if err != nil {
 		return nil, err
 	}
+	segments := s.resolveOriginalSegments(sceneData, 0)
 
 	// 检测语言
 	isEnglish := isEnglishText(sceneData.Scene.Name + " " + currentNode.Content + " " + selectedChoice.Text)
@@ -968,7 +2705,7 @@ Respond with a JSON object in the following format:
 		}
 	}
 
-	jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
+	jsonStr := SanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 	// 解析返回的JSON
 	var nodeData struct {
@@ -1084,19 +2821,21 @@ Respond with a JSON object in the following format:
 		storyData.Tasks = append(storyData.Tasks, task)
 	}
 
+	var createdLocation *models.StoryLocation
 	// 添加新地点
 	if nodeData.NewLocation != nil {
 		locationID := fmt.Sprintf("loc_%s_%d", sceneID, time.Now().UnixNano())
 		location := models.StoryLocation{
 			ID:          locationID,
 			SceneID:     sceneID,
-			Name:        nodeData.NewLocation.Name,
+			Name:        strings.TrimSpace(nodeData.NewLocation.Name),
 			Description: nodeData.NewLocation.Description,
 			Accessible:  nodeData.NewLocation.Accessible,
 			Source:      models.SourceGenerated,
 		}
 
 		storyData.Locations = append(storyData.Locations, location)
+		createdLocation = &storyData.Locations[len(storyData.Locations)-1]
 	}
 
 	// 🔧 异步处理新物品，避免在锁内调用外部服务
@@ -1123,6 +2862,15 @@ Respond with a JSON object in the following format:
 			}
 		}()
 	}
+
+	if len(newNode.RelatedItemIDs) == 0 {
+		if related := s.detectRelatedItems(sceneID, newNode, sceneData); len(related) > 0 {
+			newNode.RelatedItemIDs = related
+		}
+	}
+
+	s.assignNodeLocationMetadata(storyData, newNode, selectedChoice, createdLocation)
+	s.assignOriginalSegmentToNode(sceneID, sceneData, storyData, newNode, segments)
 
 	return newNode, nil
 }
@@ -1395,7 +3143,7 @@ Return in JSON format:
 			}
 		}
 
-		jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
+		jsonStr := SanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 		// 解析返回的JSON
 		var explorationData struct {
@@ -1514,6 +3262,292 @@ Return in JSON format:
 	return result, nil
 }
 
+// ensureNodeRelatedItems 为缺少关联物品的节点推断关联
+func (s *StoryService) ensureNodeRelatedItems(sceneID string, storyData *models.StoryData, sceneData *SceneData) {
+	if storyData == nil || len(storyData.Nodes) == 0 {
+		return
+	}
+
+	missing := false
+	for i := range storyData.Nodes {
+		if len(storyData.Nodes[i].RelatedItemIDs) == 0 {
+			missing = true
+			break
+		}
+	}
+
+	if !missing {
+		return
+	}
+
+	items := s.resolveSceneItems(sceneID, sceneData)
+	if len(items) == 0 {
+		return
+	}
+
+	for i := range storyData.Nodes {
+		if len(storyData.Nodes[i].RelatedItemIDs) > 0 {
+			continue
+		}
+		if related := matchItemsByText(items, storyData.Nodes[i].Content, storyData.Nodes[i].OriginalContent); len(related) > 0 {
+			storyData.Nodes[i].RelatedItemIDs = related
+		}
+	}
+}
+
+func (s *StoryService) ensureNodeLocations(storyData *models.StoryData) {
+	if storyData == nil || len(storyData.Nodes) == 0 {
+		return
+	}
+
+	currentLocation := s.defaultLocationCandidate(storyData)
+	for i := range storyData.Nodes {
+		node := &storyData.Nodes[i]
+		if node.Metadata != nil {
+			if raw, ok := node.Metadata["current_location_id"].(string); ok && strings.TrimSpace(raw) != "" {
+				if loc := findStoryLocationByID(storyData.Locations, raw); loc != nil {
+					currentLocation = loc
+					if _, exists := node.Metadata["current_location_name"]; !exists && strings.TrimSpace(loc.Name) != "" {
+						node.Metadata["current_location_name"] = loc.Name
+					}
+					continue
+				}
+			}
+		}
+		if currentLocation == nil {
+			currentLocation = s.defaultLocationCandidate(storyData)
+			if currentLocation == nil {
+				return
+			}
+		}
+		if node.Metadata == nil {
+			node.Metadata = make(map[string]interface{})
+		}
+		node.Metadata["current_location_id"] = currentLocation.ID
+		if name := strings.TrimSpace(currentLocation.Name); name != "" {
+			node.Metadata["current_location_name"] = name
+		}
+	}
+}
+
+func (s *StoryService) assignNodeLocationMetadata(storyData *models.StoryData, node *models.StoryNode, selectedChoice *models.StoryChoice, createdLocation *models.StoryLocation) {
+	if storyData == nil || node == nil {
+		return
+	}
+
+	location := createdLocation
+	if location == nil && selectedChoice != nil {
+		if loc := matchStoryLocationByHint(storyData.Locations, selectedChoice.NextNodeHint); loc != nil {
+			location = loc
+		}
+	}
+	if location == nil {
+		location = s.inferLocationFromHistory(storyData)
+	}
+	if location == nil {
+		return
+	}
+
+	location.Accessible = true
+	if node.Metadata == nil {
+		node.Metadata = make(map[string]interface{})
+	}
+	node.Metadata["current_location_id"] = location.ID
+	if name := strings.TrimSpace(location.Name); name != "" {
+		node.Metadata["current_location_name"] = name
+	}
+}
+
+func (s *StoryService) inferLocationFromHistory(storyData *models.StoryData) *models.StoryLocation {
+	if storyData == nil {
+		return nil
+	}
+	for i := len(storyData.Nodes) - 1; i >= 0; i-- {
+		node := storyData.Nodes[i]
+		if node.Metadata == nil {
+			continue
+		}
+		if raw, ok := node.Metadata["current_location_id"].(string); ok && strings.TrimSpace(raw) != "" {
+			if loc := findStoryLocationByID(storyData.Locations, raw); loc != nil {
+				return loc
+			}
+		}
+	}
+	return s.defaultLocationCandidate(storyData)
+}
+
+func (s *StoryService) defaultLocationCandidate(storyData *models.StoryData) *models.StoryLocation {
+	if storyData == nil || len(storyData.Locations) == 0 {
+		return nil
+	}
+	for i := range storyData.Locations {
+		if storyData.Locations[i].Accessible {
+			return &storyData.Locations[i]
+		}
+	}
+	return &storyData.Locations[0]
+}
+
+func matchStoryLocationByHint(locations []models.StoryLocation, hint string) *models.StoryLocation {
+	normalized := strings.ToLower(strings.TrimSpace(hint))
+	if normalized == "" {
+		return nil
+	}
+	for i := range locations {
+		name := strings.ToLower(strings.TrimSpace(locations[i].Name))
+		if name == "" {
+			continue
+		}
+		if name == normalized || strings.Contains(name, normalized) || strings.Contains(normalized, name) {
+			return &locations[i]
+		}
+	}
+	return nil
+}
+
+func findStoryLocationByID(locations []models.StoryLocation, id string) *models.StoryLocation {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return nil
+	}
+	for i := range locations {
+		if strings.EqualFold(locations[i].ID, trimmed) {
+			return &locations[i]
+		}
+	}
+	return nil
+}
+
+// detectRelatedItems 返回节点文本涉及的物品ID列表
+func (s *StoryService) detectRelatedItems(sceneID string, node *models.StoryNode, sceneData *SceneData) []string {
+	if node == nil {
+		return nil
+	}
+
+	items := s.resolveSceneItems(sceneID, sceneData)
+	if len(items) == 0 {
+		return nil
+	}
+
+	return matchItemsByText(items, node.Content, node.OriginalContent)
+}
+
+func (s *StoryService) resolveSceneItems(sceneID string, sceneData *SceneData) []*models.Item {
+	if sceneData != nil && len(sceneData.Items) > 0 {
+		return sceneData.Items
+	}
+
+	if s.SceneService != nil {
+		if data, err := s.SceneService.LoadScene(sceneID); err == nil && len(data.Items) > 0 {
+			return data.Items
+		}
+	}
+
+	if s.ItemService != nil {
+		if items, err := s.ItemService.GetAllItems(sceneID); err == nil {
+			return items
+		}
+	}
+
+	return nil
+}
+
+func matchItemsByText(items []*models.Item, contents ...string) []string {
+	var builder strings.Builder
+	for _, content := range contents {
+		trimmed := strings.TrimSpace(content)
+		if trimmed == "" {
+			continue
+		}
+		if builder.Len() > 0 {
+			builder.WriteByte(' ')
+		}
+		builder.WriteString(trimmed)
+	}
+
+	totalText := strings.ToLower(builder.String())
+	if totalText == "" {
+		return nil
+	}
+
+	related := make([]string, 0, 3)
+	seen := make(map[string]struct{})
+
+	for _, item := range items {
+		if item == nil || item.ID == "" {
+			continue
+		}
+		if _, exists := seen[item.ID]; exists {
+			continue
+		}
+
+		if containsItemKeyword(totalText, collectItemKeywords(item)) {
+			related = append(related, item.ID)
+			seen[item.ID] = struct{}{}
+		}
+
+		if len(related) >= 5 {
+			break
+		}
+	}
+
+	return related
+}
+
+func collectItemKeywords(item *models.Item) []string {
+	keywords := make([]string, 0, 4)
+	if name := strings.TrimSpace(item.Name); name != "" {
+		keywords = append(keywords, name)
+	}
+	if item.Properties != nil {
+		if aliases := normalizeStringSlice(item.Properties["aliases"]); len(aliases) > 0 {
+			keywords = append(keywords, aliases...)
+		}
+		if alias := normalizeStringSlice(item.Properties["alias"]); len(alias) > 0 {
+			keywords = append(keywords, alias...)
+		}
+		if alt := normalizeStringSlice(item.Properties["alt_names"]); len(alt) > 0 {
+			keywords = append(keywords, alt...)
+		}
+	}
+	return keywords
+}
+
+func normalizeStringSlice(value interface{}) []string {
+	var result []string
+	switch v := value.(type) {
+	case []string:
+		result = append(result, v...)
+	case []interface{}:
+		for _, item := range v {
+			if str, ok := item.(string); ok {
+				result = append(result, str)
+			}
+		}
+	case string:
+		parts := strings.Split(v, ",")
+		for _, part := range parts {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				result = append(result, trimmed)
+			}
+		}
+	}
+	return result
+}
+
+func containsItemKeyword(content string, keywords []string) bool {
+	for _, keyword := range keywords {
+		candidate := strings.ToLower(strings.TrimSpace(keyword))
+		if len(candidate) < 2 {
+			continue
+		}
+		if strings.Contains(content, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
 // GetAvailableChoices 获取当前可用的剧情选择
 func (s *StoryService) GetAvailableChoices(sceneID string) ([]models.StoryChoice, error) {
 	var availableChoices []models.StoryChoice
@@ -1572,12 +3606,13 @@ func (s *StoryService) GetAvailableChoices(sceneID string) ([]models.StoryChoice
 	return availableChoices, err
 }
 
-// AdvanceStory 推进故事情节
-func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPreferences) (*models.StoryUpdate, error) {
-	var storyUpdate *models.StoryUpdate
+// UpdateNodeChoices 用新的候选选项覆盖指定节点的可选项
+func (s *StoryService) UpdateNodeChoices(sceneID, nodeID string, choices []models.StoryChoice) error {
+	if strings.TrimSpace(sceneID) == "" || strings.TrimSpace(nodeID) == "" {
+		return fmt.Errorf("scene_id 或 node_id 不能为空")
+	}
 
-	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
-		// 直接读取文件
+	return s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
 		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
 		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
 			return fmt.Errorf("故事数据不存在")
@@ -1593,252 +3628,251 @@ func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPref
 			return fmt.Errorf("解析故事数据失败: %w", err)
 		}
 
-		// 加载场景数据
+		var targetNode *models.StoryNode
+		for i := range storyData.Nodes {
+			if storyData.Nodes[i].ID == nodeID {
+				targetNode = &storyData.Nodes[i]
+				break
+			}
+		}
+		if targetNode == nil {
+			return fmt.Errorf("未找到指定的故事节点: %s", nodeID)
+		}
+
+		now := time.Now()
+		normalized := make([]models.StoryChoice, 0, len(choices))
+		for idx, choice := range choices {
+			if strings.TrimSpace(choice.Text) == "" {
+				continue
+			}
+			clone := choice
+			if clone.ID == "" {
+				clone.ID = fmt.Sprintf("choice_%s_custom_%d_%d", nodeID, now.Unix(), idx+1)
+			}
+			clone.Selected = false
+			clone.IsSelected = false
+			if clone.CreatedAt.IsZero() {
+				clone.CreatedAt = now
+			}
+			if clone.Type == "" {
+				clone.Type = "branch"
+			}
+			if clone.Metadata == nil {
+				clone.Metadata = make(map[string]interface{})
+			}
+			clone.Metadata["source"] = "story_command"
+			normalized = append(normalized, clone)
+		}
+
+		if len(normalized) == 0 {
+			return fmt.Errorf("未提供有效的候选选项")
+		}
+
+		targetNode.Choices = normalized
+		if targetNode.Metadata == nil {
+			targetNode.Metadata = make(map[string]interface{})
+		}
+		targetNode.Metadata["choices_updated_at"] = now.Format(time.RFC3339Nano)
+		targetNode.Metadata["choices_source"] = "story_command"
+		storyData.LastUpdated = now
+
+		if err := s.saveStoryData(sceneID, &storyData); err != nil {
+			return err
+		}
+
+		s.invalidateStoryCache(sceneID)
+		return nil
+	})
+}
+
+const (
+	advanceModeRevealOnly    = "reveal_only"
+	advanceModeCommandFollow = "command_followup"
+	advanceModeCompletion    = "completion"
+)
+
+// AdvanceStory 推进故事情节
+func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPreferences) (*models.StoryUpdate, error) {
+	var storyUpdate *models.StoryUpdate
+
+	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+			return fmt.Errorf("故事数据不存在")
+		}
+
+		storyDataBytes, err := os.ReadFile(storyPath)
+		if err != nil {
+			return fmt.Errorf("读取故事数据失败: %w", err)
+		}
+
+		var storyData models.StoryData
+		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
+			return fmt.Errorf("解析故事数据失败: %w", err)
+		}
+
 		sceneData, err := s.SceneService.LoadScene(sceneID)
 		if err != nil {
 			return err
 		}
 
-		// 检测语言
 		isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro + " " + storyData.MainObjective)
 
-		// 检查故事进度
-		if storyData.Progress >= 100 {
-			if isEnglish {
-				return fmt.Errorf("the story has already ended")
+		nextNode := findNextUnrevealedNode(&storyData)
+		generationReason := ""
+		if nextNode == nil {
+			if storyData.Progress >= 100 {
+				generationReason = "progress_complete"
+				log.Printf("story %s reached 100%% progress, generating continuation", sceneID)
 			} else {
-				return fmt.Errorf("故事已经结束")
+				generationReason = "no_unrevealed_nodes"
 			}
 		}
 
-		// 创建故事更新提示
-		creativityStr := string(preferences.CreativityLevel)
-		allowPlotTwists := preferences.AllowPlotTwists
-
-		var prompt string
-		var systemPrompt string
-
-		if isEnglish {
-			// 英文提示词
-			prompt = fmt.Sprintf(`In the story "%s", the current progress is %d%%, and the state is "%s".
-Story Introduction: %s
-Main Objective: %s
-
-Please generate a natural story progression event that happens automatically without requiring player choices.
-This event should push the story forward and add depth or complexity to the narrative.
-
-Creativity level: %s
-Allow plot twists: %v
-
-Return in JSON format:
-{
-  "title": "Event title",
-  "content": "Detailed event description",
-  "type": "revelation/encounter/discovery/complication",
-  "progress_impact": 5,
-  "new_task": {
-    "title": "Optional, if there's a new task",
-    "description": "Task description",
-    "objectives": ["Objective 1", "Objective 2"],
-    "reward": "Completion reward"
-  },
-  "new_clue": "Optional, newly discovered clue"
-}`,
-				sceneData.Scene.Name,
-				storyData.Progress,
-				storyData.CurrentState,
-				storyData.Intro,
-				storyData.MainObjective,
-				creativityStr,
-				allowPlotTwists)
-
-			systemPrompt = "You are a creative story designer responsible for creating engaging interactive stories."
-		} else {
-			// 中文提示词
-			prompt = fmt.Sprintf(`在《%s》的故事中，当前进展为 %d%%，状态为"%s"。
-故事简介: %s
-主要目标: %s
-
-请根据当前进展生成一个自然的故事推进事件，不需要玩家选择就能自动发生。
-这个事件应该能够向前推动故事情节，增加故事的深度或复杂性。
-
-创造性级别: %s
-允许剧情转折: %v
-
-返回JSON格式:
-{
-  "title": "事件标题",
-  "content": "事件详细描述",
-  "type": "revelation/encounter/discovery/complication",
-  "progress_impact": 5,
-  "new_task": {
-    "title": "可选，如果有新任务",
-    "description": "任务描述",
-    "objectives": ["目标1", "目标2"],
-    "reward": "完成奖励"
-  },
-  "new_clue": "可选，新发现的线索"
-}`,
-				sceneData.Scene.Name,
-				storyData.Progress,
-				storyData.CurrentState,
-				storyData.Intro,
-				storyData.MainObjective,
-				creativityStr,
-				allowPlotTwists)
-
-			systemPrompt = "你是一个创意故事设计师，负责创建引人入胜的交互式故事。"
-		}
-
-		// Create a context with timeout for the LLM call
-		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer cancel()
-
-		resp, err := s.LLMService.CreateChatCompletion(
-			ctx,
-			ChatCompletionRequest{
-				Model: s.getLLMModel(preferences),
-				Messages: []ChatCompletionMessage{
-					{
-						Role:    "system",
-						Content: systemPrompt,
-					},
-					{
-						Role:    "user",
-						Content: prompt,
-					},
-				},
-				// 请求JSON格式输出
-				ExtraParams: map[string]interface{}{
-					"response_format": map[string]string{
-						"type": "json_object",
-					},
-				},
-			},
-		)
-
-		if err != nil {
-			if isEnglish {
-				return fmt.Errorf("failed to generate story advancement event: %w", err)
+		currentNode := findLatestRevealedNode(&storyData)
+		advanceMode := advanceModeRevealOnly
+		var pendingCommand *models.Conversation
+		if nextNode != nil {
+			if cmd, err := s.resolvePendingCommand(sceneID, currentNode); err == nil {
+				if cmd != nil {
+					pendingCommand = cmd
+					advanceMode = advanceModeCommandFollow
+				}
 			} else {
-				return fmt.Errorf("生成故事推进事件失败: %w", err)
+				log.Printf("inspect pending command failed for scene %s: %v", sceneID, err)
 			}
 		}
 
-		jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
-
-		// 解析返回的JSON
-		var eventData struct {
-			Title          string `json:"title"`
-			Content        string `json:"content"`
-			Type           string `json:"type"`
-			ProgressImpact int    `json:"progress_impact"`
-			NewTask        *struct {
-				Title       string   `json:"title"`
-				Description string   `json:"description"`
-				Objectives  []string `json:"objectives"`
-				Reward      string   `json:"reward"`
-			} `json:"new_task,omitempty"`
-			NewClue string `json:"new_clue,omitempty"`
-		}
-
-		if err := json.Unmarshal([]byte(jsonStr), &eventData); err != nil {
-			if isEnglish {
-				return fmt.Errorf("failed to parse story event data: %w", err)
-			} else {
-				return fmt.Errorf("解析故事事件数据失败: %w", err)
+		if generationReason != "" {
+			generatedNode, genErr := s.generateContinuationStory(sceneID, &storyData, preferences, isEnglish, generationReason)
+			if genErr != nil {
+				return genErr
+			}
+			nextNode = generatedNode
+			if generationReason == "progress_complete" {
+				advanceMode = "completion"
 			}
 		}
 
-		// 创建故事更新
-		storyUpdate = &models.StoryUpdate{
-			ID:        fmt.Sprintf("update_%s_%d", sceneID, time.Now().UnixNano()),
-			SceneID:   sceneID,
-			Title:     eventData.Title,
-			Content:   eventData.Content,
-			Type:      eventData.Type,
-			CreatedAt: time.Now(),
-			Source:    models.SourceSystem,
+		if nextNode == nil {
+			return fmt.Errorf("没有可推进的故事节点")
 		}
 
-		// 更新故事进度
-		storyData.Progress += eventData.ProgressImpact
+		if generationReason != "" {
+			advanceMode = advanceModeCompletion
+			contextSummary := ""
+			contextLimit := 3
+			if generationReason == "progress_complete" {
+				contextLimit = 5
+			}
+			if conversations := s.fetchRecentConsoleStoryEntries(sceneID, contextLimit); len(conversations) > 0 {
+				contextSummary = summarizeConversations(conversations)
+			}
+			if strings.TrimSpace(contextSummary) != "" && strings.TrimSpace(nextNode.OriginalContent) != "" {
+				if rewritten, err := s.rewriteNodeWithContext(nextNode, contextSummary, preferences, isEnglish); err == nil {
+					rewritten = strings.TrimSpace(rewritten)
+					if rewritten != "" {
+						nextNode.Content = rewritten
+						if nextNode.Metadata == nil {
+							nextNode.Metadata = make(map[string]interface{})
+						}
+						nextNode.Metadata["context_applied"] = true
+						nextNode.Metadata["context_summary"] = contextSummary
+						nextNode.Metadata["context_applied_at"] = time.Now().Format(time.RFC3339Nano)
+					}
+				} else {
+					log.Printf("rewriteNodeWithContext failed for scene %s node %s: %v", sceneID, nextNode.ID, err)
+				}
+			}
+		}
+
+		originalSnippet := strings.TrimSpace(nextNode.Content)
+		if originalSnippet == "" {
+			originalSnippet = strings.TrimSpace(nextNode.OriginalContent)
+		}
+		narrativeContent := originalSnippet
+		if advanceMode == advanceModeCommandFollow && strings.TrimSpace(originalSnippet) != "" {
+			processingSummary := ""
+			if s.ContextService != nil && currentNode != nil {
+				if entries, err := s.ContextService.GetConsoleStoryEntriesByNode(sceneID, currentNode.ID, 3); err == nil {
+					processingSummary = formatStoryProcessingEntries(entries)
+				} else {
+					log.Printf("failed to load console history for scene %s node %s: %v", sceneID, currentNode.ID, err)
+				}
+			}
+			userCommandSummary := ""
+			if pendingCommand != nil {
+				userCommandSummary = resolveConversationContent(*pendingCommand)
+			}
+			rewritten, rewriteErr := s.rewriteNodeWithProcessing(originalSnippet, processingSummary, userCommandSummary, preferences, isEnglish)
+			if rewriteErr == nil && strings.TrimSpace(rewritten) != "" {
+				narrativeContent = strings.TrimSpace(rewritten)
+				if currentNode != nil && pendingCommand != nil {
+					markCommandAsConsumed(currentNode, pendingCommand.ID)
+				}
+				if pendingCommand != nil {
+					if nextNode.Metadata == nil {
+						nextNode.Metadata = make(map[string]interface{})
+					}
+					nextNode.Metadata["applied_command_id"] = pendingCommand.ID
+				}
+			} else if rewriteErr != nil {
+				log.Printf("rewriteNodeWithProcessing fallback for scene %s node %s: %v", sceneID, nextNode.ID, rewriteErr)
+			}
+		}
+		nextNode.Content = narrativeContent
+		if strings.TrimSpace(narrativeContent) == "" {
+			fallback := strings.TrimSpace(nextNode.Content)
+			if fallback == "" {
+				fallback = strings.TrimSpace(nextNode.OriginalContent)
+			}
+			if fallback == "" {
+				fallback = pickLocale(isEnglish,
+					"(System) Story advanced but no narration was generated.",
+					"【系统提示】剧情已推进，但暂未生成新的正文内容。",
+				)
+			}
+			narrativeContent = fallback
+			nextNode.Content = fallback
+		}
+		if nextNode.Metadata == nil {
+			nextNode.Metadata = make(map[string]interface{})
+		}
+		nextNode.Metadata["advance_mode"] = advanceMode
+
+		nextNode.IsRevealed = true
+		storyData.Progress = calculateProgress(&storyData, nextNode)
 		if storyData.Progress > 100 {
 			storyData.Progress = 100
 		}
-
-		// 更新当前状态
-		if storyData.Progress >= 100 {
-			if isEnglish {
-				storyData.CurrentState = "Ending"
-			} else {
-				storyData.CurrentState = "结局"
-			}
-		} else if storyData.Progress >= 75 {
-			if isEnglish {
-				storyData.CurrentState = "Climax"
-			} else {
-				storyData.CurrentState = "高潮"
-			}
-		} else if storyData.Progress >= 50 {
-			if isEnglish {
-				storyData.CurrentState = "Development"
-			} else {
-				storyData.CurrentState = "发展"
-			}
-		} else if storyData.Progress >= 25 {
-			if isEnglish {
-				storyData.CurrentState = "Conflict"
-			} else {
-				storyData.CurrentState = "冲突"
-			}
-		} else {
-			if isEnglish {
-				storyData.CurrentState = "Initial"
-			} else {
-				storyData.CurrentState = "初始"
-			}
-		}
-
-		// 处理新任务
-		if eventData.NewTask != nil {
-			taskID := fmt.Sprintf("task_%s_%d", sceneID, time.Now().UnixNano())
-			objectives := make([]models.Objective, 0, len(eventData.NewTask.Objectives))
-			for i, obj := range eventData.NewTask.Objectives {
-				objectives = append(objectives, models.Objective{
-					ID:          fmt.Sprintf("obj_%s_%d", taskID, i+1),
-					Description: obj,
-					Completed:   false,
-				})
-			}
-
-			task := models.Task{
-				ID:          taskID,
-				SceneID:     sceneID,
-				Title:       eventData.NewTask.Title,
-				Description: eventData.NewTask.Description,
-				Objectives:  objectives,
-				Reward:      eventData.NewTask.Reward,
-				Completed:   false,
-				IsRevealed:  true,
-				Source:      models.SourceSystem,
-			}
-
-			storyData.Tasks = append(storyData.Tasks, task)
-			storyUpdate.NewTask = &task
-		}
-
-		// 处理新线索
-		if eventData.NewClue != "" {
-			storyUpdate.NewClue = eventData.NewClue
-		}
-
-		// 更新最后修改时间
+		updateStoryState(&storyData, isEnglish)
 		storyData.LastUpdated = time.Now()
 
-		// 最后保存数据
 		if err := s.saveStoryData(sceneID, &storyData); err != nil {
 			return err
+		}
+		s.invalidateStoryCache(sceneID)
+
+		storyUpdate = &models.StoryUpdate{
+			ID:        fmt.Sprintf("update_%s_%d", sceneID, time.Now().UnixNano()),
+			SceneID:   sceneID,
+			Title:     nextNode.ID,
+			Content:   narrativeContent,
+			Type:      nextNode.Type,
+			CreatedAt: time.Now(),
+			Source:    nextNode.Source,
+		}
+
+		if s.ContextService != nil && strings.TrimSpace(narrativeContent) != "" {
+			meta := map[string]interface{}{
+				"conversation_type": "story_console",
+				"channel":           "ai",
+				"mode":              "story",
+				"source":            "advance_story",
+			}
+			if err := s.ContextService.AddConversation(sceneID, "story", narrativeContent, meta, nextNode.ID); err != nil {
+				log.Printf("failed to record advance_story conversation for %s/%s: %v", sceneID, nextNode.ID, err)
+			}
 		}
 
 		return nil
@@ -2046,7 +4080,7 @@ Return in JSON format:
 			}
 		}
 
-		jsonStr := sanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
+		jsonStr := SanitizeLLMJSONResponse(resp.Choices[0].Message.Content)
 
 		// 解析返回的JSON
 		var branchData struct {
