@@ -42,6 +42,7 @@ type InteractionRequest struct {
 	SceneID      string                 `json:"scene_id"`
 	CharacterIDs []string               `json:"character_ids"`
 	Message      string                 `json:"message"`
+	NodeID       string                 `json:"node_id,omitempty"`
 	EmotionData  *EmotionData           `json:"emotion_data,omitempty"`
 	Context      map[string]interface{} `json:"context,omitempty"`
 	Options      *InteractionOptions    `json:"options,omitempty"`
@@ -2205,6 +2206,28 @@ func (s *InteractionAggregateService) generateBasicFollowUpChoices(
 	return choices
 }
 
+func resolveInteractionNodeID(request *InteractionRequest) string {
+	if request == nil {
+		return ""
+	}
+	if nodeID := strings.TrimSpace(request.NodeID); nodeID != "" {
+		return nodeID
+	}
+	if request.Context != nil {
+		candidateKeys := []string{"node_id", "story_node_id", "current_node_id"}
+		for _, key := range candidateKeys {
+			if raw, ok := request.Context[key]; ok {
+				if value, ok := raw.(string); ok {
+					if trimmed := strings.TrimSpace(value); trimmed != "" {
+						return trimmed
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // saveInteractionToHistory 保存交互历史（兼容前端格式）
 func (s *InteractionAggregateService) saveInteractionToHistory(
 	request *InteractionRequest,
@@ -2212,6 +2235,7 @@ func (s *InteractionAggregateService) saveInteractionToHistory(
 
 	// 生成交互会话ID，用于关联所有相关对话
 	interactionID := fmt.Sprintf("interaction_%d", time.Now().UnixNano())
+	nodeID := resolveInteractionNodeID(request)
 
 	// 保存用户输入
 	if request.Message != "" {
@@ -2228,6 +2252,7 @@ func (s *InteractionAggregateService) saveInteractionToHistory(
 			"user",
 			request.Message,
 			userMetadata,
+			nodeID,
 		); err != nil {
 			return fmt.Errorf("保存用户消息失败: %w", err)
 		}
@@ -2261,6 +2286,7 @@ func (s *InteractionAggregateService) saveInteractionToHistory(
 			message.CharacterID,
 			message.Content,
 			metadata,
+			nodeID,
 		); err != nil {
 			return fmt.Errorf("保存角色 %s 的对话失败: %w", message.CharacterName, err)
 		}
