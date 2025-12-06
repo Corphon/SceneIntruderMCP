@@ -75,6 +75,7 @@ type UserSkill struct {
 	Name         string        `json:"name"`
 	Description  string        `json:"description"`
 	IconURL      string        `json:"icon_url,omitempty"`
+	Category     string        `json:"category,omitempty"`
 	Effects      []SkillEffect `json:"effects"`
 	Cooldown     int           `json:"cooldown,omitempty"`     // 冷却回合数
 	Requirements []string      `json:"requirements,omitempty"` // 使用需求
