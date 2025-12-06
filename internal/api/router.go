@@ -173,6 +173,7 @@ func SetupRouter() (*gin.Engine, error) {
 			scenesGroup.DELETE("/:id", RequireAuthForScene(), handler.DeleteScene)
 			scenesGroup.GET("/:id/characters", RequireAuthForScene(), handler.GetCharacters)
 			scenesGroup.GET("/:id/conversations", RequireAuthForScene(), handler.GetConversations)
+			scenesGroup.GET("/:id/nodes/:node_id/content", RequireAuthForScene(), handler.GetStoryNodeContent)
 
 			// 物品管理路由
 			itemsGroup := scenesGroup.Group("/:id/items")
@@ -191,6 +192,7 @@ func SetupRouter() (*gin.Engine, error) {
 				storyGroup.POST("/choice", RequireAuthForScene(), handler.MakeStoryChoice)
 				storyGroup.POST("/advance", RequireAuthForScene(), handler.AdvanceStory)
 				storyGroup.POST("/command", RequireAuthForScene(), handler.HandleSceneCommand)
+				storyGroup.POST("/nodes/:node_id/insert", RequireAuthForScene(), handler.InsertStoryNode)
 				storyGroup.POST("/rewind", RequireAuthForScene(), handler.RewindStory)
 				storyGroup.GET("/branches", RequireAuthForScene(), handler.GetStoryBranches)
 				storyGroup.GET("/choices", RequireAuthForScene(), handler.GetAvailableStoryChoices)
