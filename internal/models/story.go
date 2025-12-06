@@ -52,13 +52,15 @@ type StoryNode struct {
 	ID                    string                 `json:"id"`
 	SceneID               string                 `json:"scene_id"`
 	ParentID              string                 `json:"parent_id,omitempty"`
-	Content               string                 `json:"content"`     // 节点内容
-	Type                  string                 `json:"type"`        // 节点类型(main/side/hidden等)
-	Choices               []StoryChoice          `json:"choices"`     // 可用选择
-	IsRevealed            bool                   `json:"is_revealed"` // 是否已显示
+	Content               string                 `json:"content"`          // LLM 分析后的内容
+	OriginalContent       string                 `json:"original_content"` // 原文内容
+	Type                  string                 `json:"type"`             // 节点类型(main/side/hidden等)
+	Choices               []StoryChoice          `json:"choices"`          // 可用选择
+	IsRevealed            bool                   `json:"is_revealed"`      // 是否已显示
 	CreatedAt             time.Time              `json:"created_at"`
 	Source                ContentSourceType      `json:"source"` // 内容来源
 	Metadata              map[string]interface{} `json:"metadata,omitempty"`
+	RelatedItemIDs        []string               `json:"related_item_ids"`
 	CharacterInteractions []CharacterInteraction `json:"character_interactions,omitempty"`
 	InteractionTriggers   []InteractionTrigger   `json:"interaction_triggers,omitempty"`
 }
