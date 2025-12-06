@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -64,6 +65,26 @@ type SceneCommandRequest struct {
 	ItemHints    []string `json:"item_hints"`
 	SkillHints   []string `json:"skill_hints"`
 	LocationIDs  []string `json:"location_ids"`
+}
+
+type storyCommandLLMResponse struct {
+	Narration       string                      `json:"narration"`
+	Content         string                      `json:"content"`
+	Summary         string                      `json:"summary"`
+	Choices         []storyCommandChoicePayload `json:"choices"`
+	Recommendations []storyCommandChoicePayload `json:"recommendations"`
+}
+
+type storyCommandChoicePayload struct {
+	ID          string      `json:"id"`
+	Text        string      `json:"text"`
+	Consequence string      `json:"consequence"`
+	NextHint    string      `json:"next_hint"`
+	Hint        string      `json:"hint"`
+	Type        string      `json:"type"`
+	Impact      interface{} `json:"impact"`
+	Order       int         `json:"order"`
+	Description string      `json:"description"`
 }
 
 // APIResponse 标准API响应格式
@@ -439,11 +460,27 @@ func (h *Handler) CreateScene(c *gin.Context) {
 	// 创建场景
 	scene, err := h.SceneService.CreateSceneFromText(userID, req.Text, req.Title)
 	if err != nil {
-		h.Logger.Error("Failed to create scene", map[string]interface{}{
-			"title":     req.Title,
-			"error":     err.Error(),
-			"client_ip": c.ClientIP(),
-		})
+		if errors.Is(err, services.ErrLLMNotReady) {
+			if h.Logger != nil {
+				h.Logger.Warn("LLM service not ready during scene creation", map[string]interface{}{
+					"title":     req.Title,
+					"client_ip": c.ClientIP(),
+				})
+			} else {
+				log.Printf("LLM service not ready while creating scene %s", req.Title)
+			}
+			h.Metrics.RecordError("llm_not_ready", "llm_service")
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady,
+				MessageLLMNotReady, "请在设置中配置LLM API密钥后重试")
+			return
+		}
+		if h.Logger != nil {
+			h.Logger.Error("Failed to create scene", map[string]interface{}{
+				"title":     req.Title,
+				"error":     err.Error(),
+				"client_ip": c.ClientIP(),
+			})
+		}
 		h.Metrics.RecordError("scene_creation_failed", "scene_service")
 		h.Response.InternalError(c, "创建场景失败", err.Error())
 		return
@@ -774,6 +811,22 @@ func (h *Handler) AnalyzeTextWithProgress(c *gin.Context) {
 		return
 	}
 
+	if h.AnalyzerService == nil {
+		h.Response.InternalError(c, "分析服务未初始化", "Analyzer service unavailable")
+		return
+	}
+
+	llmSvc := h.AnalyzerService.LLMService
+	if llmSvc == nil || !llmSvc.IsReady() {
+		readyState := "LLM服务未配置或未就绪"
+		if llmSvc != nil {
+			readyState = llmSvc.GetReadyState()
+		}
+		h.Response.Error(c, http.StatusServiceUnavailable, "LLM_NOT_READY",
+			"LLM服务未配置或未就绪", readyState)
+		return
+	}
+
 	// Log the analysis attempt
 	h.Logger.Info("Starting text analysis", map[string]interface{}{
 		"title":       req.Title,
@@ -1031,7 +1084,142 @@ func (h *Handler) GetStoryData(c *gin.Context) {
 		return
 	}
 
-	h.Response.Success(c, storyData, "故事数据获取成功")
+	sanitized := sanitizeStoryDataForClient(storyData)
+	h.Response.Success(c, sanitized, "故事数据获取成功")
+}
+
+const maxOriginalPreviewRunes = 600
+
+func sanitizeStoryDataForClient(data *models.StoryData) *models.StoryData {
+	if data == nil {
+		return nil
+	}
+	cloned := *data
+	if len(data.Nodes) > 0 {
+		cloned.Nodes = make([]models.StoryNode, len(data.Nodes))
+		for i, node := range data.Nodes {
+			sanitizedNode := node
+			sanitizedNode.OriginalContent = truncateOriginalPreview(node.OriginalContent)
+			cloned.Nodes[i] = sanitizedNode
+		}
+	}
+	return &cloned
+}
+
+func truncateOriginalPreview(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	if len(runes) <= maxOriginalPreviewRunes {
+		return trimmed
+	}
+	return string(runes[:maxOriginalPreviewRunes]) + "..."
+}
+
+// GetStoryNodeContent 返回指定故事节点的原文和内容
+func (h *Handler) GetStoryNodeContent(c *gin.Context) {
+	sceneID := c.Param("id")
+	nodeID := c.Param("node_id")
+	if sceneID == "" || nodeID == "" {
+		h.Response.BadRequest(c, "缺少必要参数", "需要 scene_id 和 node_id")
+		return
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	node, err := storyService.GetStoryNode(sceneID, nodeID)
+	if err != nil {
+		h.Response.NotFound(c, "故事节点", err.Error())
+		return
+	}
+
+	response := map[string]interface{}{
+		"node":                 node,
+		"content":              node.Content,
+		"original_content":     node.OriginalContent,
+		"related_item_ids":     node.RelatedItemIDs,
+		"metadata":             node.Metadata,
+		"character_links":      node.CharacterInteractions,
+		"interaction_triggers": node.InteractionTriggers,
+	}
+
+	h.Response.Success(c, response, "故事节点内容获取成功")
+}
+
+// InsertStoryNode 将指定节点内容直接发布到互动屏幕
+func (h *Handler) InsertStoryNode(c *gin.Context) {
+	sceneID := c.Param("id")
+	nodeID := c.Param("node_id")
+	if sceneID == "" || nodeID == "" {
+		h.Response.BadRequest(c, "缺少必要参数", "需要 scene_id 和 node_id")
+		return
+	}
+
+	var req struct {
+		Content string `json:"content,omitempty"`
+	}
+	if c.Request != nil && c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			h.Response.BadRequest(c, "请求体格式错误", err.Error())
+			return
+		}
+	}
+
+	storyService := h.getStoryService()
+	if storyService == nil {
+		h.Response.InternalError(c, "故事服务未初始化", "无法获取故事服务实例")
+		return
+	}
+
+	node, err := storyService.GetStoryNode(sceneID, nodeID)
+	if err != nil {
+		h.Response.NotFound(c, "故事节点", err.Error())
+		return
+	}
+
+	content := strings.TrimSpace(req.Content)
+	if content == "" {
+		content = strings.TrimSpace(node.Content)
+	}
+	if content == "" {
+		content = strings.TrimSpace(node.OriginalContent)
+	}
+	if content == "" {
+		h.Response.BadRequest(c, "节点内容为空", "目标节点未包含可用文本")
+		return
+	}
+
+	if h.ContextService != nil {
+		meta := map[string]interface{}{
+			"conversation_type": "story_console",
+			"mode":              "story",
+			"source":            "sidebar_insert",
+		}
+		if err := h.ContextService.AddConversation(sceneID, "story", content, meta, node.ID); err != nil {
+			if h.Logger != nil {
+				h.Logger.Warn("记录节点插入失败", map[string]interface{}{
+					"error":    err.Error(),
+					"scene_id": sceneID,
+					"node_id":  nodeID,
+				})
+			} else {
+				log.Printf("failed to record sidebar insert for %s/%s: %v", sceneID, nodeID, err)
+			}
+		}
+	}
+
+	response := map[string]interface{}{
+		"node":    node,
+		"content": content,
+	}
+
+	h.Response.Success(c, response, "节点内容已插入互动屏幕")
 }
 
 // MakeStoryChoice 处理故事选择逻辑
@@ -1241,6 +1429,7 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 	if mode == "" {
 		mode = "story"
 	}
+	expectStoryNarration := mode == "story"
 
 	storyService := h.getStoryService()
 	if storyService == nil {
@@ -1256,6 +1445,7 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 
 	var storyData *models.StoryData
 	storyData, _ = storyService.GetStoryData(sceneID, nil)
+	activeNode := latestRevealedStoryNode(storyData)
 
 	container := di.GetContainer()
 	llmService, ok := container.Get("llm").(*services.LLMService)
@@ -1269,23 +1459,75 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 		return
 	}
 
-	contextPrompt, systemPrompt := buildSceneCommandContext(sceneData, storyData, mode, &req)
+	var narrationContext string
+	responseContext := ""
+	var promptMessages []services.ChatCompletionMessage
+	systemPrompt := ""
+	var extraParams map[string]interface{}
+	if strings.EqualFold(mode, "story") {
+		originalText := ""
+		if activeNode != nil {
+			originalText = strings.TrimSpace(activeNode.Content)
+			if originalText == "" {
+				originalText = strings.TrimSpace(activeNode.OriginalContent)
+			}
+		}
+		processingText := ""
+		if h.ContextService != nil && activeNode != nil {
+			if entries, err := h.ContextService.GetConsoleStoryEntriesByNode(sceneID, activeNode.ID, 3); err == nil {
+				processingText = formatProcessingEntries(entries)
+			} else if h.Logger != nil {
+				h.Logger.Warn("获取节点旁白失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID, "node_id": activeNode.ID})
+			} else {
+				log.Printf("failed to load node narration for %s/%s: %v", sceneID, activeNode.ID, err)
+			}
+		}
+		systemPrompt = buildStoryModeSystemPrompt(sceneData)
+		storyUserPrompt := buildStoryModeUserPrompt(originalText, processingText, input)
+		storyUserPrompt += "\n\nRespond strictly in JSON with fields: narration (string) and choices (array of {text, consequence, next_hint, type, impact})."
+		responseContext = processingText
+		promptMessages = []services.ChatCompletionMessage{
+			{Role: services.RoleSystem, Content: systemPrompt},
+			{Role: services.RoleUser, Content: storyUserPrompt},
+		}
+		extraParams = map[string]interface{}{
+			"response_format": map[string]string{
+				"type": "json_object",
+			},
+		}
+	} else {
+		if h.ContextService != nil {
+			if entries, err := h.ContextService.GetRecentConsoleStoryEntries(sceneID, 3); err == nil {
+				narrationContext = formatConsoleStoryHistory(entries)
+			} else if h.Logger != nil {
+				h.Logger.Warn("获取剧情旁白失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID})
+			} else {
+				log.Printf("failed to load narration context for %s: %v", sceneID, err)
+			}
+		}
+		contextPrompt, legacySystemPrompt := buildSceneCommandContext(sceneData, storyData, mode, &req, narrationContext)
+		responseContext = contextPrompt
+		systemPrompt = legacySystemPrompt
+		promptMessages = []services.ChatCompletionMessage{
+			{Role: services.RoleSystem, Content: systemPrompt},
+			{Role: services.RoleUser, Content: contextPrompt + "\n\n玩家指令: " + input},
+		}
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
 	defer cancel()
 
 	request := services.ChatCompletionRequest{
-		Messages: []services.ChatCompletionMessage{
-			{Role: services.RoleSystem, Content: systemPrompt},
-			{Role: services.RoleUser, Content: contextPrompt + "\n\n玩家指令: " + input},
-		},
+		Messages:    promptMessages,
 		Model:       "",
 		MaxTokens:   700,
 		Temperature: 0.7,
+		ExtraParams: extraParams,
 	}
 
 	resp, err := llmService.CreateChatCompletion(ctx, request)
 	fallbackUsed := false
 	var answer string
+	var rawLLMContent string
 	if err != nil {
 		fallbackUsed = true
 		answer = fmt.Sprintf("[系统提示] LLM 暂不可用: %v\n\n玩家指令：%s", err.Error(), input)
@@ -1293,10 +1535,43 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 		fallbackUsed = true
 		answer = fmt.Sprintf("[系统提示] LLM 未返回内容，已保留玩家指令：%s", input)
 	} else {
-		answer = strings.TrimSpace(resp.Choices[0].Message.Content)
+		rawLLMContent = resp.Choices[0].Message.Content
+		answer = strings.TrimSpace(rawLLMContent)
 		if answer == "" {
 			fallbackUsed = true
 			answer = fmt.Sprintf("[系统提示] LLM 返回空响应，已保留玩家指令：%s", input)
+		}
+	}
+
+	var choiceSummaries []map[string]interface{}
+	if !fallbackUsed && expectStoryNarration && rawLLMContent != "" {
+		if payload, err := parseStoryModeLLMResponse(rawLLMContent); err == nil {
+			if narration := payload.resolveNarration(); narration != "" {
+				answer = narration
+			}
+			if activeNode != nil {
+				translatedChoices := convertStoryModeChoices(activeNode.ID, payload.candidateChoices(), input)
+				if len(translatedChoices) > 0 {
+					if err := storyService.UpdateNodeChoices(sceneID, activeNode.ID, translatedChoices); err != nil {
+						if h.Logger != nil {
+							h.Logger.Warn("更新故事节点推荐选项失败", map[string]interface{}{
+								"error":    err.Error(),
+								"scene_id": sceneID,
+								"node_id":  activeNode.ID,
+							})
+						} else {
+							log.Printf("failed to update node choices for %s/%s: %v", sceneID, activeNode.ID, err)
+						}
+					} else {
+						choiceSummaries = summarizeStoryChoiceModels(translatedChoices)
+					}
+				}
+			}
+		} else if h.Logger != nil {
+			h.Logger.Debug("解析指令结构化响应失败", map[string]interface{}{
+				"error":    err.Error(),
+				"scene_id": sceneID,
+			})
 		}
 	}
 
@@ -1312,7 +1587,14 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 		"skill_hints":       req.SkillHints,
 		"item_hints":        req.ItemHints,
 	}
-	if err := h.ContextService.AddConversation(sceneID, userID, input, userMeta); err != nil {
+	activeNodeID := ""
+	if activeNode != nil {
+		activeNodeID = activeNode.ID
+	}
+	if activeNodeID != "" {
+		userMeta["node_id"] = activeNodeID
+	}
+	if err := h.ContextService.AddConversation(sceneID, userID, input, userMeta, activeNodeID); err != nil {
 		h.Logger.Warn("记录用户指令失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID})
 	}
 
@@ -1325,26 +1607,34 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 		"mode":              mode,
 		"channel":           "ai",
 	}
-	if err := h.ContextService.AddConversation(sceneID, speakerID, answer, aiMeta); err != nil {
+	if activeNodeID != "" {
+		aiMeta["node_id"] = activeNodeID
+	}
+	if err := h.ContextService.AddConversation(sceneID, speakerID, answer, aiMeta, activeNodeID); err != nil {
 		h.Logger.Warn("记录AI回应失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID})
 	}
 
 	result := map[string]interface{}{
 		"reply":         answer,
 		"mode":          mode,
-		"context":       contextPrompt,
+		"context":       responseContext,
 		"characters":    resolveCharacterSummaries(sceneData.Characters, req.CharacterIDs),
 		"skill_hints":   req.SkillHints,
 		"item_hints":    req.ItemHints,
 		"timestamp":     time.Now().Format(time.RFC3339),
 		"fallback_used": fallbackUsed,
 	}
+	if len(choiceSummaries) > 0 {
+		result["choice_suggestions"] = choiceSummaries
+		result["choice_node_id"] = activeNodeID
+	}
 
 	h.Response.Success(c, result, "互动指令执行成功")
 }
 
-func buildSceneCommandContext(sceneData *services.SceneData, storyData *models.StoryData, mode string, req *SceneCommandRequest) (string, string) {
+func buildSceneCommandContext(sceneData *services.SceneData, storyData *models.StoryData, mode string, req *SceneCommandRequest, narrationContext string) (string, string) {
 	var focusCharacter *models.Character
+	latestNode := latestRevealedStoryNode(storyData)
 	characterLookup := make(map[string]*models.Character)
 	for _, ch := range sceneData.Characters {
 		if ch == nil {
@@ -1363,20 +1653,6 @@ func buildSceneCommandContext(sceneData *services.SceneData, storyData *models.S
 		}
 	}
 
-	var latestNode *models.StoryNode
-	if storyData != nil {
-		for i := len(storyData.Nodes) - 1; i >= 0; i-- {
-			node := storyData.Nodes[i]
-			if node.IsRevealed {
-				latestNode = &storyData.Nodes[i]
-				break
-			}
-		}
-		if latestNode == nil && len(storyData.Nodes) > 0 {
-			latestNode = &storyData.Nodes[len(storyData.Nodes)-1]
-		}
-	}
-
 	var taskHighlights []string
 	var locationHighlights []string
 	if storyData != nil {
@@ -1391,6 +1667,24 @@ func buildSceneCommandContext(sceneData *services.SceneData, storyData *models.S
 	}
 	if latestNode != nil {
 		builder.WriteString(fmt.Sprintf("最新剧情：%s\n", strings.TrimSpace(latestNode.Content)))
+	}
+
+	if strings.TrimSpace(narrationContext) != "" {
+		builder.WriteString("上下文变化：\n")
+		builder.WriteString(strings.TrimSpace(narrationContext))
+		builder.WriteString("\n")
+	}
+
+	if latestNode != nil {
+		originalSnippet := strings.TrimSpace(latestNode.OriginalContent)
+		if originalSnippet == "" {
+			originalSnippet = strings.TrimSpace(latestNode.Content)
+		}
+		if originalSnippet != "" {
+			builder.WriteString("原文基线：\n")
+			builder.WriteString(originalSnippet)
+			builder.WriteString("\n")
+		}
 	}
 	if storyData != nil {
 		builder.WriteString(fmt.Sprintf("当前状态：%s · 进度%d%%\n", storyData.CurrentState, storyData.Progress))
@@ -1422,6 +1716,293 @@ func buildSceneCommandContext(sceneData *services.SceneData, storyData *models.S
 	return builder.String(), systemPrompt
 }
 
+func latestRevealedStoryNode(storyData *models.StoryData) *models.StoryNode {
+	if storyData == nil || len(storyData.Nodes) == 0 {
+		return nil
+	}
+	for i := len(storyData.Nodes) - 1; i >= 0; i-- {
+		if storyData.Nodes[i].IsRevealed {
+			return &storyData.Nodes[i]
+		}
+	}
+	return &storyData.Nodes[len(storyData.Nodes)-1]
+}
+
+func formatProcessingEntries(entries []models.Conversation) string {
+	if len(entries) == 0 {
+		return "（暂无旁白加工）"
+	}
+	var builder strings.Builder
+	order := 1
+	for _, entry := range entries {
+		content := extractConversationContent(entry)
+		if content == "" {
+			continue
+		}
+		builder.WriteString(fmt.Sprintf("[%d] %s\n", order, content))
+		order++
+	}
+	formatted := strings.TrimSpace(builder.String())
+	if formatted == "" {
+		return "（暂无旁白加工）"
+	}
+	return formatted
+}
+
+func buildStoryModeSystemPrompt(sceneData *services.SceneData) string {
+	sceneTitle := ""
+	if sceneData != nil {
+		sceneTitle = strings.TrimSpace(sceneData.Scene.Title)
+	}
+	if sceneTitle == "" {
+		sceneTitle = "互动故事"
+	}
+	return fmt.Sprintf("你是《%s》的旁白主持人，需要根据 original、processing、user_new_message 三段信息顺序理解上下文并续写下一段剧情。输出应保持沉浸式第三人称或第二人称叙述，长度控制在约220个汉字（或150个英文词）以内，推动剧情但不要一次性结束冲突，也不要剧透终局，只输出正文。", sceneTitle)
+}
+
+func buildStoryModeUserPrompt(originalText, processingText, userMessage string) string {
+	original := strings.TrimSpace(originalText)
+	if original == "" {
+		original = "（暂无原文内容）"
+	}
+	processing := strings.TrimSpace(processingText)
+	if processing == "" {
+		processing = "（暂无旁白加工）"
+	}
+	userInput := strings.TrimSpace(userMessage)
+	if userInput == "" {
+		userInput = "（玩家暂未提供新指令，仅按原剧情推进）"
+	}
+	return fmt.Sprintf("original:\n%s\n\nprocessing:\n%s\n\nuser_new_message:\n%s", original, processing, userInput)
+}
+
+func parseStoryModeLLMResponse(raw string) (*storyCommandLLMResponse, error) {
+	cleaned := services.CleanLLMJSONResponse(raw)
+	if strings.TrimSpace(cleaned) == "" {
+		cleaned = services.SanitizeLLMJSONResponse(raw)
+	}
+	clamped := clampJSONEnvelope(cleaned)
+	if strings.TrimSpace(clamped) == "" {
+		return nil, fmt.Errorf("LLM响应中缺少JSON内容")
+	}
+	var payload storyCommandLLMResponse
+	if err := json.Unmarshal([]byte(clamped), &payload); err != nil {
+		return nil, err
+	}
+	return &payload, nil
+}
+
+func clampJSONEnvelope(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return ""
+	}
+	start := strings.IndexAny(trimmed, "{[")
+	if start > 0 {
+		trimmed = trimmed[start:]
+	}
+	if trimmed == "" {
+		return ""
+	}
+	switch trimmed[0] {
+	case '{':
+		if idx := strings.LastIndexByte(trimmed, '}'); idx >= 0 {
+			return strings.TrimSpace(trimmed[:idx+1])
+		}
+	case '[':
+		if idx := strings.LastIndexByte(trimmed, ']'); idx >= 0 {
+			return strings.TrimSpace(trimmed[:idx+1])
+		}
+	}
+	return trimmed
+}
+
+func (p *storyCommandLLMResponse) resolveNarration() string {
+	if p == nil {
+		return ""
+	}
+	candidates := []string{p.Narration, p.Content, p.Summary}
+	for _, value := range candidates {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func (p *storyCommandLLMResponse) candidateChoices() []storyCommandChoicePayload {
+	if p == nil {
+		return nil
+	}
+	if len(p.Choices) > 0 {
+		return p.Choices
+	}
+	if len(p.Recommendations) > 0 {
+		return p.Recommendations
+	}
+	return nil
+}
+
+func convertStoryModeChoices(nodeID string, payload []storyCommandChoicePayload, userInput string) []models.StoryChoice {
+	if len(payload) == 0 {
+		return nil
+	}
+	now := time.Now()
+	trimmedInput := strings.TrimSpace(userInput)
+	choices := make([]models.StoryChoice, 0, len(payload))
+	for idx, candidate := range payload {
+		text := strings.TrimSpace(candidate.Text)
+		if text == "" {
+			continue
+		}
+		choiceID := strings.TrimSpace(candidate.ID)
+		if choiceID == "" {
+			choiceID = fmt.Sprintf("choice_%s_cmd_%d_%d", nodeID, now.Unix(), idx+1)
+		}
+		nextHint := firstNonEmpty(candidate.NextHint, candidate.Hint, candidate.Consequence)
+		fallbackImpact := float64(len(payload) - idx)
+		impact, impactLabel := normalizeChoiceImpact(candidate.Impact, fallbackImpact)
+		metadata := map[string]interface{}{
+			"source":   "story_command",
+			"llm_rank": idx,
+			"hint_raw": strings.TrimSpace(candidate.Hint),
+		}
+		if trimmedInput != "" {
+			metadata["user_command"] = trimmedInput
+		}
+		if strings.TrimSpace(candidate.Description) != "" {
+			metadata["description"] = strings.TrimSpace(candidate.Description)
+		}
+		if impactLabel != "" {
+			metadata["impact_text"] = impactLabel
+		}
+		choices = append(choices, models.StoryChoice{
+			ID:           choiceID,
+			Text:         text,
+			Consequence:  strings.TrimSpace(candidate.Consequence),
+			NextNodeHint: strings.TrimSpace(nextHint),
+			Selected:     false,
+			CreatedAt:    now,
+			Description:  strings.TrimSpace(candidate.Description),
+			Type:         firstNonEmpty(strings.TrimSpace(candidate.Type), "branch"),
+			Impact:       impact,
+			Order:        idx,
+			Metadata:     metadata,
+		})
+		if len(choices) >= 4 {
+			break
+		}
+	}
+	return choices
+}
+
+func normalizeChoiceImpact(raw interface{}, fallback float64) (float64, string) {
+	if raw == nil {
+		return fallback, ""
+	}
+	switch v := raw.(type) {
+	case float64:
+		if v == 0 {
+			return fallback, ""
+		}
+		return v, ""
+	case string:
+		trimmed := strings.TrimSpace(v)
+		if trimmed == "" {
+			return fallback, ""
+		}
+		if parsed, err := strconv.ParseFloat(strings.TrimSuffix(trimmed, "%"), 64); err == nil {
+			return parsed, ""
+		}
+		return fallback, trimmed
+	default:
+		return fallback, ""
+	}
+}
+
+func summarizeStoryChoiceModels(choices []models.StoryChoice) []map[string]interface{} {
+	if len(choices) == 0 {
+		return nil
+	}
+	summaries := make([]map[string]interface{}, 0, len(choices))
+	for _, choice := range choices {
+		summaries = append(summaries, map[string]interface{}{
+			"id":          choice.ID,
+			"text":        choice.Text,
+			"consequence": choice.Consequence,
+			"next_hint":   choice.NextNodeHint,
+			"impact":      choice.Impact,
+			"type":        choice.Type,
+			"order":       choice.Order,
+		})
+		if choice.Metadata != nil {
+			if label, ok := choice.Metadata["impact_text"].(string); ok && strings.TrimSpace(label) != "" {
+				summaries[len(summaries)-1]["impact_text"] = strings.TrimSpace(label)
+			}
+		}
+	}
+	return summaries
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+func formatConsoleStoryHistory(entries []models.Conversation) string {
+	if len(entries) == 0 {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("最近剧情旁白：\n")
+	for _, entry := range entries {
+		content := extractConversationContent(entry)
+		if content == "" {
+			continue
+		}
+		timeLabel := ""
+		if !entry.Timestamp.IsZero() {
+			timeLabel = entry.Timestamp.Format("15:04")
+		}
+		if timeLabel != "" {
+			builder.WriteString(fmt.Sprintf("[%s] %s\n", timeLabel, content))
+		} else {
+			builder.WriteString(content + "\n")
+		}
+	}
+	formatted := strings.TrimSpace(builder.String())
+	if formatted == "最近剧情旁白：" {
+		return ""
+	}
+	return formatted
+}
+
+func extractConversationContent(entry models.Conversation) string {
+	if trimmed := strings.TrimSpace(entry.Content); trimmed != "" {
+		return trimmed
+	}
+	if trimmed := strings.TrimSpace(entry.Message); trimmed != "" {
+		return trimmed
+	}
+	if entry.Metadata != nil {
+		if raw, ok := entry.Metadata["content"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+		if raw, ok := entry.Metadata["message"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
 func buildSceneCommandSystemPrompt(mode string, focus *models.Character, selectedNames []string) string {
 	switch mode {
 	case "character":
@@ -1439,7 +2020,7 @@ func buildSceneCommandSystemPrompt(mode string, focus *models.Character, selecte
 	case "skill":
 		return "你是剧情主持人，重点描述技能发动带来的影响，并提示可以探索的方向。"
 	default:
-		return "你是沉浸式故事主持人，请扮演旁白或世界，引导玩家并适时提供下一步行动建议。"
+		return "你是沉浸式故事主持人，请扮演旁白或世界，引导玩家并适时提供下一步行动建议；务必根据当前进度循序推动情节，除非玩家明确要求，否则不要直接给出终极结局或一次性解决所有冲突，应保留悬念并给出可跟进的行动。"
 	}
 }
 
@@ -1552,15 +2133,41 @@ func (h *Handler) RewindStory(c *gin.Context) {
 		return
 	}
 
+	var targetNode *models.StoryNode
+	removedNodeIDs := make([]string, 0)
+	var cutoff time.Time
+	for i := range storyData.Nodes {
+		node := &storyData.Nodes[i]
+		if node.ID == req.NodeID {
+			targetNode = node
+			cutoff = node.CreatedAt
+			continue
+		}
+		if !cutoff.IsZero() && node.CreatedAt.After(cutoff) {
+			removedNodeIDs = append(removedNodeIDs, node.ID)
+		}
+	}
+
+	if h.ContextService != nil && len(removedNodeIDs) > 0 {
+		if err := h.ContextService.RemoveConversationsAfterNode(sceneID, removedNodeIDs, cutoff); err != nil {
+			h.Logger.Warn("回溯后清理上下文失败", map[string]interface{}{
+				"error":    err.Error(),
+				"scene_id": sceneID,
+				"node_id":  req.NodeID,
+			})
+		}
+	}
+
 	// 构建分支视图数据
 	branchView := buildStoryBranchView(storyData)
 
 	// 获取回溯到的节点信息
-	var targetNode *models.StoryNode
-	for i := range storyData.Nodes {
-		if storyData.Nodes[i].ID == req.NodeID {
-			targetNode = &storyData.Nodes[i]
-			break
+	if targetNode == nil {
+		for i := range storyData.Nodes {
+			if storyData.Nodes[i].ID == req.NodeID {
+				targetNode = &storyData.Nodes[i]
+				break
+			}
 		}
 	}
 
@@ -3378,6 +3985,43 @@ func (h *Handler) DeleteUserItem(c *gin.Context) {
 	h.Response.Success(c, nil, "物品删除成功")
 }
 
+type userSkillRequest struct {
+	models.UserSkill
+	LegacyEffect string `json:"effect,omitempty"`
+}
+
+func (req *userSkillRequest) toModel() models.UserSkill {
+	skill := req.UserSkill
+	if len(skill.Effects) == 0 {
+		legacy := strings.TrimSpace(req.LegacyEffect)
+		if legacy != "" {
+			skill.Effects = []models.SkillEffect{
+				{
+					Description: legacy,
+					Target:      "other",
+					Type:        "special",
+					Value:       0,
+					Probability: 1,
+				},
+			}
+		}
+	}
+
+	return skill
+}
+
+func extractSkillValidationMessage(err error) string {
+	message := err.Error()
+	prefix := services.ErrSkillValidation.Error() + ": "
+	if strings.HasPrefix(message, prefix) {
+		return strings.TrimPrefix(message, prefix)
+	}
+	if message == services.ErrSkillValidation.Error() {
+		return "技能数据验证失败"
+	}
+	return message
+}
+
 // GetUserSkills 获取用户技能
 func (h *Handler) GetUserSkills(c *gin.Context) {
 	userID := c.Param("user_id")
@@ -3419,17 +4063,22 @@ func (h *Handler) AddUserSkill(c *gin.Context) {
 		return
 	}
 
-	var skill models.UserSkill
-	if err := c.ShouldBindJSON(&skill); err != nil {
+	var req userSkillRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Response.BadRequest(c, "无效的请求数据", err.Error())
 		return
 	}
 
+	skill := req.toModel()
 	if skill.ID == "" {
 		skill.ID = fmt.Sprintf("skill_%d", time.Now().UnixNano())
 	}
 
 	if err := h.UserService.AddUserSkill(userID, skill); err != nil {
+		if errors.Is(err, services.ErrSkillValidation) {
+			h.Response.BadRequest(c, extractSkillValidationMessage(err), "")
+			return
+		}
 		h.Response.InternalError(c, "添加技能失败", err.Error())
 		return
 	}
@@ -3486,14 +4135,19 @@ func (h *Handler) UpdateUserSkill(c *gin.Context) {
 		return
 	}
 
-	var skill models.UserSkill
-	if err := c.ShouldBindJSON(&skill); err != nil {
+	var req userSkillRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
 		h.Response.BadRequest(c, "无效的请求数据", err.Error())
 		return
 	}
 
+	skill := req.toModel()
 	skill.ID = skillID
 	if err := h.UserService.UpdateUserSkill(userID, skillID, skill); err != nil {
+		if errors.Is(err, services.ErrSkillValidation) {
+			h.Response.BadRequest(c, extractSkillValidationMessage(err), "")
+			return
+		}
 		h.Response.InternalError(c, "更新技能失败", err.Error())
 		return
 	}
