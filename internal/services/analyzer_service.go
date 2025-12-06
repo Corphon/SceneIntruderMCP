@@ -6,7 +6,6 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -119,7 +118,7 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 
 	// 检查LLM提供商是否就绪
 	if s.LLMService == nil || !s.LLMService.IsReady() {
-		return nil, errors.New("LLM服务未配置或未就绪，请先在设置页面配置API密钥")
+		return nil, fmt.Errorf("%w: %s", ErrLLMNotReady, "LLM服务未配置或未就绪，请先在设置页面配置API密钥")
 	}
 
 	// 检查缓存
@@ -216,6 +215,10 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 	result.Scenes = scenes
 	result.Items = items
 	result.Summary = summary
+	if segments := s.buildOriginalSegmentsFromText(text, title); len(segments) > 0 {
+		result.OriginalSegments = segments
+	}
+	result.TextLength = len([]rune(text))
 
 	// 添加到缓存
 	s.addToAnalysisCache(cacheKey, result)
@@ -455,8 +458,39 @@ func truncateText(text string, maxLength int) string {
 	return string(runes[:maxLength]) + "..."
 }
 
+func (s *AnalyzerService) buildOriginalSegmentsFromText(text, title string) []models.OriginalSegment {
+	clean := strings.TrimSpace(text)
+	if clean == "" {
+		return nil
+	}
+	isEnglish := isEnglishText(title + " " + clean)
+	segments := generateSegmentsFromText(clean, isEnglish)
+	for i := range segments {
+		segments[i].Summary = summarizeSegmentContent(segments[i].OriginalText, isEnglish)
+	}
+	return segments
+}
+
+func summarizeSegmentContent(text string, isEnglish bool) string {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return ""
+	}
+	runes := []rune(trimmed)
+	limit := 160
+	if len(runes) <= limit {
+		return trimmed
+	}
+	snippet := strings.TrimSpace(string(runes[:limit]))
+	return snippet + pickLocale(isEnglish, "...", "……")
+}
+
 // AnalyzeTextWithProgress 带进度反馈和超时控制的文本分析
 func (s *AnalyzerService) AnalyzeTextWithProgress(ctx context.Context, text string, tracker *ProgressTracker) (*models.AnalysisResult, error) {
+	if s.LLMService == nil || !s.LLMService.IsReady() {
+		return nil, fmt.Errorf("%w: %s", ErrLLMNotReady, "LLM服务未配置或未就绪，请先在设置页面配置API密钥")
+	}
+
 	// 获取并发许可
 	s.semaphore <- struct{}{}
 	defer func() { <-s.semaphore }()
@@ -520,6 +554,11 @@ func (s *AnalyzerService) AnalyzeTextWithProgress(ctx context.Context, text stri
 	tracker.UpdateProgress(95, "完成分析，准备结果...")
 
 	// 执行最终处理...
+	if len(result.OriginalSegments) == 0 {
+		if segments := s.buildOriginalSegmentsFromText(text, result.Title); len(segments) > 0 {
+			result.OriginalSegments = segments
+		}
+	}
 
 	// 任务完成
 	tracker.Complete("分析成功完成")
