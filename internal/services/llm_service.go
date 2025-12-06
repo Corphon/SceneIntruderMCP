@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -22,6 +23,8 @@ const (
 	RoleUser      = "user"
 	RoleAssistant = "assistant"
 )
+
+var ErrLLMNotReady = errors.New("llm service not ready")
 
 var providerDefaultModels = map[string]string{
 	"openai":       "gpt-4.1",
@@ -258,6 +261,17 @@ func (s *LLMService) GetReadyState() string {
 	return "Waiting for initialization"
 }
 
+// GetProviderStatus 返回服务是否就绪以及可读描述
+func (s *LLMService) GetProviderStatus() (bool, string) {
+	if s == nil {
+		return false, "LLM服务实例未初始化"
+	}
+	if s.IsReady() {
+		return true, "Ready"
+	}
+	return false, s.GetReadyState()
+}
+
 // UpdateProvider 更新LLM服务的提供商
 func (s *LLMService) UpdateProvider(providerName string, config map[string]string) error {
 	provider, err := llm.GetProvider(providerName, config)
@@ -404,6 +418,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 		Model:       resolvedModel,
 		Temperature: float32(request.Temperature),
 		MaxTokens:   request.MaxTokens,
+		ExtraParams: request.ExtraParams,
 	}
 
 	req.SystemPrompt = systemContent
@@ -694,6 +709,11 @@ func cleanJSONString(s string) string {
 	}
 
 	return strings.TrimSpace(s)
+}
+
+// CleanLLMJSONResponse 提供给外部调用的JSON清洗助手
+func CleanLLMJSONResponse(raw string) string {
+	return cleanJSONString(raw)
 }
 
 // GenerateScenarioIdeas 根据初始概念生成场景创意
@@ -1471,4 +1491,28 @@ func (s *LLMService) saveToCache(cacheKey string, response interface{}) {
 		}
 		log.Printf("DEBUG:Save to LLM cache: %s", cacheKey[:8])
 	}
+}
+
+// SanitizeLLMJSONResponse 移除LLM响应中的Markdown代码块或反引号，确保可以解析为JSON
+func SanitizeLLMJSONResponse(raw string) string {
+	cleaned := strings.TrimSpace(raw)
+	if cleaned == "" {
+		return cleaned
+	}
+
+	if strings.HasPrefix(cleaned, "```") {
+		cleaned = strings.TrimPrefix(cleaned, "```")
+		cleaned = strings.TrimSpace(cleaned)
+		lower := strings.ToLower(cleaned)
+		if strings.HasPrefix(lower, "json") {
+			cleaned = strings.TrimSpace(cleaned[4:])
+		}
+		if idx := strings.LastIndex(cleaned, "```"); idx != -1 {
+			cleaned = cleaned[:idx]
+		}
+	}
+
+	cleaned = strings.TrimSpace(cleaned)
+	cleaned = strings.Trim(cleaned, "`")
+	return strings.TrimSpace(cleaned)
 }
