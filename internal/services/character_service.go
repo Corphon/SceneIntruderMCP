@@ -145,7 +145,7 @@ func (s *CharacterService) GenerateResponse(sceneID, characterID, userMessage st
 		resp, err := s.LLMService.CreateChatCompletion(
 			context.Background(),
 			ChatCompletionRequest{
-				Model: "gpt-4", // 使用配置或默认模型
+				Model: s.LLMService.GetDefaultModel(), // 使用配置或服务默认模型
 				Messages: []ChatCompletionMessage{
 					{
 						Role:    "system",
@@ -175,13 +175,13 @@ func (s *CharacterService) GenerateResponse(sceneID, characterID, userMessage st
 	}
 
 	// 添加到对话记录
-	err = s.ContextService.AddConversation(sceneID, "user", userMessage, nil)
+	err = s.ContextService.AddConversation(sceneID, "user", userMessage, nil, "")
 	if err != nil {
 		// 记录失败不影响响应
 		fmt.Printf("记录用户对话失败: %v\n", err)
 	}
 
-	err = s.ContextService.AddConversation(sceneID, characterID, characterResponse, nil)
+	err = s.ContextService.AddConversation(sceneID, characterID, characterResponse, nil, "")
 	if err != nil {
 		fmt.Printf("记录角色回应失败: %v\n", err)
 	}
@@ -328,7 +328,7 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 	// Create a context with timeout for the LLM call
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	
+
 	// 调用LLM服务
 	var emotionalData models.EmotionalResponse
 	err = s.LLMService.CreateStructuredCompletion(
@@ -366,6 +366,7 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 		"user",  // 用户作为发言者
 		message, // 用户消息内容
 		nil,     // 用户消息无需情感数据
+		"",
 	)
 	if err != nil {
 		if isEnglish {
@@ -381,6 +382,7 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 		characterID,            // 角色作为发言者
 		emotionalData.Response, // 角色回应内容
 		metadata,               // 情感相关元数据
+		"",
 	)
 	if err != nil {
 		if isEnglish {
@@ -402,9 +404,9 @@ func (s *CharacterService) GetCharacter(sceneID, characterID string) (*models.Ch
 	}
 
 	// 从缓存的角色映射中获取角色
-	s.cacheMutex.RLock()  // Add read lock for thread safety
+	s.cacheMutex.RLock() // Add read lock for thread safety
 	character, exists := cachedData.Characters[characterID]
-	s.cacheMutex.RUnlock()  // Release read lock
+	s.cacheMutex.RUnlock() // Release read lock
 
 	if !exists {
 		return nil, fmt.Errorf("角色不存在: %s", characterID)
@@ -612,10 +614,10 @@ func (s *CharacterService) GenerateResponseWithEmotionFormat(sceneID, characterI
 	}
 
 	// 先添加用户消息
-	s.ContextService.AddConversation(sceneID, "user", userMessage, nil)
+	s.ContextService.AddConversation(sceneID, "user", userMessage, nil, "")
 
 	// 添加角色回应
-	s.ContextService.AddConversation(sceneID, characterID, emotionData.Text, metadata)
+	s.ContextService.AddConversation(sceneID, characterID, emotionData.Text, metadata, "")
 
 	// 返回带情绪的回应
 	return &ChatResponseWithEmotion{
@@ -776,7 +778,7 @@ func (s *CharacterService) GenerateCharacterInteraction(
 	// Create a context with timeout for the LLM call
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	
+
 	// 使用结构化输出
 	var dialogues []models.InteractionDialogue
 	err = s.LLMService.CreateStructuredCompletion(
@@ -812,10 +814,10 @@ func (s *CharacterService) GenerateCharacterInteraction(
 						break
 					}
 				}
-				
+
 				if !found {
-					return nil, fmt.Errorf("无法找到匹配的角色: %s，可用角色: %v", 
-						dialogues[i].CharacterName, 
+					return nil, fmt.Errorf("无法找到匹配的角色: %s，可用角色: %v",
+						dialogues[i].CharacterName,
 						getCharacterNames(characters))
 				}
 			}
@@ -851,6 +853,7 @@ func (s *CharacterService) GenerateCharacterInteraction(
 			dialogue.CharacterID,
 			dialogue.Message,
 			metadata,
+			"",
 		)
 
 		if err != nil {
@@ -964,7 +967,7 @@ func (s *CharacterService) SimulateCharactersConversation(
 	// Create a context with timeout for the LLM call
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	
+
 	// 使用结构化输出
 	var dialogues []models.InteractionDialogue
 	err = s.LLMService.CreateStructuredCompletion(
@@ -1015,6 +1018,7 @@ func (s *CharacterService) SimulateCharactersConversation(
 			dialogue.CharacterID,
 			dialogue.Message,
 			metadata,
+			"",
 		)
 
 		if err != nil {
