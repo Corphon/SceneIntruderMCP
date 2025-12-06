@@ -3,6 +3,7 @@ package services
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,6 +121,197 @@ func (s *ContextService) GetRecentConversations(sceneID string, limit int) ([]mo
 	return conversations[len(conversations)-limit:], nil
 }
 
+// GetRecentConsoleStoryEntries 获取最近的 console_story 内容
+func (s *ContextService) GetRecentConsoleStoryEntries(sceneID string, limit int) ([]models.Conversation, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	sceneData, err := s.loadSceneDataSafe(sceneID)
+	if err != nil {
+		return nil, err
+	}
+	conversations := sceneData.Context.Conversations
+	if len(conversations) == 0 {
+		return []models.Conversation{}, nil
+	}
+	target := limit * 2
+	filtered := make([]models.Conversation, 0, target)
+	for i := len(conversations) - 1; i >= 0 && len(filtered) < target; i-- {
+		conv := conversations[i]
+		if isStoryConsoleConversation(conv) {
+			filtered = append(filtered, conv)
+		}
+	}
+	for i, j := 0, len(filtered)-1; i < j; i, j = i+1, j-1 {
+		filtered[i], filtered[j] = filtered[j], filtered[i]
+	}
+	return filtered, nil
+}
+
+func isStoryConsoleConversation(conv models.Conversation) bool {
+	if conv.Metadata != nil {
+		if convType, ok := conv.Metadata["conversation_type"].(string); ok && strings.EqualFold(convType, "story_console") {
+			return true
+		}
+	}
+	return strings.HasPrefix(conv.SpeakerID, "console_")
+}
+
+func isStoryConsoleUserConversation(conv models.Conversation) bool {
+	if conv.Metadata != nil {
+		if convType, ok := conv.Metadata["conversation_type"].(string); ok && strings.EqualFold(convType, "story_console") {
+			if channel, ok := conv.Metadata["channel"].(string); ok && strings.EqualFold(channel, "user") {
+				return true
+			}
+		}
+	}
+	speaker := strings.ToLower(strings.TrimSpace(conv.SpeakerID))
+	return speaker == "web_user" || speaker == "user"
+}
+
+func resolveConversationNodeID(conv models.Conversation) string {
+	if trimmed := strings.TrimSpace(conv.NodeID); trimmed != "" {
+		return trimmed
+	}
+	if conv.Metadata != nil {
+		if raw, ok := conv.Metadata["node_id"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+// GetConsoleStoryEntriesByNode 获取指定节点的 console_story 内容
+func (s *ContextService) GetConsoleStoryEntriesByNode(sceneID, nodeID string, limit int) ([]models.Conversation, error) {
+	if limit <= 0 {
+		limit = 3
+	}
+	sceneData, err := s.loadSceneDataSafe(sceneID)
+	if err != nil {
+		return nil, err
+	}
+	conversations := sceneData.Context.Conversations
+	if len(conversations) == 0 || strings.TrimSpace(nodeID) == "" {
+		return []models.Conversation{}, nil
+	}
+	result := make([]models.Conversation, 0, limit)
+	for i := len(conversations) - 1; i >= 0 && len(result) < limit; i-- {
+		conv := conversations[i]
+		if !isStoryConsoleConversation(conv) {
+			continue
+		}
+		if resolveConversationNodeID(conv) != nodeID {
+			continue
+		}
+		result = append(result, conv)
+	}
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result, nil
+}
+
+// GetUserStoryCommandsByNode 获取指定节点下最新的玩家指令
+func (s *ContextService) GetUserStoryCommandsByNode(sceneID, nodeID string, limit int) ([]models.Conversation, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	sceneData, err := s.loadSceneDataSafe(sceneID)
+	if err != nil {
+		return nil, err
+	}
+	conversations := sceneData.Context.Conversations
+	if len(conversations) == 0 || strings.TrimSpace(nodeID) == "" {
+		return []models.Conversation{}, nil
+	}
+	result := make([]models.Conversation, 0, limit)
+	for i := len(conversations) - 1; i >= 0 && len(result) < limit; i-- {
+		conv := conversations[i]
+		if !isStoryConsoleUserConversation(conv) {
+			continue
+		}
+		if resolveConversationNodeID(conv) != nodeID {
+			continue
+		}
+		result = append(result, conv)
+	}
+	for i, j := 0, len(result)-1; i < j; i, j = i+1, j-1 {
+		result[i], result[j] = result[j], result[i]
+	}
+	return result, nil
+}
+
+// RemoveConversationsAfterNode 移除指定节点之后的旁白/用户对话，防止回溯后残留上下文
+func (s *ContextService) RemoveConversationsAfterNode(sceneID string, removedNodeIDs []string, cutoff time.Time) error {
+	lock := s.getSceneLock(sceneID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		return err
+	}
+
+	removeLookup := make(map[string]struct{}, len(removedNodeIDs))
+	for _, id := range removedNodeIDs {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			removeLookup[id] = struct{}{}
+		}
+	}
+
+	original := sceneData.Context.Conversations
+	filtered := make([]models.Conversation, 0, len(original))
+	for _, conv := range original {
+		if _, exists := removeLookup[resolveConversationNodeID(conv)]; exists {
+			continue
+		}
+		if !cutoff.IsZero() && conv.Timestamp.After(cutoff) {
+			// 仅移除旁白 / 玩家控制台对话，保留角色互动
+			if isStoryConsoleConversation(conv) || (conv.Metadata != nil && conv.Metadata["conversation_type"] == "story_console") {
+				continue
+			}
+		}
+		filtered = append(filtered, conv)
+	}
+
+	if len(filtered) == len(original) {
+		return nil
+	}
+
+	sceneData.Context.Conversations = filtered
+	if err := s.SceneService.UpdateContext(sceneID, &sceneData.Context); err != nil {
+		return err
+	}
+
+	s.InvalidateSceneCache(sceneID)
+	return nil
+}
+
+// HasUserStoryCommands 判断指定节点是否存在玩家指令
+func (s *ContextService) HasUserStoryCommands(sceneID, nodeID string) bool {
+	sceneData, err := s.loadSceneDataSafe(sceneID)
+	if err != nil {
+		return false
+	}
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return false
+	}
+	for i := len(sceneData.Context.Conversations) - 1; i >= 0; i-- {
+		conv := sceneData.Context.Conversations[i]
+		if resolveConversationNodeID(conv) != nodeID {
+			continue
+		}
+		if isStoryConsoleUserConversation(conv) {
+			return true
+		}
+	}
+	return false
+}
+
 // BuildCharacterMemory 构建角色记忆
 func (s *ContextService) BuildCharacterMemory(sceneID, characterID string) (string, error) {
 	// 使用缓存加载场景数据
@@ -149,7 +341,7 @@ func (s *ContextService) BuildCharacterMemory(sceneID, characterID string) (stri
 }
 
 // AddConversation 添加对话到场景上下文，支持角色间对话记录
-func (s *ContextService) AddConversation(sceneID, speakerID, content string, metadata map[string]interface{}) error {
+func (s *ContextService) AddConversation(sceneID, speakerID, content string, metadata map[string]interface{}, nodeID string) error {
 	lock := s.getSceneLock(sceneID)
 	lock.Lock()
 	defer lock.Unlock()
@@ -160,28 +352,43 @@ func (s *ContextService) AddConversation(sceneID, speakerID, content string, met
 		return err
 	}
 
+	var metaCopy map[string]interface{}
+	if metadata != nil {
+		metaCopy = make(map[string]interface{}, len(metadata)+1)
+		for k, v := range metadata {
+			metaCopy[k] = v
+		}
+	}
+	if metaCopy == nil {
+		metaCopy = make(map[string]interface{})
+	}
+	if nodeID != "" {
+		metaCopy["node_id"] = nodeID
+	}
+
 	// 创建新对话
 	conversation := models.Conversation{
 		ID:        fmt.Sprintf("conv_%d", time.Now().UnixNano()),
 		SceneID:   sceneID,
 		SpeakerID: speakerID,
+		NodeID:    nodeID,
 		Content:   content,
 		Timestamp: time.Now(),
-		Metadata:  metadata,
+		Metadata:  metaCopy,
 	}
 
 	// 检查是否是角色互动对话
-	if metadata != nil {
-		if interactionID, ok := metadata["interaction_id"].(string); ok {
+	if len(conversation.Metadata) > 0 {
+		if interactionID, ok := conversation.Metadata["interaction_id"].(string); ok {
 			conversation.Metadata["conversation_type"] = "character_interaction"
 			conversation.Metadata["interaction_id"] = interactionID
-		} else if simulationID, ok := metadata["simulation_id"].(string); ok {
+		} else if simulationID, ok := conversation.Metadata["simulation_id"].(string); ok {
 			conversation.Metadata["conversation_type"] = "character_simulation"
 			conversation.Metadata["simulation_id"] = simulationID
 		}
 
 		// 记录目标接收者（如果有）
-		if targetID, ok := metadata["target_character_id"].(string); ok {
+		if targetID, ok := conversation.Metadata["target_character_id"].(string); ok {
 			conversation.Metadata["target_character_id"] = targetID
 		}
 	}
