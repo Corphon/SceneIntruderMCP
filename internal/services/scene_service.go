@@ -3,6 +3,7 @@ package services
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
@@ -19,11 +21,13 @@ import (
 
 // SceneData 包含场景及其相关数据
 type SceneData struct {
-	Scene      models.Scene         `json:"scene"`
-	Context    models.SceneContext  `json:"context"`
-	Settings   models.SceneSettings `json:"settings"`
-	Characters []*models.Character  `json:"characters"`
-	Items      []*models.Item       `json:"items"`
+	Scene            models.Scene             `json:"scene"`
+	Context          models.SceneContext      `json:"context"`
+	Settings         models.SceneSettings     `json:"settings"`
+	Characters       []*models.Character      `json:"characters"`
+	Items            []*models.Item           `json:"items"`
+	OriginalText     string                   `json:"original_text,omitempty"`
+	OriginalSegments []models.OriginalSegment `json:"original_segments,omitempty"`
 }
 
 // SceneService 处理场景相关的业务逻辑
@@ -370,12 +374,16 @@ func (s *SceneService) LoadScene(sceneID string) (*SceneData, error) {
 
 	// 构建完整的 SceneData
 	sceneData := &SceneData{
-		Scene:      scene,
-		Context:    context,
-		Settings:   settings,
-		Characters: characters,
-		Items:      items,
+		Scene:            scene,
+		Context:          context,
+		Settings:         settings,
+		Characters:       characters,
+		Items:            items,
+		OriginalText:     s.loadOriginalText(sceneID, &scene),
+		OriginalSegments: s.loadOriginalSegments(sceneID),
 	}
+
+	s.ensureOriginalSegments(sceneID, sceneData)
 
 	// 更新缓存
 	s.cacheMutex.Lock()
@@ -423,8 +431,9 @@ func (s *SceneService) loadCharactersCached(sceneID string) ([]*models.Character
 				continue
 			}
 
-			// 将加载的角色添加到切片中
-			characters = append(characters, &character)
+			// 将加载的角色添加到切片中（确保指针唯一）
+			characterCopy := character
+			characters = append(characters, &characterCopy)
 		}
 	}
 
@@ -777,6 +786,9 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 
 	analysisResult, err := analyzerService.AnalyzeText(text, title)
 	if err != nil {
+		if errors.Is(err, ErrLLMNotReady) {
+			return nil, ErrLLMNotReady
+		}
 		return nil, fmt.Errorf("分析文本失败: %w", err)
 	}
 
@@ -833,8 +845,8 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 	}
 
 	// 创建场景目录
-	scenePath := filepath.Join(s.BasePath, sceneID)
-	if err := os.MkdirAll(scenePath, 0755); err != nil {
+	sceneDir := filepath.Join(s.BasePath, sceneID)
+	if err := os.MkdirAll(sceneDir, 0755); err != nil {
 		return nil, fmt.Errorf("创建场景目录失败: %w", err)
 	}
 
@@ -844,9 +856,19 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 		return nil, fmt.Errorf("序列化场景数据失败: %w", err)
 	}
 
-	scenePath = filepath.Join(s.BasePath, sceneID, "scene.json")
+	scenePath := filepath.Join(sceneDir, "scene.json")
 	if err := os.WriteFile(scenePath, sceneDataJSON, 0644); err != nil {
 		return nil, fmt.Errorf("保存场景数据失败: %w", err)
+	}
+
+	if err := s.saveOriginalText(sceneDir, text); err != nil {
+		return nil, err
+	}
+
+	if len(analysisResult.OriginalSegments) > 0 {
+		if err := s.saveOriginalSegments(sceneDir, analysisResult.OriginalSegments); err != nil {
+			log.Printf("警告: 保存原文片段失败: %v", err)
+		}
 	}
 
 	// 保存角色数据
@@ -916,6 +938,172 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 	s.invalidateListCache()
 
 	return scene, nil
+}
+
+func (s *SceneService) saveOriginalText(sceneDir, text string) error {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
+	}
+	path := filepath.Join(sceneDir, "original.txt")
+	if err := os.WriteFile(path, []byte(text), 0644); err != nil {
+		return fmt.Errorf("保存原始文本失败: %w", err)
+	}
+	return nil
+}
+
+func (s *SceneService) loadOriginalText(sceneID string, scene *models.Scene) string {
+	if sceneID != "" {
+		primary := filepath.Join(s.BasePath, sceneID, "original.txt")
+		if data, err := os.ReadFile(primary); err == nil {
+			return string(data)
+		}
+	}
+
+	if scene == nil {
+		return ""
+	}
+
+	if content := s.tryReadSourceFile(scene.Source); content != "" {
+		return content
+	}
+	if content := s.tryReadTemplateByTitle(scene.Title); content != "" {
+		return content
+	}
+	if text := strings.TrimSpace(scene.Summary); text != "" {
+		return text
+	}
+	if text := strings.TrimSpace(scene.Description); text != "" {
+		return text
+	}
+	return ""
+}
+
+func (s *SceneService) saveOriginalSegments(sceneDir string, segments []models.OriginalSegment) error {
+	if len(segments) == 0 {
+		return nil
+	}
+	data, err := json.MarshalIndent(segments, "", "  ")
+	if err != nil {
+		return fmt.Errorf("序列化原文片段失败: %w", err)
+	}
+	path := filepath.Join(sceneDir, "original_segments.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("保存原文片段失败: %w", err)
+	}
+	return nil
+}
+
+func (s *SceneService) loadOriginalSegments(sceneID string) []models.OriginalSegment {
+	if sceneID == "" {
+		return nil
+	}
+	path := filepath.Join(s.BasePath, sceneID, "original_segments.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var segments []models.OriginalSegment
+	if err := json.Unmarshal(data, &segments); err != nil {
+		log.Printf("警告: 解析原文片段失败 (%s): %v", sceneID, err)
+		return nil
+	}
+	for i := range segments {
+		segments[i].Index = i
+	}
+	return segments
+}
+
+func (s *SceneService) ensureOriginalSegments(sceneID string, sceneData *SceneData) {
+	if sceneData == nil || len(sceneData.OriginalSegments) > 0 {
+		return
+	}
+	baseText := strings.TrimSpace(sceneData.OriginalText)
+	if baseText == "" {
+		baseText = strings.TrimSpace(sceneData.Scene.Summary)
+	}
+	if baseText == "" {
+		baseText = strings.TrimSpace(sceneData.Scene.Description)
+	}
+	if baseText == "" {
+		return
+	}
+	isEnglish := isEnglishText(sceneData.Scene.Title + " " + baseText)
+	segments := generateSegmentsFromText(baseText, isEnglish)
+	if len(segments) == 0 {
+		return
+	}
+	sceneDir := filepath.Join(s.BasePath, sceneID)
+	if err := os.MkdirAll(sceneDir, 0755); err != nil {
+		log.Printf("警告: 自动创建场景目录失败 (%s): %v", sceneID, err)
+		return
+	}
+	if err := s.saveOriginalSegments(sceneDir, segments); err != nil {
+		log.Printf("警告: 自动保存原文片段失败 (%s): %v", sceneID, err)
+		return
+	}
+	sceneData.OriginalSegments = segments
+}
+
+func (s *SceneService) tryReadSourceFile(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return ""
+	}
+	clean := filepath.Clean(source)
+	normalized := filepath.ToSlash(clean)
+	if !strings.Contains(normalized, "scenes/create") {
+		return ""
+	}
+	candidate := clean
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Clean(candidate)
+	}
+	if data, err := os.ReadFile(candidate); err == nil {
+		return string(data)
+	}
+	alt := filepath.Join("scenes", "create", filepath.Base(clean))
+	if data, err := os.ReadFile(alt); err == nil {
+		return string(data)
+	}
+	return ""
+}
+
+func (s *SceneService) tryReadTemplateByTitle(title string) string {
+	sanitized := sanitizeSceneFileName(title)
+	if sanitized == "" {
+		return ""
+	}
+	path := filepath.Join("scenes", "create", sanitized+".txt")
+	if data, err := os.ReadFile(path); err == nil {
+		return string(data)
+	}
+	return ""
+}
+
+func sanitizeSceneFileName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	var builder strings.Builder
+	for _, r := range name {
+		switch {
+		case r == '-' || r == '_':
+			builder.WriteRune(r)
+		case r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r >= 'a' && r <= 'z':
+			builder.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			builder.WriteRune(r)
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			builder.WriteRune(r)
+		default:
+			builder.WriteRune('_')
+		}
+	}
+	return strings.Trim(builder.String(), "_")
 }
 
 // CreateSceneWithCharacters 创建带有角色的场景
