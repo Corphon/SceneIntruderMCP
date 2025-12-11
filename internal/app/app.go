@@ -100,6 +100,15 @@ func InitServices() error {
 
 	// 4. 高级服务（依赖前面的服务）
 	storyService := services.NewStoryService(llmService)
+	// 复用统一的场景/上下文/角色/物品服务，避免 storyService 内部自建导致缓存与数据源分叉
+	storyService.SceneService = sceneService
+	storyService.ContextService = contextService
+	storyService.ItemService = itemService
+	storyService.CharacterService = characterService
+	storyService.BasePath = cfg.DataDir + "/stories"
+	if fs, err := storage.NewFileStorage(storyService.BasePath); err == nil {
+		storyService.FileStorage = fs
+	}
 	container.Register("story", storyService)
 
 	analyzerService := services.NewAnalyzerServiceWithLLMService(llmService)
@@ -175,8 +184,29 @@ func ReinitializeLLMService() error {
 	analyzerService := services.NewAnalyzerServiceWithLLMService(llmService)
 	container.Register("analyzer", analyzerService)
 
-	// 重新创建依赖LLM服务的Story服务
+	// 重新创建依赖LLM服务的Story服务并复用已有依赖，保持缓存与锁一致
 	storyService := services.NewStoryService(llmService)
+	if sceneSvc, ok := container.Get("scene").(*services.SceneService); ok {
+		storyService.SceneService = sceneSvc
+	}
+	if ctxSvc, ok := container.Get("context").(*services.ContextService); ok {
+		storyService.ContextService = ctxSvc
+	}
+	if itemSvc, ok := container.Get("item").(*services.ItemService); ok {
+		storyService.ItemService = itemSvc
+	}
+	if charSvc, ok := container.Get("character").(*services.CharacterService); ok {
+		storyService.CharacterService = charSvc
+	}
+	cfg := config.GetCurrentConfig()
+	if cfg != nil {
+		storyService.BasePath = cfg.DataDir + "/stories"
+	}
+	if storyService.BasePath != "" {
+		if fs, err := storage.NewFileStorage(storyService.BasePath); err == nil {
+			storyService.FileStorage = fs
+		}
+	}
 	container.Register("story", storyService)
 
 	return nil
