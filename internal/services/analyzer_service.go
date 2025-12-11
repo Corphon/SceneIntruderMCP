@@ -140,9 +140,10 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 
 	// 并行提取（使用 goroutine）
 	var wg sync.WaitGroup
-	var sceneErr, charErr, itemErr, summaryErr error
+	var sceneErr, charErr, itemErr, locErr, summaryErr error
 	var scenes []models.Scene
 	var items []models.Item
+	var locations []models.Location
 	var summary string
 
 	// 提取场景
@@ -181,6 +182,18 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 		items = i
 	}()
 
+	// 提取地点
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		locs, err := s.extractLocations(text, title)
+		if err != nil {
+			locErr = err
+			return
+		}
+		locations = locs
+	}()
+
 	// 生成摘要
 	wg.Add(1)
 	go func() {
@@ -206,6 +219,9 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 	if itemErr != nil {
 		return nil, fmt.Errorf("提取物品失败: %w", itemErr)
 	}
+	if locErr != nil {
+		return nil, fmt.Errorf("提取地点失败: %w", locErr)
+	}
 	if summaryErr != nil {
 		// 摘要生成失败不是致命错误
 		result.Summary = "无法生成摘要。"
@@ -214,6 +230,7 @@ func (s *AnalyzerService) AnalyzeText(text, title string) (*models.AnalysisResul
 	// 安全地设置结果 - characters are already set in the goroutine above
 	result.Scenes = scenes
 	result.Items = items
+	result.Locations = locations
 	result.Summary = summary
 	if segments := s.buildOriginalSegmentsFromText(text, title); len(segments) > 0 {
 		result.OriginalSegments = segments
@@ -385,6 +402,87 @@ Text to analyze:
 	}
 
 	return items, nil
+}
+
+// 提取地点信息
+func (s *AnalyzerService) extractLocations(text, title string) ([]models.Location, error) {
+	type LocationInfo struct {
+		Name         string `json:"name"`
+		Description  string `json:"description"`
+		Accessible   bool   `json:"accessible"`
+		RequiresItem string `json:"requires_item"`
+	}
+
+	isEnglish := isEnglishText(text + " " + title)
+
+	var systemPrompt, prompt string
+	if isEnglish {
+		systemPrompt = "You extract structured location data. Output only valid JSON that matches the schema."
+		prompt = fmt.Sprintf(`From the text titled "%s", list every key location as a JSON array:
+[
+  {"name": string, "description": string, "accessible": true|false, "requires_item": string}
+]
+
+Rules:
+- Only output the JSON array, no markdown.
+- Include notable rooms, areas, and landmarks.
+- Fill missing fields with defaults: description "", requires_item "", accessible true if unknown.
+
+Text:
+%s`, title, truncateText(text, 5000))
+	} else {
+		systemPrompt = "你负责提取地点数据，只能输出符合结构的 JSON。"
+		prompt = fmt.Sprintf(`基于标题为《%s》的文本，提取所有关键地点，按以下 JSON 数组返回：
+[
+  {"name": "名称", "description": "描述", "accessible": true|false, "requires_item": "需要的物品，可为空"}
+]
+
+要求：
+- 仅输出 JSON 数组，不要添加其它文字。
+- 包含重要区域、房间、地标。
+- 缺失信息用空字符串表示，无法判断可进入则设为 true。
+
+文本：
+%s`, title, truncateText(text, 5000))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+
+	var locInfos []LocationInfo
+	if err := s.LLMService.CreateStructuredCompletion(ctx, prompt, systemPrompt, &locInfos); err != nil {
+		return nil, fmt.Errorf("解析地点列表失败: %w", err)
+	}
+
+	locations := make([]models.Location, 0, len(locInfos))
+	for _, info := range locInfos {
+		if strings.TrimSpace(info.Name) == "" {
+			continue
+		}
+		requires := strings.TrimSpace(info.RequiresItem)
+		if info.Accessible {
+			requires = "" // 若可访问则忽略需求
+		}
+		locations = append(locations, models.Location{
+			Name:        strings.TrimSpace(info.Name),
+			Description: strings.TrimSpace(info.Description),
+			// Accessible/RequiresItem 在 Location 模型中暂无字段，保留在描述中供后续使用
+		})
+		if !info.Accessible || requires != "" {
+			// 在描述中追加进入条件，避免丢失信息
+			idx := len(locations) - 1
+			if locations[idx].Description != "" {
+				locations[idx].Description += " "
+			}
+			if isEnglish {
+				locations[idx].Description += fmt.Sprintf("(access: %v, requires: %s)", info.Accessible, requires)
+			} else {
+				locations[idx].Description += fmt.Sprintf("（可进入：%v，需要物品：%s）", info.Accessible, requires)
+			}
+		}
+	}
+
+	return locations, nil
 }
 
 // 生成故事摘要
