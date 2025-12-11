@@ -171,7 +171,7 @@ func (s *StoryService) InitializeStoryForSceneFull(sceneID string, preferences *
 }
 
 func (s *StoryService) initializeStoryForSceneLegacy(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 	if err != nil {
 		return nil, fmt.Errorf("加载场景失败: %w", err)
 	}
@@ -193,7 +193,7 @@ func (s *StoryService) initializeStoryForSceneLegacy(sceneID string, preferences
 }
 
 func (s *StoryService) initializeStoryForSceneFast(sceneID string, preferences *models.UserPreferences) (*models.StoryData, error) {
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 	if err != nil {
 		return nil, fmt.Errorf("加载场景失败: %w", err)
 	}
@@ -1289,6 +1289,45 @@ func findNextUnrevealedNode(storyData *models.StoryData) *models.StoryNode {
 	return nil
 }
 
+// markRevealedFromConversations 根据 context.json 中的 story_original / story_console 记录，标记节点为已揭示（用于内存态，保持 story.json 不变）
+func markRevealedFromConversations(convs []models.Conversation, storyData *models.StoryData) {
+	if storyData == nil || len(convs) == 0 {
+		return
+	}
+
+	revealed := make(map[string]struct{})
+	for _, conv := range convs {
+		convType := ""
+		if conv.Metadata != nil {
+			if val, ok := conv.Metadata["conversation_type"].(string); ok {
+				convType = strings.ToLower(strings.TrimSpace(val))
+			}
+		}
+		speaker := strings.ToLower(strings.TrimSpace(conv.SpeakerID))
+		if convType == "" && speaker == "story" {
+			convType = "story_original"
+		}
+		if convType != "story_original" && convType != "story_console" {
+			continue
+		}
+		nodeID := resolveConversationNodeID(conv)
+		if nodeID == "" {
+			continue
+		}
+		revealed[nodeID] = struct{}{}
+	}
+
+	if len(revealed) == 0 {
+		return
+	}
+
+	for i := range storyData.Nodes {
+		if _, ok := revealed[storyData.Nodes[i].ID]; ok {
+			storyData.Nodes[i].IsRevealed = true
+		}
+	}
+}
+
 func findLatestRevealedNode(storyData *models.StoryData) *models.StoryNode {
 	if storyData == nil {
 		return nil
@@ -1960,7 +1999,7 @@ func (s *StoryService) fetchRecentConsoleStoryEntries(sceneID string, limit int)
 		}
 	}
 	if len(source) == 0 {
-		sceneData, err := s.SceneService.LoadScene(sceneID)
+		sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 		if err != nil {
 			log.Printf("scene load failed for context fallback %s: %v", sceneID, err)
 			return nil
@@ -2376,10 +2415,57 @@ func (s *StoryService) GetStoryData(sceneID string, preferences *models.UserPref
 		storyData = &tempData
 		s.ensureNodeRelatedItems(sceneID, storyData, nil)
 		s.ensureNodeLocations(storyData)
+		s.applyContextReveals(sceneID, storyData)
 		return nil
 	})
 
 	return storyData, err
+}
+
+// applyContextReveals 根据 context.json 中的 story_original / story_console 记录，标记对应节点为已揭示（仅返回给客户端，不写回文件）
+func (s *StoryService) applyContextReveals(sceneID string, storyData *models.StoryData) {
+	if s.SceneService == nil || storyData == nil {
+		return
+	}
+
+	sceneData, err := s.SceneService.LoadScene(sceneID)
+	if err != nil {
+		log.Printf("warning: load scene failed when applying context reveals for %s: %v", sceneID, err)
+		return
+	}
+
+	revealed := make(map[string]struct{})
+	for _, conv := range sceneData.Context.Conversations {
+		convType := ""
+		if conv.Metadata != nil {
+			if val, ok := conv.Metadata["conversation_type"].(string); ok {
+				convType = strings.ToLower(strings.TrimSpace(val))
+			}
+		}
+		speaker := strings.ToLower(strings.TrimSpace(conv.SpeakerID))
+		if convType == "" && speaker == "story" {
+			convType = "story_original"
+		}
+
+		if convType != "story_original" && convType != "story_console" {
+			continue
+		}
+		nodeID := resolveConversationNodeID(conv)
+		if nodeID == "" {
+			continue
+		}
+		revealed[nodeID] = struct{}{}
+	}
+
+	if len(revealed) == 0 {
+		return
+	}
+
+	for i := range storyData.Nodes {
+		if _, ok := revealed[storyData.Nodes[i].ID]; ok {
+			storyData.Nodes[i].IsRevealed = true
+		}
+	}
 }
 
 // GetStoryForScene 获取指定场景的故事数据
@@ -2388,6 +2474,7 @@ func (s *StoryService) GetStoryForScene(sceneID string) (*models.StoryData, erro
 	if err != nil {
 		return nil, fmt.Errorf("加载故事数据失败: %w", err)
 	}
+	s.applyContextReveals(sceneID, storyData)
 	return storyData, nil
 }
 
@@ -2482,7 +2569,7 @@ func (s *StoryService) updateStoryState(storyData *models.StoryData) {
 // generateNextStoryNodeWithData 根据当前节点和选择生成下一个故事节点（接受已读取的数据）
 func (s *StoryService) generateNextStoryNodeWithData(sceneID string, currentNode *models.StoryNode, selectedChoice *models.StoryChoice, preferences *models.UserPreferences, storyData *models.StoryData) (*models.StoryNode, error) {
 	// 加载场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 	if err != nil {
 		return nil, err
 	}
@@ -3007,7 +3094,7 @@ func (s *StoryService) ExploreLocation(sceneID, locationID string, preferences *
 		}
 
 		// 加载场景数据
-		sceneData, err := s.SceneService.LoadScene(sceneID)
+		sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 		if err != nil {
 			return err
 		}
@@ -3314,6 +3401,19 @@ func (s *StoryService) ensureNodeLocations(storyData *models.StoryData) {
 				}
 			}
 		}
+
+		// 尝试根据地点名称匹配节点文本，推断更准确的位置
+		if match := matchStoryLocationByContent(storyData.Locations, node.Content, node.OriginalContent); match != nil {
+			currentLocation = match
+			if node.Metadata == nil {
+				node.Metadata = make(map[string]interface{})
+			}
+			node.Metadata["current_location_id"] = match.ID
+			if name := strings.TrimSpace(match.Name); name != "" {
+				node.Metadata["current_location_name"] = name
+			}
+			continue
+		}
 		if currentLocation == nil {
 			currentLocation = s.defaultLocationCandidate(storyData)
 			if currentLocation == nil {
@@ -3402,6 +3502,41 @@ func matchStoryLocationByHint(locations []models.StoryLocation, hint string) *mo
 			return &locations[i]
 		}
 	}
+	return nil
+}
+
+func matchStoryLocationByContent(locations []models.StoryLocation, contents ...string) *models.StoryLocation {
+	if len(locations) == 0 {
+		return nil
+	}
+
+	var merged strings.Builder
+	for _, content := range contents {
+		trimmed := strings.ToLower(strings.TrimSpace(content))
+		if trimmed == "" {
+			continue
+		}
+		if merged.Len() > 0 {
+			merged.WriteByte(' ')
+		}
+		merged.WriteString(trimmed)
+	}
+
+	total := merged.String()
+	if total == "" {
+		return nil
+	}
+
+	for i := range locations {
+		name := strings.ToLower(strings.TrimSpace(locations[i].Name))
+		if name == "" {
+			continue
+		}
+		if strings.Contains(total, name) {
+			return &locations[i]
+		}
+	}
+
 	return nil
 }
 
@@ -3685,17 +3820,12 @@ func (s *StoryService) UpdateNodeChoices(sceneID, nodeID string, choices []model
 	})
 }
 
-const (
-	advanceModeRevealOnly    = "reveal_only"
-	advanceModeCommandFollow = "command_followup"
-	advanceModeCompletion    = "completion"
-)
-
 // AdvanceStory 推进故事情节
 func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPreferences) (*models.StoryUpdate, error) {
 	var storyUpdate *models.StoryUpdate
 
 	err := s.lockManager.ExecuteWithSceneLock(sceneID, func() error {
+		// 只读加载 story.json
 		storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
 		if _, err := os.Stat(storyPath); os.IsNotExist(err) {
 			return fmt.Errorf("故事数据不存在")
@@ -3711,168 +3841,113 @@ func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPref
 			return fmt.Errorf("解析故事数据失败: %w", err)
 		}
 
-		sceneData, err := s.SceneService.LoadScene(sceneID)
+		// 加载场景与上下文（禁用缓存，确保读取最新 context.json 防止覆盖）
+		sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 		if err != nil {
 			return err
 		}
 
-		isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro + " " + storyData.MainObjective)
+		// 根据已记录的 story_original/story_console 先行标记已揭示节点，防止重复推进同一节点
+		markRevealedFromConversations(sceneData.Context.Conversations, &storyData)
 
+		// 找到下一个未揭示节点（仅用于标识，不立即修改 story.json）
 		nextNode := findNextUnrevealedNode(&storyData)
-		generationReason := ""
-		if nextNode == nil {
-			if storyData.Progress >= 100 {
-				generationReason = "progress_complete"
-				log.Printf("story %s reached 100%% progress, generating continuation", sceneID)
-			} else {
-				generationReason = "no_unrevealed_nodes"
-			}
-		}
 
-		currentNode := findLatestRevealedNode(&storyData)
-		advanceMode := advanceModeRevealOnly
-		var pendingCommand *models.Conversation
+		// 若存在下一个节点，先将其原文追加到 context.json（speaker: story，conversation_type: story_original）
+		var nextNodeID string
 		if nextNode != nil {
-			if cmd, err := s.resolvePendingCommand(sceneID, currentNode); err == nil {
-				if cmd != nil {
-					pendingCommand = cmd
-					advanceMode = advanceModeCommandFollow
+			nextNodeID = nextNode.ID
+			snippet := strings.TrimSpace(nextNode.Content)
+			if snippet == "" {
+				snippet = strings.TrimSpace(nextNode.OriginalContent)
+			}
+			if snippet == "" {
+				snippet = fmt.Sprintf("[node %s]", nextNode.ID)
+			}
+			if snippet != "" && s.ContextService != nil {
+				meta := map[string]interface{}{"conversation_type": "story_original", "source": "advance_story"}
+				if err := s.ContextService.AddConversation(sceneID, "story", snippet, meta, nextNode.ID); err != nil {
+					log.Printf("warning: append original node to context failed for %s/%s: %v", sceneID, nextNode.ID, err)
 				}
-			} else {
-				log.Printf("inspect pending command failed for scene %s: %v", sceneID, err)
 			}
 		}
 
-		if generationReason != "" {
-			generatedNode, genErr := s.generateContinuationStory(sceneID, &storyData, preferences, isEnglish, generationReason)
-			if genErr != nil {
-				return genErr
+		// 构建 original_story：串联 story.json 中各节点内容（Content 优先，fallback 为 OriginalContent）
+		var origBuilder strings.Builder
+		for i := range storyData.Nodes {
+			node := storyData.Nodes[i]
+			part := strings.TrimSpace(node.Content) // 只取 content 作为 original_story
+			if part == "" {
+				continue
 			}
-			nextNode = generatedNode
-			if generationReason == "progress_complete" {
-				advanceMode = "completion"
-			}
+			origBuilder.WriteString(fmt.Sprintf("[NODE %s]\n%s\n\n", node.ID, part))
 		}
+		originalStoryText := strings.TrimSpace(origBuilder.String())
 
-		if nextNode == nil {
-			return fmt.Errorf("没有可推进的故事节点")
-		}
-
-		if generationReason != "" {
-			advanceMode = advanceModeCompletion
-			contextSummary := ""
-			contextLimit := 3
-			if generationReason == "progress_complete" {
-				contextLimit = 5
-			}
-			if conversations := s.fetchRecentConsoleStoryEntries(sceneID, contextLimit); len(conversations) > 0 {
-				contextSummary = summarizeConversations(conversations)
-			}
-			if strings.TrimSpace(contextSummary) != "" && strings.TrimSpace(nextNode.OriginalContent) != "" {
-				if rewritten, err := s.rewriteNodeWithContext(nextNode, contextSummary, preferences, isEnglish); err == nil {
-					rewritten = strings.TrimSpace(rewritten)
-					if rewritten != "" {
-						nextNode.Content = rewritten
-						if nextNode.Metadata == nil {
-							nextNode.Metadata = make(map[string]interface{})
-						}
-						nextNode.Metadata["context_applied"] = true
-						nextNode.Metadata["context_summary"] = contextSummary
-						nextNode.Metadata["context_applied_at"] = time.Now().Format(time.RFC3339Nano)
+		// 构建 user_process：从 context.json 收集玩家指令与 console_story（排除 speaker=="story" 的原文条目）
+		var procBuilder strings.Builder
+		if sceneData != nil {
+			for _, conv := range sceneData.Context.Conversations {
+				if strings.ToLower(strings.TrimSpace(conv.SpeakerID)) == "story" {
+					continue
+				}
+				if isStoryConsoleConversation(conv) || isStoryConsoleUserConversation(conv) {
+					content := resolveConversationContent(conv)
+					if content != "" {
+						procBuilder.WriteString(fmt.Sprintf("[%s %s]\n%s\n\n", conv.SpeakerID, resolveConversationNodeID(conv), content))
 					}
-				} else {
-					log.Printf("rewriteNodeWithContext failed for scene %s node %s: %v", sceneID, nextNode.ID, err)
 				}
 			}
 		}
+		userProcessText := strings.TrimSpace(procBuilder.String())
 
-		originalSnippet := strings.TrimSpace(nextNode.Content)
-		if originalSnippet == "" {
-			originalSnippet = strings.TrimSpace(nextNode.OriginalContent)
+		// 组织提示词并调用 LLM 续写
+		var systemPrompt, userPrompt string
+		isEnglish := isEnglishText(sceneData.Scene.Name + " " + storyData.Intro + " " + storyData.MainObjective)
+		if isEnglish {
+			systemPrompt = "You are an assistant who continues stories using the original passages and recent user/process logs. Keep continuity and follow user intent."
+			userPrompt = fmt.Sprintf("Original_story:\n%s\n\nUser_process:\n%s\n\nTask: Using the Original_story as canonical material and the User_process as recent directives/processing, write the next short narrative paragraph that moves the plot forward and respects player intent. Output narrative only, at most 300 words.", originalStoryText, userProcessText)
+		} else {
+			systemPrompt = "你是一个剧情续写助手，需要使用 original_story 与 user_process 按顺序续写，保持连贯并遵循玩家意图。"
+			userPrompt = fmt.Sprintf("original_story:\n%s\n\nuser_process:\n%s\n\n任务：以 original_story 为正典，结合 user_process 中的玩家指令与旁白加工，续写下一段剧情，推动事件发展但保持人物设定一致。仅输出正文，最多400字。", originalStoryText, userProcessText)
 		}
-		narrativeContent := originalSnippet
-		if advanceMode == advanceModeCommandFollow && strings.TrimSpace(originalSnippet) != "" {
-			processingSummary := ""
-			if s.ContextService != nil && currentNode != nil {
-				if entries, err := s.ContextService.GetConsoleStoryEntriesByNode(sceneID, currentNode.ID, 3); err == nil {
-					processingSummary = formatStoryProcessingEntries(entries)
-				} else {
-					log.Printf("failed to load console history for scene %s node %s: %v", sceneID, currentNode.ID, err)
-				}
-			}
-			userCommandSummary := ""
-			if pendingCommand != nil {
-				userCommandSummary = resolveConversationContent(*pendingCommand)
-			}
-			rewritten, rewriteErr := s.rewriteNodeWithProcessing(originalSnippet, processingSummary, userCommandSummary, preferences, isEnglish)
-			if rewriteErr == nil && strings.TrimSpace(rewritten) != "" {
-				narrativeContent = strings.TrimSpace(rewritten)
-				if currentNode != nil && pendingCommand != nil {
-					markCommandAsConsumed(currentNode, pendingCommand.ID)
-				}
-				if pendingCommand != nil {
-					if nextNode.Metadata == nil {
-						nextNode.Metadata = make(map[string]interface{})
-					}
-					nextNode.Metadata["applied_command_id"] = pendingCommand.ID
-				}
-			} else if rewriteErr != nil {
-				log.Printf("rewriteNodeWithProcessing fallback for scene %s node %s: %v", sceneID, nextNode.ID, rewriteErr)
-			}
-		}
-		nextNode.Content = narrativeContent
-		if strings.TrimSpace(narrativeContent) == "" {
-			fallback := strings.TrimSpace(nextNode.Content)
-			if fallback == "" {
-				fallback = strings.TrimSpace(nextNode.OriginalContent)
-			}
-			if fallback == "" {
-				fallback = pickLocale(isEnglish,
-					"(System) Story advanced but no narration was generated.",
-					"【系统提示】剧情已推进，但暂未生成新的正文内容。",
-				)
-			}
-			narrativeContent = fallback
-			nextNode.Content = fallback
-		}
-		if nextNode.Metadata == nil {
-			nextNode.Metadata = make(map[string]interface{})
-		}
-		nextNode.Metadata["advance_mode"] = advanceMode
 
-		nextNode.IsRevealed = true
-		storyData.Progress = calculateProgress(&storyData, nextNode)
-		if storyData.Progress > 100 {
-			storyData.Progress = 100
+		if s.LLMService == nil || !s.LLMService.IsReady() {
+			return fmt.Errorf("LLM服务未就绪，无法续写剧情")
 		}
-		updateStoryState(&storyData, isEnglish)
-		storyData.LastUpdated = time.Now()
-
-		if err := s.saveStoryData(sceneID, &storyData); err != nil {
-			return err
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer cancel()
+		resp, err := s.LLMService.CreateChatCompletion(ctx, ChatCompletionRequest{
+			Model:    s.getLLMModel(preferences),
+			Messages: []ChatCompletionMessage{{Role: "system", Content: systemPrompt}, {Role: "user", Content: userPrompt}},
+		})
+		if err != nil {
+			return fmt.Errorf("LLM 续写失败: %w", err)
 		}
-		s.invalidateStoryCache(sceneID)
+		llmResp := strings.TrimSpace(resp.Choices[0].Message.Content)
 
+		// 将 LLM 返回追加到 context.json，speaker 使用 console_story（绿色标签）
+		if s.ContextService != nil && llmResp != "" {
+			meta := map[string]interface{}{"conversation_type": "story_console", "channel": "ai", "mode": "console_story", "source": "advance_story"}
+			if err := s.ContextService.AddConversation(sceneID, "console_story", llmResp, meta, nextNodeID); err != nil {
+				log.Printf("warning: append LLM response to context failed for %s/%s: %v", sceneID, nextNodeID, err)
+			}
+		}
+
+		// 返回 StoryUpdate，story.json 保持不变
 		storyUpdate = &models.StoryUpdate{
-			ID:        fmt.Sprintf("update_%s_%d", sceneID, time.Now().UnixNano()),
-			SceneID:   sceneID,
-			Title:     nextNode.ID,
-			Content:   narrativeContent,
-			Type:      nextNode.Type,
+			ID:      fmt.Sprintf("update_%s_%d", sceneID, time.Now().UnixNano()),
+			SceneID: sceneID,
+			Title:   nextNodeID,
+			Content: llmResp,
+			Type: func() string {
+				if nextNode != nil {
+					return nextNode.Type
+				}
+				return "continuation"
+			}(),
 			CreatedAt: time.Now(),
-			Source:    nextNode.Source,
-		}
-
-		if s.ContextService != nil && strings.TrimSpace(narrativeContent) != "" {
-			meta := map[string]interface{}{
-				"conversation_type": "story_console",
-				"channel":           "ai",
-				"mode":              "story",
-				"source":            "advance_story",
-			}
-			if err := s.ContextService.AddConversation(sceneID, "story", narrativeContent, meta, nextNode.ID); err != nil {
-				log.Printf("failed to record advance_story conversation for %s/%s: %v", sceneID, nextNode.ID, err)
-			}
+			Source:    models.SourceGenerated,
 		}
 
 		return nil
@@ -4417,28 +4492,31 @@ func (s *StoryService) RewindToNode(sceneID, nodeID string) (*models.StoryData, 
 			return fmt.Errorf("解析故事数据失败: %w", err)
 		}
 
-		// 查找目标节点
+		// 查找目标节点索引
 		var targetNode *models.StoryNode
+		targetIndex := -1
 		for i := range tempStoryData.Nodes {
 			if tempStoryData.Nodes[i].ID == nodeID {
 				targetNode = &tempStoryData.Nodes[i]
+				targetIndex = i
 				break
 			}
 		}
 
-		if targetNode == nil {
+		if targetNode == nil || targetIndex < 0 {
 			return fmt.Errorf("节点不存在或不可回溯")
 		}
 
-		// 标记目标节点之后的所有节点为未揭示
+		// 按节点顺序回溯：目标之后的节点标记为未揭示并重置选择，之前的保持揭示
 		for i := range tempStoryData.Nodes {
 			node := &tempStoryData.Nodes[i]
-			if node.CreatedAt.After(targetNode.CreatedAt) && node.ID != nodeID {
+			if i > targetIndex {
 				node.IsRevealed = false
-				// 重置该节点的所有选择
 				for j := range node.Choices {
 					node.Choices[j].Selected = false
 				}
+			} else {
+				node.IsRevealed = true
 			}
 		}
 
@@ -4487,15 +4565,15 @@ func (s *StoryService) RewindToNode(sceneID, nodeID string) (*models.StoryData, 
 
 // 计算基于指定节点的故事进度
 func calculateProgress(storyData *models.StoryData, referenceNode *models.StoryNode) int {
-	// 计算节点总数和已揭示节点数
-	totalNodes := 0
+	_ = referenceNode
+	// 计算节点总数和已揭示节点数（按当前揭示状态，无需依赖时间戳）
+	totalNodes := len(storyData.Nodes)
 	revealedNodes := 0
 
 	for _, node := range storyData.Nodes {
-		if node.IsRevealed && !node.CreatedAt.After(referenceNode.CreatedAt) {
+		if node.IsRevealed {
 			revealedNodes++
 		}
-		totalNodes++
 	}
 
 	// 如果没有节点，返回0进度
