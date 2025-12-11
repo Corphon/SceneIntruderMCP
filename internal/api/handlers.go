@@ -1188,10 +1188,7 @@ func (h *Handler) InsertStoryNode(c *gin.Context) {
 		content = strings.TrimSpace(node.Content)
 	}
 	if content == "" {
-		content = strings.TrimSpace(node.OriginalContent)
-	}
-	if content == "" {
-		h.Response.BadRequest(c, "节点内容为空", "目标节点未包含可用文本")
+		h.Response.BadRequest(c, "节点内容为空", "目标节点缺少可用的 content 文本")
 		return
 	}
 
@@ -1981,6 +1978,21 @@ func formatConsoleStoryHistory(entries []models.Conversation) string {
 	return formatted
 }
 
+// resolveConversationNodeIDUnsafe 提取对话关联的节点ID（容错处理）
+func resolveConversationNodeIDUnsafe(entry models.Conversation) string {
+	if trimmed := strings.TrimSpace(entry.NodeID); trimmed != "" {
+		return trimmed
+	}
+	if entry.Metadata != nil {
+		if raw, ok := entry.Metadata["node_id"].(string); ok {
+			if trimmed := strings.TrimSpace(raw); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
 func extractConversationContent(entry models.Conversation) string {
 	if trimmed := strings.TrimSpace(entry.Content); trimmed != "" {
 		return trimmed
@@ -2126,6 +2138,63 @@ func (h *Handler) RewindStory(c *gin.Context) {
 	_, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
+	// 特殊选项：new_start 清空上下文并回到首节点
+	if req.NodeID == "new_start" {
+		storyDataCurrent, err := storyService.GetStoryForScene(sceneID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取故事数据失败: %v", err)})
+			return
+		}
+		if storyDataCurrent == nil || len(storyDataCurrent.Nodes) == 0 {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "故事数据为空，无法回溯"})
+			return
+		}
+		firstNode := storyDataCurrent.Nodes[0]
+
+		storyData, err := storyService.RewindToNode(sceneID, firstNode.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("回溯故事失败: %v", err)})
+			return
+		}
+
+		// 清空上下文并只保留首节点 content
+		if h.ContextService != nil && h.ContextService.SceneService != nil {
+			sceneData, err := h.ContextService.SceneService.LoadSceneNoCache(sceneID)
+			if err == nil {
+				sceneData.Context.Conversations = []models.Conversation{}
+				if err := h.ContextService.SceneService.UpdateContext(sceneID, &sceneData.Context); err != nil {
+					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("清理上下文失败: %v", err)})
+					return
+				}
+
+				content := strings.TrimSpace(firstNode.Content)
+				if content == "" {
+					content = strings.TrimSpace(firstNode.OriginalContent)
+				}
+				if content != "" {
+					meta := map[string]interface{}{"conversation_type": "story_original", "source": "new_start"}
+					_ = h.ContextService.AddConversation(sceneID, "story", content, meta, firstNode.ID)
+				}
+			}
+		}
+
+		branchView := buildStoryBranchView(storyData)
+		if h.StatsService != nil {
+			h.StatsService.RecordAPIRequest(2)
+		}
+
+		response := gin.H{
+			"success":          true,
+			"message":          "回溯至起点并清空上下文",
+			"story":            storyData,
+			"branch_view":      branchView,
+			"target_node":      firstNode,
+			"removed_node_ids": []string{},
+		}
+		c.JSON(http.StatusOK, response)
+		return
+	}
+
 	// 执行回溯操作
 	storyData, err := storyService.RewindToNode(sceneID, req.NodeID)
 	if err != nil {
@@ -2134,21 +2203,41 @@ func (h *Handler) RewindStory(c *gin.Context) {
 	}
 
 	var targetNode *models.StoryNode
-	removedNodeIDs := make([]string, 0)
+	targetIndex := -1
 	var cutoff time.Time
 	for i := range storyData.Nodes {
-		node := &storyData.Nodes[i]
-		if node.ID == req.NodeID {
-			targetNode = node
-			cutoff = node.CreatedAt
-			continue
-		}
-		if !cutoff.IsZero() && node.CreatedAt.After(cutoff) {
-			removedNodeIDs = append(removedNodeIDs, node.ID)
+		if storyData.Nodes[i].ID == req.NodeID {
+			targetNode = &storyData.Nodes[i]
+			targetIndex = i
+			if !storyData.Nodes[i].CreatedAt.IsZero() {
+				cutoff = storyData.Nodes[i].CreatedAt
+			}
+			break
 		}
 	}
 
-	if h.ContextService != nil && len(removedNodeIDs) > 0 {
+	removedNodeIDs := make([]string, 0)
+	if targetIndex >= 0 {
+		for i := targetIndex + 1; i < len(storyData.Nodes); i++ {
+			removedNodeIDs = append(removedNodeIDs, storyData.Nodes[i].ID)
+		}
+	}
+
+	// 取目标节点在上下文中的最新时间戳，确保回溯截断点准确
+	if h.ContextService != nil && h.ContextService.SceneService != nil {
+		if sceneData, err := h.ContextService.SceneService.LoadSceneNoCache(sceneID); err == nil {
+			for _, conv := range sceneData.Context.Conversations {
+				if resolveConversationNodeIDUnsafe(conv) != req.NodeID {
+					continue
+				}
+				if conv.Timestamp.After(cutoff) {
+					cutoff = conv.Timestamp
+				}
+			}
+		}
+	}
+
+	if h.ContextService != nil {
 		if err := h.ContextService.RemoveConversationsAfterNode(sceneID, removedNodeIDs, cutoff); err != nil {
 			h.Logger.Warn("回溯后清理上下文失败", map[string]interface{}{
 				"error":    err.Error(),
