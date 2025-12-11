@@ -23,6 +23,7 @@ type ContextService struct {
 
 type SceneServiceInterface interface {
 	LoadScene(sceneID string) (*SceneData, error)
+	LoadSceneNoCache(sceneID string) (*SceneData, error)
 	UpdateContext(sceneID string, context *models.SceneContext) error
 }
 
@@ -104,7 +105,8 @@ func (s *ContextService) loadSceneDataSafe(sceneID string) (*SceneData, error) {
 // GetRecentConversations 获取最近的对话
 func (s *ContextService) GetRecentConversations(sceneID string, limit int) ([]models.Conversation, error) {
 	// 使用缓存加载场景数据
-	sceneData, err := s.loadSceneDataSafe(sceneID)
+	// 使用无缓存加载，避免并发写入时读到旧上下文导致覆盖
+	sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +251,7 @@ func (s *ContextService) RemoveConversationsAfterNode(sceneID string, removedNod
 	lock.Lock()
 	defer lock.Unlock()
 
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 	if err != nil {
 		return err
 	}
@@ -265,14 +267,13 @@ func (s *ContextService) RemoveConversationsAfterNode(sceneID string, removedNod
 	original := sceneData.Context.Conversations
 	filtered := make([]models.Conversation, 0, len(original))
 	for _, conv := range original {
-		if _, exists := removeLookup[resolveConversationNodeID(conv)]; exists {
+		nodeID := resolveConversationNodeID(conv)
+		if _, exists := removeLookup[nodeID]; exists {
 			continue
 		}
 		if !cutoff.IsZero() && conv.Timestamp.After(cutoff) {
-			// 仅移除旁白 / 玩家控制台对话，保留角色互动
-			if isStoryConsoleConversation(conv) || (conv.Metadata != nil && conv.Metadata["conversation_type"] == "story_console") {
-				continue
-			}
+			// 回溯后移除 cutoff 之后的所有上下文（含旁白/用户/console），确保定点截断
+			continue
 		}
 		filtered = append(filtered, conv)
 	}
@@ -346,8 +347,8 @@ func (s *ContextService) AddConversation(sceneID, speakerID, content string, met
 	lock.Lock()
 	defer lock.Unlock()
 
-	// 在锁内加载最新的场景数据
-	sceneData, err := s.SceneService.LoadScene(sceneID)
+	// 在锁内强制加载最新场景数据，避免使用缓存导致旧上下文覆盖新写入
+	sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 	if err != nil {
 		return err
 	}
