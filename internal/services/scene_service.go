@@ -401,6 +401,68 @@ func (s *SceneService) LoadScene(sceneID string) (*SceneData, error) {
 	return sceneData, nil
 }
 
+// LoadSceneNoCache 强制从存储读取最新场景数据并刷新缓存
+func (s *SceneService) LoadSceneNoCache(sceneID string) (*SceneData, error) {
+	// 直接从存储读取，不做缓存命中检查
+	lock := s.getSceneLock(sceneID)
+	lock.RLock()
+	defer lock.RUnlock()
+
+	var scene models.Scene
+	if err := s.FileCache.LoadJSONFile(sceneID, "scene.json", &scene); err != nil {
+		return nil, err
+	}
+
+	characters, err := s.loadCharactersCached(sceneID)
+	if err != nil {
+		fmt.Printf("警告: 加载角色失败: %v\n", err)
+		characters = make([]*models.Character, 0)
+	}
+
+	items := make([]*models.Item, 0)
+	if s.ItemService != nil {
+		if loadedItems, err := s.ItemService.GetAllItems(sceneID); err == nil {
+			items = loadedItems
+		} else {
+			fmt.Printf("警告: 加载物品失败: %v\n", err)
+		}
+	}
+
+	context := models.SceneContext{SceneID: sceneID, Conversations: []models.Conversation{}, LastUpdated: time.Now()}
+	if s.FileCache != nil {
+		if err := s.FileCache.LoadJSONFile(sceneID, "context.json", &context); err != nil {
+			context.SceneID = sceneID
+		}
+	}
+
+	settings := models.SceneSettings{SceneID: sceneID, UserID: scene.UserID, LastUpdated: time.Now()}
+	if s.FileCache != nil {
+		if err := s.FileCache.LoadJSONFile(sceneID, "settings.json", &settings); err != nil {
+			settings.SceneID = sceneID
+		}
+	}
+
+	scene.CharacterCount = len(characters)
+	scene.ItemCount = len(items)
+
+	sceneData := &SceneData{
+		Scene:            scene,
+		Context:          context,
+		Settings:         settings,
+		Characters:       characters,
+		Items:            items,
+		OriginalText:     s.loadOriginalText(sceneID, &scene),
+		OriginalSegments: s.loadOriginalSegments(sceneID),
+	}
+
+	// 刷新缓存为最新版本
+	s.cacheMutex.Lock()
+	s.sceneCache[sceneID] = &CachedSceneData{SceneData: sceneData, Timestamp: time.Now()}
+	s.cacheMutex.Unlock()
+
+	return sceneData, nil
+}
+
 // 带缓存的角色加载
 func (s *SceneService) loadCharactersCached(sceneID string) ([]*models.Character, error) {
 	if s.FileCache == nil {
@@ -798,6 +860,7 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 	// 提取主题和时代（默认值）
 	era := "现代"
 	theme := "未指定"
+	locations := analysisResult.Locations
 
 	// 如果分析结果包含场景信息，使用第一个场景的信息
 	var description string
@@ -809,6 +872,9 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 		}
 		if len(mainScene.Themes) > 0 {
 			theme = strings.Join(mainScene.Themes, ", ")
+		}
+		if len(locations) == 0 && len(mainScene.Locations) > 0 {
+			locations = mainScene.Locations
 		}
 	} else {
 		// 使用摘要作为描述
@@ -840,6 +906,7 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 		Description: description,
 		Era:         era,
 		Themes:      themes,
+		Locations:   locations,
 		CreatedAt:   time.Now(),
 		LastUpdated: time.Now(),
 	}
