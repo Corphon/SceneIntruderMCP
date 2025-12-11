@@ -19,12 +19,12 @@ func init() {
 	llm.Register("openrouter", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"meituan/longcat-flash-chat:free",
-				"moonshotai/kimi-k2:free",
-				"google/gemini-2.0-flash-exp:free",
-				"google/gemma-3-27b-it:free",
-				"meta-llama/llama-4-maverick:free",
-				"deepseek/deepseek-chat-v3-0324:free",
+				"mistralai/devstral-2512:free",
+				"kwaipilot/kat-coder-pro:free",
+				"qwen/qwen3-coder:free",
+				"qwen/qwen3-235b-a22b:free",
+				"amazon/nova-2-lite-v1:free",
+				"nousresearch/hermes-3-llama-3.1-405b:free",
 			},
 			baseURL: "https://openrouter.ai/api/v1",
 		}
