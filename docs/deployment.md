@@ -1,5 +1,93 @@
 # SceneIntruderMCP Deployment Guide
 
+This guide focuses on **how the current backend actually boots and serves the app** (config, static assets, auth secrets, and reverse proxy notes).
+
+## System requirements
+
+- Go 1.21+
+- Node.js 18+ (only required if you build the frontend)
+
+## Quick start (development)
+
+```bash
+go mod download
+go run ./cmd/server
+```
+
+Default URL: `http://localhost:8080`
+
+## Frontend assets (how they are served)
+
+The Go server serves a SPA:
+
+- Static assets from `STATIC_DIR` mounted at `/assets` and `/static`
+- SPA entry HTML from `TEMPLATES_DIR/index.html`
+
+On startup, the server checks `frontend/dist`:
+
+- If `frontend/dist` exists, it copies `frontend/dist/assets` into `STATIC_DIR` (unless they are the same directory)
+- It writes `frontend/dist/index.html` into `TEMPLATES_DIR/index.html`
+
+If you see a warning about missing `frontend/dist`, build the frontend first:
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+## Configuration
+
+There are two layers:
+
+1) **Process environment variables** (read at boot)
+2) A persisted config file at `${DATA_DIR}/config.json` (default: `data/config.json`)
+
+On first boot, the server initializes and saves `data/config.json`.
+
+### Common environment variables
+
+- `PORT` (default `8080`)
+- `DATA_DIR` (default `data`)
+- `LOG_DIR` (default `logs`)
+- `STATIC_DIR` (default `frontend/dist/assets`)
+- `TEMPLATES_DIR` (default `frontend/dist`)
+- `DEBUG_MODE` (`true` by default)
+
+### LLM credential encryption
+
+The config file stores the LLM API key encrypted (AES-GCM) under `encrypted_llm_config.api_key`.
+
+- Recommended (production): set `CONFIG_ENCRYPTION_KEY` (minimum 32 characters)
+- Development behavior: if `CONFIG_ENCRYPTION_KEY` is not set and `DEBUG_MODE=true`, a persistent key is generated and stored in `data/.encryption_key`
+- You can disable encryption (not recommended) via `DISABLE_CONFIG_ENCRYPTION=true`
+
+Keep `data/.encryption_key` safe. If it is deleted or changed, previously stored encrypted API keys can no longer be decrypted and must be re-entered.
+
+## Authentication (production)
+
+Set `AUTH_SECRET_KEY` in production to make token signing stable and secure.
+
+- Tokens expire after 24 hours.
+
+## Reverse proxy notes (Nginx/Caddy)
+
+This project uses **plain WebSocket** endpoints:
+
+- `/ws/scene/:id`
+- `/ws/user/status`
+
+When proxying, ensure:
+
+- WebSocket upgrade headers are forwarded
+- `Host` and `Origin` stay consistent (the WebSocket upgrader validates origin; same-origin is the safe default)
+
+If you terminate TLS at the proxy, clients should connect using `wss://`.
+
+<!--
+
+# SceneIntruderMCP Deployment Guide
+
 This document provides detailed deployment instructions for SceneIntruderMCP in various environments.
 
 ## 📋 Table of Contents
@@ -729,3 +817,5 @@ If you encounter issues during deployment, please:
 ---
 
 **Note**: This deployment guide is written based on the latest version. For specific version deployments, please refer to the corresponding version documentation.
+
+-->
