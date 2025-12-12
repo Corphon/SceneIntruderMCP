@@ -1,5 +1,304 @@
 # SceneIntruderMCP API Documentation
 
+This document describes the HTTP API and WebSocket endpoints exposed by the backend.
+
+- Base URL (REST): `http://localhost:8080/api`
+- WebSocket base: `ws://localhost:8080/ws`
+
+## Authentication
+
+### Login
+
+Use `POST /api/auth/login` to obtain a Bearer token.
+
+Request:
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "admin"
+}
+```
+
+Response (200):
+
+```json
+{
+  "success": true,
+  "data": {
+    "token": "...",
+    "user_id": "admin"
+  },
+  "message": "登录成功",
+  "timestamp": "2025-01-01T00:00:00Z"
+}
+```
+
+### Using the token
+
+Send the token via:
+
+```http
+Authorization: Bearer <token>
+```
+
+### Guest fallback behavior
+
+If `Authorization` is missing/invalid, most endpoints continue in “guest mode” with `user_id = console_user`.
+
+Exceptions:
+
+- User-scoped endpoints under `/api/users/:user_id/...` enforce that you are authenticated **and** `:user_id` matches the token user.
+- Some operations are explicitly protected by `AuthMiddleware()`.
+
+### Production security notes
+
+- Set `AUTH_SECRET_KEY` in production (minimum 32 bytes; longer values will be truncated to 32 bytes).
+- Tokens expire after 24 hours.
+
+## Rate limiting
+
+Rate limiting is enabled on `/api` and responses include:
+
+- `X-RateLimit-Limit`
+- `X-RateLimit-Remaining`
+- `X-RateLimit-Reset` (unix timestamp)
+
+Limits:
+
+- Default (all `/api/*`): 100 req/min per IP
+- Chat + interactions groups: 30 req/min per user key (`X-User-ID` header; falls back to IP)
+- Upload + analyze: 10 req/hour per user key (`X-User-ID` header; falls back to IP)
+
+## Response format
+
+Most REST endpoints respond with the unified structure:
+
+```json
+{
+  "success": true,
+  "data": {},
+  "message": "...",
+  "timestamp": "2025-01-01T00:00:00Z",
+  "request_id": "..."
+}
+```
+
+Error responses usually look like:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "...",
+    "details": "..."
+  },
+  "timestamp": "2025-01-01T00:00:00Z",
+  "request_id": "..."
+}
+```
+
+Some older handlers may return `{"error": "..."}` directly (notably some SSE error paths).
+
+## REST endpoints
+
+### Auth
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+
+### Settings
+
+- `GET /api/settings`
+- `POST /api/settings`
+- `POST /api/settings/test-connection`
+
+### LLM
+
+- `GET /api/llm/status`
+- `GET /api/llm/models?provider=<provider>`
+- `PUT /api/llm/config`
+
+### Scenes
+
+- `GET /api/scenes`
+- `POST /api/scenes`
+- `GET /api/scenes/:id`
+- `DELETE /api/scenes/:id`
+- `GET /api/scenes/:id/characters`
+- `GET /api/scenes/:id/conversations`
+- `GET /api/scenes/:id/nodes/:node_id/content`
+- `GET /api/scenes/:id/aggregate`
+
+### Scene items
+
+- `GET /api/scenes/:id/items`
+- `POST /api/scenes/:id/items`
+- `GET /api/scenes/:id/items/:item_id`
+- `PUT /api/scenes/:id/items/:item_id`
+- `DELETE /api/scenes/:id/items/:item_id`
+
+### Story
+
+- `GET /api/scenes/:id/story`
+- `POST /api/scenes/:id/story/choice`
+- `POST /api/scenes/:id/story/advance`
+- `POST /api/scenes/:id/story/command`
+- `POST /api/scenes/:id/story/nodes/:node_id/insert`
+- `POST /api/scenes/:id/story/rewind`
+- `GET /api/scenes/:id/story/branches`
+- `GET /api/scenes/:id/story/choices`
+- `POST /api/scenes/:id/story/batch`
+- `POST /api/scenes/:id/story/tasks/:task_id/objectives/:objective_id/complete`
+- `POST /api/scenes/:id/story/locations/:location_id/unlock`
+- `POST /api/scenes/:id/story/locations/:location_id/explore`
+
+### Export
+
+All export endpoints accept `?format=` (commonly `json`, `markdown`, `txt`, `html`, and some exports also support `csv`/`pdf` depending on handler).
+
+- `GET /api/scenes/:id/export/scene`
+- `GET /api/scenes/:id/export/interactions`
+- `GET /api/scenes/:id/export/story`
+
+### Chat
+
+- `POST /api/chat`
+- `POST /api/chat/emotion`
+
+### Interactions
+
+- `POST /api/interactions/trigger`
+- `POST /api/interactions/simulate`
+- `POST /api/interactions/aggregate`
+- `GET /api/interactions/:scene_id`
+- `GET /api/interactions/:scene_id/:character1_id/:character2_id`
+
+### Upload / Analyze / Progress
+
+- `POST /api/upload`
+- `POST /api/analyze`
+- `GET /api/progress/:taskID` (SSE)
+- `POST /api/cancel/:taskID`
+
+### Config / Metrics
+
+- `GET /api/config/health`
+- `GET /api/config/metrics`
+
+### Users
+
+All user endpoints are under `/api/users/:user_id` and require that `:user_id` matches the authenticated user.
+
+- `GET /api/users/:user_id`
+- `PUT /api/users/:user_id`
+- `GET /api/users/:user_id/preferences`
+- `PUT /api/users/:user_id/preferences`
+- `GET /api/users/:user_id/items`
+- `POST /api/users/:user_id/items`
+- `GET /api/users/:user_id/items/:item_id`
+- `PUT /api/users/:user_id/items/:item_id`
+- `DELETE /api/users/:user_id/items/:item_id`
+- `GET /api/users/:user_id/skills`
+- `POST /api/users/:user_id/skills`
+- `GET /api/users/:user_id/skills/:skill_id`
+- `PUT /api/users/:user_id/skills/:skill_id`
+- `DELETE /api/users/:user_id/skills/:skill_id`
+
+### WebSocket admin
+
+- `GET /api/ws/status`
+- `POST /api/ws/cleanup`
+
+## Key request examples
+
+### Create a scene
+
+```http
+POST /api/scenes
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Scene",
+  "text": "...source text..."
+}
+```
+
+### Start analysis with SSE progress
+
+1) Start analysis:
+
+```http
+POST /api/analyze
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Scene",
+  "text": "...source text..."
+}
+```
+
+2) Subscribe progress (Server-Sent Events):
+
+```http
+GET /api/progress/<taskID>
+Accept: text/event-stream
+```
+
+SSE events:
+
+- `event: connected`
+- `event: progress`
+- `event: heartbeat`
+
+## WebSocket
+
+### Endpoints
+
+- `GET /ws/scene/:id?user_id=<optional>`
+- `GET /ws/user/status?user_id=<required>`
+
+### Protocol
+
+This backend uses **plain WebSocket (Gorilla WebSocket)**, not Socket.IO.
+
+Messages are JSON objects with a `type` field.
+
+Client → server supported types:
+
+- `character_interaction`
+- `story_choice`
+- `user_status_update`
+- `ping`
+
+Server → client examples:
+
+- `connected`
+- `conversation:new`
+- `story:choice_confirmed`
+- `user:presence`
+- `pong`
+- `heartbeat`
+- `error`
+
+Example send (client → server):
+
+```json
+{
+  "type": "ping"
+}
+```
+
+<!--
+
+# SceneIntruderMCP API Documentation
+
 <div align="center">
 
 **🎭 AI-Powered Immersive Interactive Storytelling Platform API Reference**
@@ -1608,3 +1907,5 @@ curl -X PUT http://localhost:8080/api/llm/config \
 Made with ❤️ by SceneIntruderMCP Team
 
 </div>
+
+-->
