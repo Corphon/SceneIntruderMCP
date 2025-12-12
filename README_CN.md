@@ -51,14 +51,14 @@ SceneIntruderMCP 是一个革命性的AI驱动互动叙事平台，它将传统�
 - **API集成**: 通过API提供完整的CRUD操作来管理用户定义的内容
 
 #### 🔗 **多LLM支持**
-- **OpenAI GPT**: GPT-3.5/4/4o/5-chat 系列
-- **Anthropic Claude**: Claude-3/3.5/3.7 系列
-- **DeepSeek**: DeepSeek-R1/Coder 系列
-- **Google Gemini**: Gemini-2.0/1.5 系列 (包含思维模型)
-- **Grok**: xAI 的 Grok-2/2-mini/3 系列
+- **OpenAI GPT**: GPT-4.1/4o/5-chat 系列
+- **Anthropic Claude**: Claude-3.5/4.5 系列
+- **DeepSeek**: DeepSeek-chat 系列
+- **Google Gemini**: Gemini-2.5/3.0 系列 (包含思维模型)
+- **Grok**: xAI 的 Grok-4/3 系列
 - **Mistral**: Mistral-large/small 系列
-- **Qwen**: 阿里云 Qwen2.5/32b 系列 (包含 qwq 模型)
-- **GitHub Models**: 通过 GitHub Models 平台 (GPT-4o, o1 系列, Phi-4 等)
+- **Qwen**: 阿里云 Qwen3 系列
+- **GitHub Models**: 通过 GitHub Models 平台 (GPT-4o/4.1等)
 - **OpenRouter**: 开源模型聚合平台，提供免费层级
 - **GLM**: 智谱AI的 GLM-4/4-plus 系列
 
@@ -71,30 +71,26 @@ SceneIntruderMCP 是一个革命性的AI驱动互动叙事平台，它将传统�
 > ℹ️ **提示**：当前激活的提供商会读取其 `default_model` 配置。凡是未明确指定模型的 AI 请求都会自动回退到该值，因此只需在配置文件里修改一次即可全局切换模型，无需改动代码。
 SceneIntruderMCP/
 ├── cmd/
-│   └── server/           # 应用程序入口
+│   └── server/           # Application entry point
 │       └── main.go
 ├── internal/
-│   ├── api/              # HTTP API 路由和处理器
-│   ├── app/              # 应用程序核心逻辑
-│   ├── config/           # 配置管理
-│   ├── di/               # 依赖注入
-│   ├── llm/              # LLM提供商抽象层
-│   │   └── providers/    # 各种LLM提供商实现
-│   ├── models/           # 数据模型定义
-│   ├── services/         # 业务逻辑服务
-│   └── storage/          # 存储抽象层
-├── static/
-│   ├── css/              # 样式文件
-│   ├── js/               # 前端JavaScript
-│   └── images/           # 静态图片
-├── web/
-│   └── templates/        # HTML模板
-├── data/                 # 数据存储目录
-│   ├── scenes/           # 场景数据
-│   ├── stories/          # 故事数据
-│   ├── users/            # 用户数据
-│   └── exports/          # 导出文件
-└── logs/                 # 应用日志
+│   ├── api/              # HTTP API routes and handlers
+│   ├── app/              # Application core logic
+│   ├── config/           # Configuration management
+│   ├── di/               # Dependency injection
+│   ├── llm/              # LLM provider abstraction layer
+│   │   └── providers/    # Various LLM provider implementations
+│   ├── models/           # Data model definitions
+│   ├── services/         # Business logic services
+│   └── storage/          # Storage abstraction layer
+├── frontend/
+│   └── dist/             # assets
+├── data/                 # Data storage directory
+│   ├── scenes/           # Scene data
+│   ├── stories/          # Story data
+│   ├── users/            # User data
+│   └── exports/          # Export files
+└── logs/                 # Application logs
 ```
 
 ### 🔧 核心技术栈
@@ -102,7 +98,7 @@ SceneIntruderMCP/
 - **后端**: Go 1.21+, Gin Web Framework
 - **AI集成**: 多LLM提供商支持，统一抽象接口
 - **存储**: 基于文件系统的JSON存储，支持扩展到数据库
-- **前端**: 原生JavaScript + HTML/CSS，响应式设计
+- **前端**: React，响应式设计
 - **部署**: 容器化支持，云原生架构
 
 
@@ -129,13 +125,12 @@ go mod download
 ```
 
 3. **配置环境**
-```bash
-# 复制配置模板
-cp data/config.json.example data/config.json
 
-# 编辑配置文件，添加API密钥
-nano data/config.json
-```
+首次启动时，服务会在 `data/config.json`（或 `${DATA_DIR}/config.json`）生成配置文件。
+你可以通过以下方式配置 LLM 提供商与 API Key：
+
+- 打开设置页面：`http://localhost:8080/settings`，或
+- 直接编辑 `data/config.json`。
 
 4. **启动服务**
 ```bash
@@ -158,31 +153,21 @@ go build -o sceneintruder cmd/server/main.go
 
 ```json
 {
-  "llm": {
-    "default_provider": "openai",
-    "providers": {
-      "openai": {
-        "api_key": "your-openai-api-key",
-        "base_url": "https://api.openai.com/v1",
-        "default_model": "gpt-4"
-      },
-      "anthropic": {
-        "api_key": "your-claude-api-key", 
-        "default_model": "claude-3-5-sonnet-20241022"
-      },
-      "deepseek": {
-        "api_key": "your-deepseek-api-key",
-        "default_model": "deepseek-chat"
-      }
+    "port": "8080",
+    "data_dir": "data",
+    "static_dir": "frontend\\dist\\assets",
+    "templates_dir": "frontend\\dist",
+    "log_dir": "logs",
+    "debug_mode": true,
+    "llm_provider": "openrouter",
+    "llm_config": {
+        "default_model": "mistralai/devstral-2512:free",
+        "base_url": "",
+        "api_key": ""
+    },
+    "encrypted_llm_config": {
+        "api_key": "<encrypted_api_key_here>"
     }
-  },
-  "server": {
-    "port": 8080,
-    "debug": false
-  },
-  "storage": {
-    "data_path": "./data"
-  }
 }
 ```
 
@@ -206,7 +191,7 @@ go build -o sceneintruder cmd/server/main.go
 2. **自然对话**: 与AI角色进行自然语言对话
 3. **情感反馈**: 观察角色的情绪、动作和表情变化
 
-### � 控制台 CLI 快速体验
+### 🖥️ 控制台 CLI 快速体验
 
 `cmd/demo` 提供了一套无需前端即可跑通完整流程的多语言控制台界面，便于快速联调和压测：
 
@@ -217,7 +202,7 @@ go build -o sceneintruder cmd/server/main.go
 - **符号快捷指令**: `@角色/地点` 聚焦特定对象，`/物品/技能` 引入装备与能力，`!status/!tasks/!advance/...` 可随时查看状态或强制推进剧情。
 - **空输入继续剧情**: 直接回车即可让 AI 自动续写节点，方便快速冒烟测试故事引擎。
 
-### �📚 故事分支
+### 📚 故事分支
 
 1. **动态选择**: AI根据当前情况生成4种类型的选择
 2. **故事发展**: 基于选择推进非线性故事情节
