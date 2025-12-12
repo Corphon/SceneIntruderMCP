@@ -1,5 +1,93 @@
 # SceneIntruderMCP 部署指南
 
+本文档以“当前代码实际行为”为准，说明后端启动、静态资源加载、配置/密钥、反向代理注意事项。
+
+## 系统要求
+
+- Go 1.21+
+- Node.js 18+（仅在需要构建前端时需要）
+
+## 快速启动（开发环境）
+
+```bash
+go mod download
+go run ./cmd/server
+```
+
+默认地址：`http://localhost:8080`
+
+## 前端静态资源（Go 服务如何提供）
+
+Go 服务以 SPA 方式提供前端：
+
+- `STATIC_DIR` 目录通过 `/assets` 与 `/static` 暴露
+- `TEMPLATES_DIR/index.html` 作为 SPA 入口
+
+启动时会检查 `frontend/dist`：
+
+- 若存在，会把 `frontend/dist/assets` 同步到 `STATIC_DIR`（如果不是同一路径）
+- 会将 `frontend/dist/index.html` 写入 `TEMPLATES_DIR/index.html`
+
+若日志提示未找到 `frontend/dist`，请先构建前端：
+
+```bash
+cd frontend
+npm install
+npm run build
+```
+
+## 配置
+
+配置分两层：
+
+1) **环境变量**（启动时读取）
+2) **持久化配置文件** `${DATA_DIR}/config.json`（默认：`data/config.json`）
+
+首次启动时会初始化并保存 `data/config.json`。
+
+### 常用环境变量
+
+- `PORT`（默认 `8080`）
+- `DATA_DIR`（默认 `data`）
+- `LOG_DIR`（默认 `logs`）
+- `STATIC_DIR`（默认 `frontend/dist/assets`）
+- `TEMPLATES_DIR`（默认 `frontend/dist`）
+- `DEBUG_MODE`（默认 `true`）
+
+### LLM 凭据加密
+
+配置文件会将 LLM API Key 以 AES-GCM 加密后存储在 `encrypted_llm_config.api_key`。
+
+- 生产环境建议设置 `CONFIG_ENCRYPTION_KEY`（至少 32 字符）
+- 开发环境：若未设置 `CONFIG_ENCRYPTION_KEY` 且 `DEBUG_MODE=true`，会生成持久化密钥并写入 `data/.encryption_key`
+- 可通过 `DISABLE_CONFIG_ENCRYPTION=true` 禁用加密（不推荐）
+
+请妥善保管 `data/.encryption_key`。删除或变更该文件会导致旧的加密 API Key 无法解密，需要重新配置。
+
+## 认证（生产环境）
+
+生产环境建议设置 `AUTH_SECRET_KEY` 以保证 Token 签名稳定且安全。
+
+- Token 默认 24 小时过期。
+
+## 反向代理注意事项（Nginx/Caddy）
+
+本项目的 WebSocket 为 **原生 WebSocket**：
+
+- `/ws/scene/:id`
+- `/ws/user/status`
+
+反代时需确保：
+
+- 转发 WebSocket Upgrade 相关头
+- `Host`/`Origin` 保持一致（服务端会校验 Origin，同源是最安全的默认）
+
+若由反向代理终止 TLS，请使用 `wss://` 访问。
+
+<!--
+
+# SceneIntruderMCP 部署指南
+
 本文档提供了在不同环境中部署 SceneIntruderMCP 的详细指南。
 
 ## 📋 目录
@@ -713,3 +801,5 @@ echo "Backup completed: sceneintruder_$DATE.tar.gz"
 ---
 
 **注意**: 本部署指南基于最新版本编写。对于特定版本的部署，请参考对应版本的文档。
+
+-->
