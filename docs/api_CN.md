@@ -1,5 +1,303 @@
 # SceneIntruderMCP API 文档
 
+本文档描述后端提供的 HTTP API 与 WebSocket 接口（以代码实现为准）。
+
+- REST Base URL：`http://localhost:8080/api`
+- WebSocket：`ws://localhost:8080/ws`
+
+## 身份验证
+
+### 登录
+
+通过 `POST /api/auth/login` 获取 Bearer Token。
+
+请求：
+
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{
+  "username": "admin",
+  "password": "admin"
+}
+```
+
+响应（200）：
+
+```json
+{
+  "success": true,
+  "data": {
+    "token": "...",
+    "user_id": "admin"
+  },
+  "message": "登录成功",
+  "timestamp": "2025-01-01T00:00:00Z"
+}
+```
+
+### 使用 Token
+
+请求头携带：
+
+```http
+Authorization: Bearer <token>
+```
+
+### 访客模式（guest）降级
+
+当未携带或携带无效 `Authorization` 时，多数接口会以访客模式继续执行，并将 `user_id` 视为 `console_user`。
+
+例外：
+
+- `/api/users/:user_id/...` 用户资源接口要求已登录且 `:user_id` 必须与 Token 中的用户一致（访客仅允许访问 `console_user`）。
+- 一些敏感操作显式使用 `AuthMiddleware()` 保护。
+
+### 生产环境安全建议
+
+- 生产环境请设置 `AUTH_SECRET_KEY`（至少 32 字节；更长会截断为 32 字节）。
+- Token 有效期为 24 小时。
+
+## 限流
+
+`/api` 下启用限流，并会返回以下响应头：
+
+- `X-RateLimit-Limit`
+- `X-RateLimit-Remaining`
+- `X-RateLimit-Reset`（unix 时间戳）
+
+限流策略：
+
+- 默认（所有 `/api/*`）：100 次/分钟/IP
+- Chat + interactions：30 次/分钟/用户键（优先取 `X-User-ID`；缺失则回退到 IP）
+- upload + analyze：10 次/小时/用户键（优先取 `X-User-ID`；缺失则回退到 IP）
+
+## 通用响应格式
+
+多数 REST 接口使用统一结构：
+
+```json
+{
+  "success": true,
+  "data": {},
+  "message": "...",
+  "timestamp": "2025-01-01T00:00:00Z",
+  "request_id": "..."
+}
+```
+
+错误响应通常为：
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "BAD_REQUEST",
+    "message": "...",
+    "details": "..."
+  },
+  "timestamp": "2025-01-01T00:00:00Z",
+  "request_id": "..."
+}
+```
+
+少数旧路径可能直接返回 `{"error": "..."}`（例如部分 SSE 错误分支）。
+
+## REST 接口清单
+
+### Auth
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+
+### Settings
+
+- `GET /api/settings`
+- `POST /api/settings`
+- `POST /api/settings/test-connection`
+
+### LLM
+
+- `GET /api/llm/status`
+- `GET /api/llm/models?provider=<provider>`
+- `PUT /api/llm/config`
+
+### Scenes
+
+- `GET /api/scenes`
+- `POST /api/scenes`
+- `GET /api/scenes/:id`
+- `DELETE /api/scenes/:id`
+- `GET /api/scenes/:id/characters`
+- `GET /api/scenes/:id/conversations`
+- `GET /api/scenes/:id/nodes/:node_id/content`
+- `GET /api/scenes/:id/aggregate`
+
+### 场景物品
+
+- `GET /api/scenes/:id/items`
+- `POST /api/scenes/:id/items`
+- `GET /api/scenes/:id/items/:item_id`
+- `PUT /api/scenes/:id/items/:item_id`
+- `DELETE /api/scenes/:id/items/:item_id`
+
+### Story
+
+- `GET /api/scenes/:id/story`
+- `POST /api/scenes/:id/story/choice`
+- `POST /api/scenes/:id/story/advance`
+- `POST /api/scenes/:id/story/command`
+- `POST /api/scenes/:id/story/nodes/:node_id/insert`
+- `POST /api/scenes/:id/story/rewind`
+- `GET /api/scenes/:id/story/branches`
+- `GET /api/scenes/:id/story/choices`
+- `POST /api/scenes/:id/story/batch`
+- `POST /api/scenes/:id/story/tasks/:task_id/objectives/:objective_id/complete`
+- `POST /api/scenes/:id/story/locations/:location_id/unlock`
+- `POST /api/scenes/:id/story/locations/:location_id/explore`
+
+### Export
+
+导出接口支持 `?format=`（常见：`json`、`markdown`、`txt`、`html`，部分导出也可能支持 `csv`/`pdf`，以实际 handler 为准）。
+
+- `GET /api/scenes/:id/export/scene`
+- `GET /api/scenes/:id/export/interactions`
+- `GET /api/scenes/:id/export/story`
+
+### Chat
+
+- `POST /api/chat`
+- `POST /api/chat/emotion`
+
+### Interactions
+
+- `POST /api/interactions/trigger`
+- `POST /api/interactions/simulate`
+- `POST /api/interactions/aggregate`
+- `GET /api/interactions/:scene_id`
+- `GET /api/interactions/:scene_id/:character1_id/:character2_id`
+
+### Upload / Analyze / Progress
+
+- `POST /api/upload`
+- `POST /api/analyze`
+- `GET /api/progress/:taskID`（SSE）
+- `POST /api/cancel/:taskID`
+
+### Config / Metrics
+
+- `GET /api/config/health`
+- `GET /api/config/metrics`
+
+### Users
+
+所有用户接口均位于 `/api/users/:user_id`，并要求 `:user_id` 与已登录用户一致。
+
+- `GET /api/users/:user_id`
+- `PUT /api/users/:user_id`
+- `GET /api/users/:user_id/preferences`
+- `PUT /api/users/:user_id/preferences`
+- `GET /api/users/:user_id/items`
+- `POST /api/users/:user_id/items`
+- `GET /api/users/:user_id/items/:item_id`
+- `PUT /api/users/:user_id/items/:item_id`
+- `DELETE /api/users/:user_id/items/:item_id`
+- `GET /api/users/:user_id/skills`
+- `POST /api/users/:user_id/skills`
+- `GET /api/users/:user_id/skills/:skill_id`
+- `PUT /api/users/:user_id/skills/:skill_id`
+- `DELETE /api/users/:user_id/skills/:skill_id`
+
+### WebSocket 管理
+
+- `GET /api/ws/status`
+- `POST /api/ws/cleanup`
+
+## 关键请求示例
+
+### 创建场景
+
+```http
+POST /api/scenes
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Scene",
+  "text": "...source text..."
+}
+```
+
+### 分析并订阅 SSE 进度
+
+1) 发起分析：
+
+```http
+POST /api/analyze
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Scene",
+  "text": "...source text..."
+}
+```
+
+2) 订阅进度（Server-Sent Events）：
+
+```http
+GET /api/progress/<taskID>
+Accept: text/event-stream
+```
+
+SSE 事件类型：
+
+- `event: connected`
+- `event: progress`
+- `event: heartbeat`
+
+## WebSocket
+
+### 端点
+
+- `GET /ws/scene/:id?user_id=<可选>`
+- `GET /ws/user/status?user_id=<必填>`
+
+### 协议说明
+
+后端使用 **原生 WebSocket（Gorilla WebSocket）**，不是 Socket.IO。
+
+消息为 JSON 对象，包含 `type` 字段。
+
+客户端 → 服务端支持的 `type`：
+
+- `character_interaction`
+- `story_choice`
+- `user_status_update`
+- `ping`
+
+服务端 → 客户端常见消息：
+
+- `connected`
+- `conversation:new`
+- `story:choice_confirmed`
+- `user:presence`
+- `pong`
+- `heartbeat`
+- `error`
+
+示例发送（客户端 → 服务端）：
+```json
+{
+  "type": "ping"
+}
+```
+
+<!--
+
+# SceneIntruderMCP API 文档
+
 <div align="center">
 
 **🎭 AI 驱动的沉浸式互动叙事平台 API 参考**
@@ -1407,3 +1705,5 @@ curl -X PUT http://localhost:8080/api/llm/config \
 由 SceneIntruderMCP 团队用 ❤️ 制作
 
 </div>
+
+-->
