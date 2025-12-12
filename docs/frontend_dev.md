@@ -8,7 +8,7 @@ This document walks through the practical steps for working on the SceneIntruder
 - **Bundler/Dev Server**: Vite 5
 - **State Management**: Redux Toolkit + React Redux slices under `src/store`
 - **Styling/UI**: MUI v5, Emotion, and custom CSS modules
-- **Realtime/Networking**: Axios for REST calls (`src/api`), Socket.IO client for live updates (`hooks/useWebSocket`)
+- **Realtime/Networking**: Axios for REST calls (`src/api`), **plain WebSocket** for live updates (backend uses Gorilla WebSocket)
 
 ## Prerequisites
 
@@ -41,16 +41,13 @@ npm -v
 
 ## Environment Configuration
 
-The frontend reads `VITE_*` variables from `.env` files at the project root (e.g., `.env.local`). Common knobs:
+By default, the frontend uses a relative REST base URL:
 
-```bash
-VITE_API_BASE_URL=http://localhost:8080/api
-VITE_WS_BASE_URL=ws://localhost:8080/ws
-VITE_DEFAULT_LOCALE=en
-```
+- Axios base URL: `/api` (see `frontend/src/utils/api.js`)
 
-- Anything prefixed with `VITE_` becomes available via `import.meta.env.VITE_*`.
-- Commit default-safe values to `.env.example` and keep `.env.local` ignored for personal secrets.
+During development, Vite proxies `/api` and `/ws` to the Go backend (see `frontend/vite.config.js`).
+
+If you need to point to a different backend host/port, update the Vite proxy target.
 
 ## Daily Development Workflow
 
@@ -124,7 +121,7 @@ This spins up a static server mimicking how assets will load once deployed.
 | Symptom | Likely Cause | Fix |
 |---------|--------------|-----|
 | 404s on API calls | Backend not running or wrong `VITE_API_BASE_URL` | Start Go server, confirm env file |
-| WebSocket errors | Wrong WS URL or backend port mismatch | Update `VITE_WS_BASE_URL` to actual host:port |
+| WebSocket errors | Backend not reachable or proxy mismatch | Confirm Go backend port and Vite proxy for `/ws` |
 | Styles missing | Forgot to import `src/index.css` or theme assets in component | Ensure root entry imports theme | 
 | ESLint fails on hooks | Hook dependency array incomplete | Let ESLint auto-fix or refactor hook |
 
@@ -133,4 +130,35 @@ This spins up a static server mimicking how assets will load once deployed.
 - **Component folders**: Each major domain (characters, story, scenes, items) has its own directory—add new UI there for easy discovery.
 - **State slices**: When adding new data flows, extend `src/store/*Slice.js` and wire them through `store/index.js`.
 - **Translations**: Use `useTranslation` and update `src/i18n/translations.js` for new strings so bilingual UI stays in sync.
-- **WebSockets**: Reuse `hooks/useWebSocket.js` rather than instantiating clients manually; it already handles reconnection.
+## WebSockets (important)
+
+The backend exposes **plain WebSocket** endpoints (Gorilla WebSocket), e.g.:
+
+- `ws://localhost:8080/ws/scene/<sceneId>?user_id=<userId>`
+
+This is **not** Socket.IO. A Socket.IO client will generally not be able to talk to a plain WebSocket server.
+
+If you want live updates in the frontend, prefer using the native WebSocket API:
+
+```js
+const ws = new WebSocket(`ws://${location.host}/ws/scene/${sceneId}?user_id=${userId}`);
+
+ws.onmessage = (evt) => {
+	const msg = JSON.parse(evt.data);
+	switch (msg.type) {
+		case 'conversation:new':
+			// handle
+			break;
+		case 'heartbeat':
+		case 'pong':
+			break;
+		default:
+			break;
+	}
+};
+
+ws.send(JSON.stringify({ type: 'ping' }));
+```
+
+Note: some existing frontend code currently uses `socket.io-client` (see `frontend/src/hooks/useWebSocket.js`).
+If you keep the backend as-is, that hook should be migrated to native WebSocket.
