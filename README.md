@@ -11,7 +11,7 @@
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
 [![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
 
-English | [简体中文](README_EN.md)
+English | [简体中文](README_CN.md)
 
 </div>
 
@@ -66,14 +66,14 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 - **API Integration**: Full CRUD operations available via API for managing user-defined content
 
 #### 🔗 **Multi-LLM Support**
-- **OpenAI GPT**: GPT-3.5/4/4o/5-chat series
-- **Anthropic Claude**: Claude-3/3.5/3.7 series
-- **DeepSeek**: DeepSeek-R1/Coder series
-- **Google Gemini**: Gemini-2.0/1.5 series with thinking models
-- **Grok**: xAI's Grok-2/2-mini/3 series
+- **OpenAI GPT**: GPT-4.1/4o/5-chat series
+- **Anthropic Claude**: Claude-3.5/4.5 series
+- **DeepSeek**: DeepSeek--chat series
+- **Google Gemini**: Gemini-2.5/3.0 series
+- **Grok**: xAI's Grok-4/3 series
 - **Mistral**: Mistral-large/small series
-- **Qwen**: Alibaba Cloud Qwen2.5/32b series including qwq models
-- **GitHub Models**: Via GitHub Models platform (GPT-4o, o1 series, Phi-4, etc.)
+- **Qwen**: Alibaba Cloud Qwen3 series
+- **GitHub Models**: Via GitHub Models platform (GPT-4o/4.1, etc.)
 - **OpenRouter**: Open source model aggregation platform with free tiers
 - **GLM**: Zhipu AI's GLM-4/4-plus series
 
@@ -113,7 +113,7 @@ SceneIntruderMCP/
 - **Backend**: Go 1.21+, Gin Web Framework
 - **AI Integration**: Multi-LLM provider support with unified abstraction interface
 - **Storage**: File system-based JSON storage with database extension support
-- **Frontend**: Vanilla JavaScript + HTML/CSS, responsive design
+- **Frontend**: React, responsive design
 - **Deployment**: Containerization support, cloud-native architecture
 
 ## 🆕 Release Highlights (v1.2.0 · 2025-11-27)
@@ -165,13 +165,12 @@ go mod download
 ```
 
 3. **Configure Environment**
-```bash
-# Copy configuration template
-cp data/config.json.example data/config.json
 
-# Edit configuration file and add API keys
-nano data/config.json
-```
+On first start, the server initializes a configuration file at `data/config.json` (or `${DATA_DIR}/config.json`).
+You can configure the LLM provider/API key either:
+
+- via the Settings UI: `http://localhost:8080/settings`, or
+- by editing `data/config.json` directly.
 
 4. **Start Service**
 ```bash
@@ -194,31 +193,21 @@ Open browser: http://localhost:8080
 
 ```json
 {
-  "llm": {
-    "default_provider": "openai",
-    "providers": {
-      "openai": {
-        "api_key": "your-openai-api-key",
-        "base_url": "https://api.openai.com/v1",
-        "default_model": "gpt-4"
-      },
-      "anthropic": {
-        "api_key": "your-claude-api-key", 
-        "default_model": "claude-3-5-sonnet-20241022"
-      },
-      "deepseek": {
-        "api_key": "your-deepseek-api-key",
-        "default_model": "deepseek-chat"
-      }
+    "port": "8080",
+    "data_dir": "data",
+    "static_dir": "frontend\\dist\\assets",
+    "templates_dir": "frontend\\dist",
+    "log_dir": "logs",
+    "debug_mode": true,
+    "llm_provider": "openrouter",
+    "llm_config": {
+        "default_model": "mistralai/devstral-2512:free",
+        "base_url": "",
+        "api_key": ""
+    },
+    "encrypted_llm_config": {
+        "api_key": "<encrypted_api_key_here>"
     }
-  },
-  "server": {
-    "port": 8080,
-    "debug": false
-  },
-  "storage": {
-    "data_path": "./data"
-  }
 }
 ```
 
