@@ -7,10 +7,12 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // ItemService 处理物品相关的业务逻辑
@@ -40,7 +42,7 @@ func NewItemService(scenesPath string) *ItemService {
 	}
 
 	if err := os.MkdirAll(scenesPath, 0755); err != nil {
-		fmt.Printf("警告: 创建场景数据目录失败: %v\n", err)
+		utils.GetLogger().Warn("创建场景数据目录失败", map[string]interface{}{"scenes_path": scenesPath, "err": err})
 	}
 
 	service := &ItemService{
@@ -135,7 +137,12 @@ func (s *ItemService) loadSceneItemsSafe(sceneID string) (*CachedItemData, error
 			continue // 跳过无法解析的文件
 		}
 
-		cached.Items[itemData.ID] = &itemData
+		if strings.TrimSpace(itemData.ID) == "" {
+			continue
+		}
+
+		itemCopy := itemData
+		cached.Items[itemCopy.ID] = &itemCopy
 	}
 
 	// 更新缓存
