@@ -14,6 +14,7 @@ import (
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
 	"github.com/Corphon/SceneIntruderMCP/internal/storage"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // UserService 处理用户相关的业务逻辑
@@ -42,13 +43,13 @@ func NewUserService() *UserService {
 	basePath := "data/users"
 
 	if err := os.MkdirAll(basePath, 0755); err != nil {
-		fmt.Printf("警告: 创建用户数据目录失败: %v\n", err)
+		utils.GetLogger().Warn("创建用户数据目录失败", map[string]interface{}{"base_path": basePath, "err": err})
 	}
 
 	// 创建 FileStorage 实例
 	fileStorage, err := storage.NewFileStorage(basePath)
 	if err != nil {
-		fmt.Printf("警告: 创建文件存储服务失败: %v\n", err)
+		utils.GetLogger().Warn("创建文件存储服务失败", map[string]interface{}{"base_path": basePath, "err": err})
 		fileStorage = nil
 	}
 
@@ -164,7 +165,7 @@ func (s *UserService) CreateUser(username string, email string) (*models.User, e
 // ensureDefaultUser 会在缺少指定用户时创建一个基础用户，保证控制台功能可用
 func (s *UserService) ensureDefaultUser(userID string) {
 	if err := s.EnsureUserExists(userID); err != nil {
-		fmt.Printf("警告: 创建默认用户失败: %v\n", err)
+		utils.GetLogger().Warn("创建默认用户失败", map[string]interface{}{"user_id": userID, "err": err})
 	}
 }
 
