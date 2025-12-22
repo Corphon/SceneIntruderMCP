@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +16,7 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
 	"github.com/Corphon/SceneIntruderMCP/internal/storage"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // SceneData 包含场景及其相关数据
@@ -64,15 +64,17 @@ func NewSceneService(basePath string) *SceneService {
 		basePath = "data/scenes"
 	}
 
+	logger := utils.GetLogger()
+
 	// 创建基础目录
 	if err := os.MkdirAll(basePath, 0755); err != nil {
-		fmt.Printf("警告: 创建场景目录失败: %v\n", err)
+		logger.Warn("创建场景目录失败", map[string]interface{}{"base_path": basePath, "err": err})
 	}
 
 	// 初始化 FileStorage
 	fileStorage, err := storage.NewFileStorage(basePath)
 	if err != nil {
-		fmt.Printf("警告: 创建文件存储失败: %v\n", err)
+		logger.Warn("创建文件存储失败", map[string]interface{}{"base_path": basePath, "err": err})
 		fileStorage = nil
 	}
 
@@ -170,7 +172,7 @@ func (s *SceneService) CreateScene(userID, title, description, content, source s
 	}
 
 	if err := s.UpdateContext(sceneID, &context); err != nil {
-		log.Printf("警告: 初始化场景上下文失败: %v", err)
+		utils.GetLogger().Warn("初始化场景上下文失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		// 不要让上下文初始化失败阻断场景创建
 	}
 
@@ -182,7 +184,7 @@ func (s *SceneService) CreateScene(userID, title, description, content, source s
 	}
 
 	if err := s.UpdateSettings(sceneID, &settings); err != nil {
-		log.Printf("警告: 初始化场景设置失败: %v", err)
+		utils.GetLogger().Warn("初始化场景设置失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		// 不要让设置初始化失败阻断场景创建
 	}
 
@@ -271,7 +273,7 @@ func (s *SceneService) enforceMaxCacheSize() {
 		for i := 0; i < removeCount; i++ {
 			delete(s.sceneCache, entries[i].key)
 		}
-		log.Printf("场景服务缓存大小限制执行: 移除了 %d 个最旧的缓存条目", removeCount)
+		utils.GetLogger().Info("场景服务缓存大小限制执行", map[string]interface{}{"removed": removeCount, "max_cache_size": s.maxCacheSize})
 	}
 }
 
@@ -327,7 +329,7 @@ func (s *SceneService) LoadScene(sceneID string) (*SceneData, error) {
 	characters, err := s.loadCharactersCached(sceneID)
 	if err != nil {
 		// 角色加载失败不应该阻断场景加载
-		fmt.Printf("警告: 加载角色失败: %v\n", err)
+		utils.GetLogger().Warn("加载角色失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		characters = make([]*models.Character, 0)
 	}
 
@@ -336,7 +338,7 @@ func (s *SceneService) LoadScene(sceneID string) (*SceneData, error) {
 	if s.ItemService != nil {
 		loadedItems, err := s.ItemService.GetAllItems(sceneID)
 		if err != nil {
-			fmt.Printf("警告: 加载物品失败: %v\n", err)
+			utils.GetLogger().Warn("加载物品失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		} else {
 			items = loadedItems
 		}
@@ -415,7 +417,7 @@ func (s *SceneService) LoadSceneNoCache(sceneID string) (*SceneData, error) {
 
 	characters, err := s.loadCharactersCached(sceneID)
 	if err != nil {
-		fmt.Printf("警告: 加载角色失败: %v\n", err)
+		utils.GetLogger().Warn("加载角色失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		characters = make([]*models.Character, 0)
 	}
 
@@ -424,7 +426,7 @@ func (s *SceneService) LoadSceneNoCache(sceneID string) (*SceneData, error) {
 		if loadedItems, err := s.ItemService.GetAllItems(sceneID); err == nil {
 			items = loadedItems
 		} else {
-			fmt.Printf("警告: 加载物品失败: %v\n", err)
+			utils.GetLogger().Warn("加载物品失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		}
 	}
 
@@ -489,7 +491,7 @@ func (s *SceneService) loadCharactersCached(sceneID string) ([]*models.Character
 			// 🔧 关键修复：使用相对路径而不是绝对路径
 			characterPath := filepath.Join("characters", file.Name())
 			if err := s.FileCache.LoadJSONFile(sceneID, characterPath, &character); err != nil {
-				fmt.Printf("警告: 读取角色数据失败: %v\n", err)
+				utils.GetLogger().Warn("读取角色数据失败", map[string]interface{}{"scene_id": sceneID, "character_path": characterPath, "err": err})
 				continue
 			}
 
@@ -767,19 +769,19 @@ func (s *SceneService) GetAllScenes() ([]models.Scene, error) {
 		var scene models.Scene
 		if s.FileCache != nil {
 			if err := s.FileCache.LoadJSONFile(sceneID, "scene.json", &scene); err != nil {
-				log.Printf("警告: 无法读取场景 %s: %v", sceneID, err)
+				utils.GetLogger().Warn("无法读取场景", map[string]interface{}{"scene_id": sceneID, "err": err})
 				continue
 			}
 		} else {
 			// 降级到直接文件读取
 			sceneData, err := os.ReadFile(scenePath)
 			if err != nil {
-				log.Printf("警告: 无法读取场景文件 %s: %v", scenePath, err)
+				utils.GetLogger().Warn("无法读取场景文件", map[string]interface{}{"scene_id": sceneID, "scene_path": scenePath, "err": err})
 				continue
 			}
 
 			if err := json.Unmarshal(sceneData, &scene); err != nil {
-				log.Printf("警告: 无法解析场景数据 %s: %v", sceneID, err)
+				utils.GetLogger().Warn("无法解析场景数据", map[string]interface{}{"scene_id": sceneID, "err": err})
 				continue
 			}
 		}
@@ -934,7 +936,7 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 
 	if len(analysisResult.OriginalSegments) > 0 {
 		if err := s.saveOriginalSegments(sceneDir, analysisResult.OriginalSegments); err != nil {
-			log.Printf("警告: 保存原文片段失败: %v", err)
+			utils.GetLogger().Warn("保存原文片段失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 		}
 	}
 
@@ -942,7 +944,7 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 	if len(analysisResult.Characters) > 0 {
 		charactersDir := filepath.Join(s.BasePath, sceneID, "characters")
 		if err := os.MkdirAll(charactersDir, 0755); err != nil {
-			log.Printf("警告: 创建角色目录失败: %v", err)
+			utils.GetLogger().Warn("创建角色目录失败", map[string]interface{}{"scene_id": sceneID, "dir": charactersDir, "err": err})
 		} else {
 			for i, character := range analysisResult.Characters {
 				// 创建角色ID
@@ -952,13 +954,13 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 
 				charDataJSON, err := json.MarshalIndent(character, "", "  ")
 				if err != nil {
-					log.Printf("警告: 无法序列化角色数据: %v", err)
+					utils.GetLogger().Warn("无法序列化角色数据", map[string]interface{}{"scene_id": sceneID, "character_id": charID, "err": err})
 					continue
 				}
 
 				charPath := filepath.Join(charactersDir, charID+".json")
 				if err := os.WriteFile(charPath, charDataJSON, 0644); err != nil {
-					log.Printf("警告: 保存角色数据失败: %v", err)
+					utils.GetLogger().Warn("保存角色数据失败", map[string]interface{}{"scene_id": sceneID, "character_id": charID, "path": charPath, "err": err})
 				}
 			}
 		}
@@ -968,7 +970,7 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 	if len(analysisResult.Items) > 0 {
 		itemsDir := filepath.Join(s.BasePath, sceneID, "items")
 		if err := os.MkdirAll(itemsDir, 0755); err != nil {
-			log.Printf("警告: 创建物品目录失败: %v", err)
+			utils.GetLogger().Warn("创建物品目录失败", map[string]interface{}{"scene_id": sceneID, "dir": itemsDir, "err": err})
 		} else {
 			for i, item := range analysisResult.Items {
 				// 创建物品ID
@@ -978,13 +980,13 @@ func (s *SceneService) CreateSceneFromText(userID, text, title string) (*models.
 
 				itemDataJSON, err := json.MarshalIndent(item, "", "  ")
 				if err != nil {
-					log.Printf("警告: 无法序列化物品数据: %v", err)
+					utils.GetLogger().Warn("无法序列化物品数据", map[string]interface{}{"scene_id": sceneID, "item_id": itemID, "err": err})
 					continue
 				}
 
 				itemPath := filepath.Join(itemsDir, itemID+".json")
 				if err := os.WriteFile(itemPath, itemDataJSON, 0644); err != nil {
-					log.Printf("警告: 保存物品数据失败: %v", err)
+					utils.GetLogger().Warn("保存物品数据失败", map[string]interface{}{"scene_id": sceneID, "item_id": itemID, "path": itemPath, "err": err})
 				}
 			}
 		}
@@ -1072,7 +1074,7 @@ func (s *SceneService) loadOriginalSegments(sceneID string) []models.OriginalSeg
 	}
 	var segments []models.OriginalSegment
 	if err := json.Unmarshal(data, &segments); err != nil {
-		log.Printf("警告: 解析原文片段失败 (%s): %v", sceneID, err)
+		utils.GetLogger().Warn("解析原文片段失败", map[string]interface{}{"scene_id": sceneID, "path": path, "err": err})
 		return nil
 	}
 	for i := range segments {
@@ -1102,11 +1104,11 @@ func (s *SceneService) ensureOriginalSegments(sceneID string, sceneData *SceneDa
 	}
 	sceneDir := filepath.Join(s.BasePath, sceneID)
 	if err := os.MkdirAll(sceneDir, 0755); err != nil {
-		log.Printf("警告: 自动创建场景目录失败 (%s): %v", sceneID, err)
+		utils.GetLogger().Warn("自动创建场景目录失败", map[string]interface{}{"scene_id": sceneID, "dir": sceneDir, "err": err})
 		return
 	}
 	if err := s.saveOriginalSegments(sceneDir, segments); err != nil {
-		log.Printf("警告: 自动保存原文片段失败 (%s): %v", sceneID, err)
+		utils.GetLogger().Warn("自动保存原文片段失败", map[string]interface{}{"scene_id": sceneID, "dir": sceneDir, "err": err})
 		return
 	}
 	sceneData.OriginalSegments = segments
