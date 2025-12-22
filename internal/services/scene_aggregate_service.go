@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // AggregateOptions 聚合选项
@@ -276,7 +277,7 @@ func (s *SceneAggregateService) generateAggregateData(sceneID string, options *A
 			story, err := s.StoryService.GetStoryData(sceneID, nil)
 			if err != nil {
 				// 故事数据获取失败记录但不阻断
-				fmt.Printf("警告: 获取故事数据失败: %v\n", err)
+				utils.GetLogger().Warn("获取故事数据失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 				return
 			}
 			storyData = story
@@ -302,7 +303,7 @@ func (s *SceneAggregateService) generateAggregateData(sceneID string, options *A
 	if options.IncludeConversations && s.ContextService != nil {
 		convs, err := s.ContextService.GetRecentConversations(sceneID, options.ConversationLimit)
 		if err != nil {
-			fmt.Printf("警告: 获取对话历史失败: %v\n", err)
+			utils.GetLogger().Warn("获取对话历史失败", map[string]interface{}{"scene_id": sceneID, "limit": options.ConversationLimit, "err": err})
 			conversations = []models.Conversation{}
 		} else {
 			conversations = convs
