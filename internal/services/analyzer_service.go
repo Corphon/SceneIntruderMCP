@@ -13,6 +13,7 @@ import (
 
 	"github.com/Corphon/SceneIntruderMCP/internal/llm"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // AnalyzerService 分析和提取文本中的各种信息
@@ -766,7 +767,7 @@ func (s *AnalyzerService) preliminaryAnalysis(ctx context.Context, text string, 
 
 	if err != nil {
 		// 初步分析失败不是致命错误，记录错误但继续
-		fmt.Printf("文本类型识别失败: %v\n", err)
+		utils.GetLogger().Warn("文本类型识别失败", map[string]interface{}{"err": err})
 	} else {
 		// 设置文本类型和主题
 		result.TextType = typeInfo.Type
