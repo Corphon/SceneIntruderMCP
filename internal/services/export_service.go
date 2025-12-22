@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 type ExportService struct {
@@ -90,7 +91,7 @@ func (s *ExportService) loadSceneDataSafe(sceneID string, includeConversations, 
 		conversations, err := s.getInteractionHistory(sceneID)
 		if err != nil {
 			// 对话加载失败不阻止导出，但记录详细错误信息
-			fmt.Printf("⚠️ 导出服务: 加载场景 %s 的对话历史失败(缓存加载): %v\n", sceneID, err)
+			utils.GetLogger().Warn("导出服务加载对话历史失败（缓存加载）", map[string]interface{}{"scene_id": sceneID, "err": err})
 			conversations = []models.Conversation{}
 		}
 		cached.Conversations = conversations
@@ -3969,7 +3970,7 @@ func (s *ExportService) ExportSceneData(ctx context.Context, sceneID string, for
 		conversations, err = s.getInteractionHistory(sceneID)
 		if err != nil {
 			// 对话获取失败不阻止导出，但记录详细错误信息
-			fmt.Printf("⚠️ 导出服务: 加载场景 %s 的对话历史失败: %v\n", sceneID, err)
+			utils.GetLogger().Warn("导出服务加载对话历史失败", map[string]interface{}{"scene_id": sceneID, "err": err})
 			conversations = []models.Conversation{}
 		}
 	}
@@ -5984,7 +5985,7 @@ func (s *ExportService) cleanupExpiredCache() {
 	}
 
 	if expiredCount > 0 {
-		fmt.Printf("🧹 导出服务缓存清理: 清理了 %d 个过期缓存\n", expiredCount)
+		utils.GetLogger().Info("导出服务缓存清理", map[string]interface{}{"expired_count": expiredCount})
 	}
 }
 
