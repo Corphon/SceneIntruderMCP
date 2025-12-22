@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // UsageStats 表示API使用统计
@@ -45,7 +47,7 @@ func NewStatsService() *StatsService {
 
 	// 确保统计数据目录存在
 	if err := os.MkdirAll(basePath, 0755); err != nil {
-		fmt.Printf("Warning: Failed to create stats directory: %v\n", err)
+		utils.GetLogger().Warn("创建统计目录失败", map[string]interface{}{"base_path": basePath, "err": err})
 	}
 
 	service := &StatsService{
@@ -85,7 +87,7 @@ func (s *StatsService) initStatsUnlocked() {
 
 	// 保存初始数据
 	if err := s.saveStats(s.cachedStats); err != nil {
-		fmt.Printf("警告: 保存初始统计数据失败: %v\n", err)
+		utils.GetLogger().Warn("保存初始统计数据失败", map[string]interface{}{"stats_file": s.statsFile, "err": err})
 	}
 }
 
@@ -127,7 +129,7 @@ func (s *StatsService) updateStatsForNewPeriod(stats *UsageStats) {
 	if updated {
 		stats.LastUpdated = now
 		if err := s.saveStats(stats); err != nil {
-			fmt.Printf("警告: 更新时间段统计失败: %v\n", err)
+			utils.GetLogger().Warn("更新时间段统计失败", map[string]interface{}{"stats_file": s.statsFile, "err": err})
 		}
 	}
 }
@@ -318,7 +320,7 @@ func (s *StatsService) startPeriodicSave() {
 			s.mutex.Lock()
 			if s.isDirty {
 				if err := s.saveStatsImmediate(); err != nil {
-					fmt.Printf("警告: 定时保存统计数据失败: %v\n", err)
+					utils.GetLogger().Warn("定时保存统计数据失败", map[string]interface{}{"stats_file": s.statsFile, "err": err})
 				}
 			}
 			s.mutex.Unlock()
