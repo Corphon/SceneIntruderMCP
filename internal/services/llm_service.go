@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/llm"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 const (
@@ -387,7 +387,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 		case RoleAssistant:
 			assistantMessages = append(assistantMessages, msg.Content)
 		default:
-			log.Printf("Warning: Unknown message role type: %s", msg.Role)
+			utils.GetLogger().Warn("Unknown message role type", map[string]interface{}{"role": msg.Role})
 		}
 	}
 
@@ -408,7 +408,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 	if s.cache != nil {
 		var cachedResult ChatCompletionResponse
 		if s.checkAndUseCache(cacheKey, &cachedResult) {
-			log.Printf("DEBUG:LLM Chat cache hit: %s", cacheKey[:8])
+			utils.GetLogger().Info("DEBUG:LLM Chat cache hit", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 			return cachedResult, nil
 		}
 	}
@@ -452,7 +452,7 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 	// 保存到缓存
 	if s.cache != nil {
 		s.saveToCache(cacheKey, result)
-		log.Printf("DEBUG:Save to LLM chat cache: %s", cacheKey[:8])
+		utils.GetLogger().Info("DEBUG:Save to LLM chat cache", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 	}
 
 	return result, nil
@@ -1435,7 +1435,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 				// 尝试将缓存的 JSON 字节反序列化到输出结构
 				err := json.Unmarshal(responseBytes, outputSchema)
 				if err == nil {
-					log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
+					utils.GetLogger().Info("DEBUG:LLM cache hit", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 					return true
 				}
 			}
@@ -1448,7 +1448,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 				if err == nil {
 					err = json.Unmarshal(responseJSON, outputSchema)
 					if err == nil {
-						log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
+						utils.GetLogger().Info("DEBUG:LLM cache hit", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 						return true
 					}
 				}
@@ -1456,7 +1456,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 				// 对于普通响应，直接返回
 				if chatResp, ok := outputSchema.(*ChatCompletionResponse); ok {
 					*chatResp = resp
-					log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
+					utils.GetLogger().Info("DEBUG:LLM cache hit", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 					return true
 				}
 			}
@@ -1467,7 +1467,7 @@ func (s *LLMService) checkAndUseCache(cacheKey string, outputSchema interface{})
 			if outputSchema != nil {
 				err := json.Unmarshal([]byte(resp.Text), outputSchema)
 				if err == nil {
-					log.Printf("DEBUG:LLM cache hit: %s", cacheKey[:8])
+					utils.GetLogger().Info("DEBUG:LLM cache hit", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 					return true
 				}
 			}
@@ -1483,13 +1483,13 @@ func (s *LLMService) saveToCache(cacheKey string, response interface{}) {
 		// 总是将响应序列化为JSON字节存储，以确保一致的类型处理
 		responseBytes, err := json.Marshal(response)
 		if err != nil {
-			log.Printf("ERROR:Failed to serialize cached response: %v", err)
+			utils.GetLogger().Error("Failed to serialize cached response", map[string]interface{}{"err": err})
 			// 仍然尝试保存原始响应以向后兼容
 			s.cache.saveToCache(cacheKey, response)
 		} else {
 			s.cache.saveToCache(cacheKey, responseBytes)
 		}
-		log.Printf("DEBUG:Save to LLM cache: %s", cacheKey[:8])
+		utils.GetLogger().Info("DEBUG:Save to LLM cache", map[string]interface{}{"cache_key_prefix": cacheKey[:8]})
 	}
 }
 
