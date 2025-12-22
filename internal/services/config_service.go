@@ -4,13 +4,13 @@ package services
 import (
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"sync"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // ConfigService 提供配置管理功能
@@ -291,9 +291,14 @@ func (s *ConfigService) UpdateLLMConfig(provider string, configMap map[string]st
 			// Update provider with the new configuration
 			err := llmService.UpdateProvider(provider, newConfigMap)
 			if err != nil {
-				log.Printf("警告: 更新LLM服务失败: %v", err)
+				utils.GetLogger().Warn("failed to update llm service", map[string]interface{}{
+					"provider": provider,
+					"err":      err.Error(),
+				})
 			} else {
-				log.Printf("LLM服务已成功更新，提供商: %s", provider)
+				utils.GetLogger().Info("llm service updated", map[string]interface{}{
+					"provider": provider,
+				})
 			}
 		}
 	}()
@@ -307,7 +312,9 @@ func (s *ConfigService) notifySubscribersAsyncSafe(oldConfig, newConfig *config.
 		go func(sub ConfigChangeSubscriber) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("配置变更通知失败: %v", r)
+					utils.GetLogger().Error("config change notification failed", map[string]interface{}{
+						"err": fmt.Sprint(r),
+					})
 					// 🔧 使用原子操作或单独的锁
 					s.updateNotificationStats(false)
 				}
