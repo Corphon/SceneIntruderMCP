@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
 	"github.com/Corphon/SceneIntruderMCP/internal/storage"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // 角色互动触发条件常量
@@ -56,13 +56,19 @@ func NewStoryService(llmService *LLMService) *StoryService {
 	// 创建基础路径
 	basePath := "data/stories"
 	if err := os.MkdirAll(basePath, 0755); err != nil {
-		fmt.Printf("警告: 创建故事数据目录失败: %v\n", err)
+		utils.GetLogger().Error("failed to create story data directory", map[string]interface{}{
+			"base_path": basePath,
+			"err":       err.Error(),
+		})
 	}
 
 	// 创建文件存储
 	fileStorage, err := storage.NewFileStorage(basePath)
 	if err != nil {
-		fmt.Printf("警告: 创建故事文件存储失败: %v\n", err)
+		utils.GetLogger().Error("failed to create story file storage", map[string]interface{}{
+			"base_path": basePath,
+			"err":       err.Error(),
+		})
 		return nil
 	}
 
@@ -161,7 +167,10 @@ func (s *StoryService) InitializeStoryForScene(sceneID string, preferences *mode
 	if err == nil {
 		return storyData, nil
 	}
-	log.Printf("fast story initialization failed for %s: %v, falling back to legacy pipeline", sceneID, err)
+	utils.GetLogger().Warn("fast story initialization failed; falling back to legacy", map[string]interface{}{
+		"scene_id": sceneID,
+		"err":      err.Error(),
+	})
 	return s.initializeStoryForSceneLegacy(sceneID, preferences)
 }
 
@@ -178,7 +187,10 @@ func (s *StoryService) initializeStoryForSceneLegacy(sceneID string, preferences
 
 	storyData, err := s.extractInitialStoryFromText(sceneData, preferences)
 	if err != nil {
-		log.Printf("story initialization via LLM failed for %s: %v, using fallback synthesis", sceneID, err)
+		utils.GetLogger().Warn("story initialization via llm failed; using fallback synthesis", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		storyData, err = s.buildFallbackStoryData(sceneData)
 		if err != nil {
 			return nil, fmt.Errorf("提取故事信息失败: %w", err)
@@ -351,29 +363,44 @@ func (s *StoryService) buildQuickStoryContext(sceneData *SceneData, storyData *m
 func (s *StoryService) analyzeRemainingNodesAsync(sceneID string, preferences *models.UserPreferences) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("background analyze crashed for %s: %v", sceneID, r)
+			utils.GetLogger().Error("background analyze crashed", map[string]interface{}{
+				"scene_id": sceneID,
+				"err":      fmt.Sprint(r),
+			})
 		}
 	}()
 
 	storyData, err := s.loadStoryDataSafe(sceneID)
 	if err != nil {
-		log.Printf("background analyze skipped, load story failed for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("background analyze skipped (load story failed)", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 	raw, err := json.Marshal(storyData)
 	if err != nil {
-		log.Printf("background analyze skipped, marshal failed for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("background analyze skipped (marshal failed)", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 	var working models.StoryData
 	if err := json.Unmarshal(raw, &working); err != nil {
-		log.Printf("background analyze skipped, unmarshal failed for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("background analyze skipped (unmarshal failed)", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 
 	sceneData, err := s.SceneService.LoadScene(sceneID)
 	if err != nil {
-		log.Printf("background analyze skipped, load scene failed for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("background analyze skipped (load scene failed)", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 	isEnglish := isEnglishText(sceneData.Scene.Name + " " + sceneData.Scene.Description)
@@ -396,7 +423,10 @@ func (s *StoryService) analyzeRemainingNodesAsync(sceneID string, preferences *m
 		updated = true
 		working.LastUpdated = time.Now()
 		if err := s.saveStoryData(sceneID, &working); err != nil {
-			log.Printf("background analyze save failed for %s: %v", sceneID, err)
+			utils.GetLogger().Warn("background analyze save failed", map[string]interface{}{
+				"scene_id": sceneID,
+				"err":      err.Error(),
+			})
 			return
 		}
 		s.invalidateStoryCache(sceneID)
@@ -404,7 +434,9 @@ func (s *StoryService) analyzeRemainingNodesAsync(sceneID string, preferences *m
 	}
 
 	if updated {
-		log.Printf("background node analysis completed for %s", sceneID)
+		utils.GetLogger().Info("background node analysis completed", map[string]interface{}{
+			"scene_id": sceneID,
+		})
 	}
 }
 
@@ -1398,7 +1430,10 @@ Return JSON:
 		},
 	})
 	if err != nil {
-		log.Printf("generateContinuationNode fallback for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("generate continuation node failed; using fallback", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return s.generateFallbackContinuationNode(sceneID, sceneData, storyData, segments, isEnglish), nil
 	}
 
@@ -1413,7 +1448,10 @@ Return JSON:
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal([]byte(jsonStr), &payload); err != nil {
-		log.Printf("parse continuation node failed for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("parse continuation node failed; using fallback", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return s.generateFallbackContinuationNode(sceneID, sceneData, storyData, segments, isEnglish), nil
 	}
 
@@ -1596,11 +1634,17 @@ func (s *StoryService) persistOriginalSegmentsForScene(sceneData *SceneData, seg
 	}
 	sceneDir := filepath.Join(s.SceneService.BasePath, sceneID)
 	if err := os.MkdirAll(sceneDir, 0755); err != nil {
-		log.Printf("警告: 创建场景目录失败 (%s): %v", sceneID, err)
+		utils.GetLogger().Warn("failed to create scene directory for original segments", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 	if err := s.SceneService.saveOriginalSegments(sceneDir, segments); err != nil {
-		log.Printf("警告: 保存原文片段失败 (%s): %v", sceneID, err)
+		utils.GetLogger().Warn("failed to save original segments", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 	sceneData.OriginalSegments = make([]models.OriginalSegment, len(segments))
@@ -1995,13 +2039,19 @@ func (s *StoryService) fetchRecentConsoleStoryEntries(sceneID string, limit int)
 		if entries, err := s.ContextService.GetRecentConsoleStoryEntries(sceneID, target); err == nil {
 			source = entries
 		} else {
-			log.Printf("context fetch failed for %s: %v", sceneID, err)
+			utils.GetLogger().Warn("context fetch failed", map[string]interface{}{
+				"scene_id": sceneID,
+				"err":      err.Error(),
+			})
 		}
 	}
 	if len(source) == 0 {
 		sceneData, err := s.SceneService.LoadSceneNoCache(sceneID)
 		if err != nil {
-			log.Printf("scene load failed for context fallback %s: %v", sceneID, err)
+			utils.GetLogger().Warn("scene load failed for context fallback", map[string]interface{}{
+				"scene_id": sceneID,
+				"err":      err.Error(),
+			})
 			return nil
 		}
 		source = sceneData.Context.Conversations
@@ -2430,7 +2480,10 @@ func (s *StoryService) applyContextReveals(sceneID string, storyData *models.Sto
 
 	sceneData, err := s.SceneService.LoadScene(sceneID)
 	if err != nil {
-		log.Printf("warning: load scene failed when applying context reveals for %s: %v", sceneID, err)
+		utils.GetLogger().Warn("load scene failed when applying context reveals", map[string]interface{}{
+			"scene_id": sceneID,
+			"err":      err.Error(),
+		})
 		return
 	}
 
@@ -2941,11 +2994,12 @@ Respond with a JSON object in the following format:
 		// 异步保存物品
 		go func() {
 			if err := s.ItemService.AddItem(sceneID, item); err != nil {
-				if isEnglish {
-					fmt.Printf("Warning: Failed to save new item: %v\n", err)
-				} else {
-					fmt.Printf("警告: 保存新物品失败: %v\n", err)
-				}
+				utils.GetLogger().Warn("failed to save new item", map[string]interface{}{
+					"scene_id":  sceneID,
+					"item_id":   item.ID,
+					"item_name": item.Name,
+					"err":       err.Error(),
+				})
 			}
 		}()
 	}
@@ -3286,20 +3340,21 @@ Return in JSON format:
 			if s.ItemService != nil {
 				go func() {
 					if err := s.ItemService.AddItem(sceneID, &item); err != nil {
-						if isEnglish {
-							fmt.Printf("Warning: Failed to save discovered item: %v\n", err)
-						} else {
-							fmt.Printf("警告: 保存发现的物品失败: %v\n", err)
-						}
+						utils.GetLogger().Warn("failed to save discovered item", map[string]interface{}{
+							"scene_id":  sceneID,
+							"item_id":   item.ID,
+							"item_name": item.Name,
+							"err":       err.Error(),
+						})
 					}
 				}()
 			} else {
 				// 记录日志：ItemService未初始化，物品仅返回但未持久化
-				if isEnglish {
-					fmt.Printf("Warning: ItemService not initialized, item '%s' not saved to persistent storage\n", item.Name)
-				} else {
-					fmt.Printf("警告: ItemService未初始化，物品'%s'未保存到持久化存储\n", item.Name)
-				}
+				utils.GetLogger().Warn("item service not initialized; item not persisted", map[string]interface{}{
+					"scene_id":  sceneID,
+					"item_id":   item.ID,
+					"item_name": item.Name,
+				})
 			}
 		}
 
@@ -3867,7 +3922,11 @@ func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPref
 			if snippet != "" && s.ContextService != nil {
 				meta := map[string]interface{}{"conversation_type": "story_original", "source": "advance_story"}
 				if err := s.ContextService.AddConversation(sceneID, "story", snippet, meta, nextNode.ID); err != nil {
-					log.Printf("warning: append original node to context failed for %s/%s: %v", sceneID, nextNode.ID, err)
+					utils.GetLogger().Warn("append original node to context failed", map[string]interface{}{
+						"scene_id": sceneID,
+						"node_id":  nextNode.ID,
+						"err":      err.Error(),
+					})
 				}
 			}
 		}
@@ -3930,7 +3989,11 @@ func (s *StoryService) AdvanceStory(sceneID string, preferences *models.UserPref
 		if s.ContextService != nil && llmResp != "" {
 			meta := map[string]interface{}{"conversation_type": "story_console", "channel": "ai", "mode": "console_story", "source": "advance_story"}
 			if err := s.ContextService.AddConversation(sceneID, "console_story", llmResp, meta, nextNodeID); err != nil {
-				log.Printf("warning: append LLM response to context failed for %s/%s: %v", sceneID, nextNodeID, err)
+				utils.GetLogger().Warn("append llm response to context failed", map[string]interface{}{
+					"scene_id": sceneID,
+					"node_id":  nextNodeID,
+					"err":      err.Error(),
+				})
 			}
 		}
 
@@ -4726,11 +4789,11 @@ func (s *StoryService) processCharacterInteractionTriggersUnsafe(sceneID string,
 		)
 
 		if err != nil {
-			if isEnglish {
-				fmt.Printf("Warning: Failed to trigger character interaction: %v\n", err)
-			} else {
-				fmt.Printf("警告: 触发角色互动失败: %v\n", err)
-			}
+			utils.GetLogger().Warn("failed to trigger character interaction", map[string]interface{}{
+				"scene_id": sceneID,
+				"node_id":  nodeID,
+				"err":      err.Error(),
+			})
 			continue
 		}
 
