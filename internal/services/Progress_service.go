@@ -3,9 +3,10 @@ package services
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
+
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // ProgressUpdate 表示进度更新
@@ -34,6 +35,13 @@ type ProgressService struct {
 	mutex       sync.RWMutex
 	cleanup     *time.Ticker
 	stopCleanup chan struct{}
+}
+
+func safeCloseProgressUpdateChan(ch chan ProgressUpdate) {
+	defer func() {
+		_ = recover() // closing a closed channel panics
+	}()
+	close(ch)
 }
 
 // NewProgressService 创建进度服务实例
@@ -223,18 +231,8 @@ func (t *ProgressTracker) Unsubscribe(subscriber chan ProgressUpdate) {
 	// 检查订阅者是否仍在列表中
 	if _, exists := t.Subscribers[subscriber]; exists {
 		delete(t.Subscribers, subscriber)
-
-		// 安全关闭通道 - only close if not already closed
-		select {
-		case _, ok := <-subscriber:
-			// Channel is already closed (ok will be false)
-			if !ok {
-				return
-			}
-		default:
-			// Channel is open, safe to close
-			close(subscriber)
-		}
+		// 关闭时不要尝试从通道读取（会吞掉缓冲中的最后一条进度，导致前端卡住）
+		safeCloseProgressUpdateChan(subscriber)
 	}
 }
 
@@ -265,7 +263,9 @@ func (s *ProgressService) CleanupCompletedTasks(maxAge time.Duration) {
 		}
 		s.mutex.Unlock()
 
-		log.Printf("🧹 进度服务清理: 清理了 %d 个过期任务", len(toDelete))
+		utils.GetLogger().Info("progress cleanup completed tasks", map[string]interface{}{
+			"count": len(toDelete),
+		})
 	}
 }
 
@@ -300,7 +300,9 @@ func (s *ProgressService) CleanupAbandonedTrackers(maxAge time.Duration) {
 		}
 		s.mutex.Unlock()
 
-		log.Printf("🧹 进度服务清理: 清理了 %d 个被遗弃的任务", len(toDelete))
+		utils.GetLogger().Info("progress cleanup abandoned trackers", map[string]interface{}{
+			"count": len(toDelete),
+		})
 	}
 }
 
@@ -316,23 +318,16 @@ func (t *ProgressTracker) notifySubscribers(update ProgressUpdate, closeChannels
 		}
 
 		if closeChannels {
-			// Only close if not already closed
-			select {
-			case _, ok := <-subscriber:
-				// Channel already closed
-				if !ok {
-					continue
-				}
-			default:
-				// Channel is open, safe to close
-				close(subscriber)
-			}
+			// 关闭时不要读取通道：读会消费掉缓冲消息（可能就是 100% completed）
+			safeCloseProgressUpdateChan(subscriber)
 		}
 	}
 
 	// 只在有丢弃消息时记录一次日志
 	if droppedCount > 0 {
-		log.Printf("进度通知: %d 个订阅者通道已满，消息被丢弃", droppedCount)
+		utils.GetLogger().Warn("progress update dropped (subscriber channels full)", map[string]interface{}{
+			"dropped": droppedCount,
+		})
 	}
 
 	if closeChannels {
