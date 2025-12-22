@@ -11,6 +11,7 @@ import (
 
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // CharacterService 处理角色相关的业务逻辑
@@ -178,12 +179,12 @@ func (s *CharacterService) GenerateResponse(sceneID, characterID, userMessage st
 	err = s.ContextService.AddConversation(sceneID, "user", userMessage, nil, "")
 	if err != nil {
 		// 记录失败不影响响应
-		fmt.Printf("记录用户对话失败: %v\n", err)
+		utils.GetLogger().Warn("记录用户对话失败", map[string]interface{}{"scene_id": sceneID, "speaker": "user", "err": err})
 	}
 
 	err = s.ContextService.AddConversation(sceneID, characterID, characterResponse, nil, "")
 	if err != nil {
-		fmt.Printf("记录角色回应失败: %v\n", err)
+		utils.GetLogger().Warn("记录角色回应失败", map[string]interface{}{"scene_id": sceneID, "speaker": characterID, "err": err})
 	}
 
 	// 返回角色回应
@@ -369,11 +370,7 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 		"",
 	)
 	if err != nil {
-		if isEnglish {
-			fmt.Printf("Failed to record user message: %v\n", err)
-		} else {
-			fmt.Printf("记录用户消息失败: %v\n", err)
-		}
+		utils.GetLogger().Warn("记录用户消息失败", map[string]interface{}{"scene_id": sceneID, "speaker": "user", "err": err})
 	}
 
 	// 添加角色回应
@@ -385,11 +382,7 @@ func (s *CharacterService) GenerateResponseWithEmotion(sceneID, characterID, mes
 		"",
 	)
 	if err != nil {
-		if isEnglish {
-			fmt.Printf("Failed to record character response: %v\n", err)
-		} else {
-			fmt.Printf("记录角色回应失败: %v\n", err)
-		}
+		utils.GetLogger().Warn("记录角色回应失败", map[string]interface{}{"scene_id": sceneID, "speaker": characterID, "err": err})
 	}
 
 	return &emotionalData, nil
@@ -857,7 +850,7 @@ func (s *CharacterService) GenerateCharacterInteraction(
 		)
 
 		if err != nil {
-			fmt.Printf("记录角色互动对话失败: %v\n", err)
+			utils.GetLogger().Warn("记录角色互动对话失败", map[string]interface{}{"scene_id": sceneID, "speaker": dialogue.CharacterID, "interaction_id": interaction.ID, "err": err})
 		}
 	}
 
@@ -1022,11 +1015,7 @@ func (s *CharacterService) SimulateCharactersConversation(
 		)
 
 		if err != nil {
-			if isEnglish {
-				fmt.Printf("Failed to record character dialogue: %v\n", err)
-			} else {
-				fmt.Printf("记录角色对话失败: %v\n", err)
-			}
+			utils.GetLogger().Warn("记录角色对话失败", map[string]interface{}{"scene_id": sceneID, "speaker": dialogue.CharacterID, "simulation_id": interactionID, "err": err})
 		}
 	}
 
@@ -1135,7 +1124,7 @@ func (s *CharacterService) clearExpiredCache() {
 
 	// 🔧 添加清理日志（可选）
 	if expiredCount > 0 {
-		fmt.Printf("🧹 角色服务缓存清理: 清理了 %d 个过期场景缓存\n", expiredCount)
+		utils.GetLogger().Info("角色服务缓存清理", map[string]interface{}{"expired_count": expiredCount})
 	}
 }
 
