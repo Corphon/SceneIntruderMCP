@@ -708,11 +708,15 @@ func (s *StoryService) extractInitialStoryFromText(sceneData *SceneData, prefere
 
 	// 如果场景名称和描述不能确定，尝试检查角色名称
 	if !isEnglish && len(sceneData.Characters) > 0 {
-		characterNames := ""
+		// Build combined character names string for language detection
+		// Note: This creates one allocation for the final string, which is necessary
+		// for the language detection function that operates on strings
+		var sb strings.Builder
 		for _, char := range sceneData.Characters {
-			characterNames += char.Name + " "
+			sb.WriteString(char.Name)
+			sb.WriteByte(' ')
 		}
-		isEnglish = isEnglishText(characterNames)
+		isEnglish = isEnglishText(sb.String())
 	}
 
 	// 准备提示词
@@ -4527,9 +4531,20 @@ func formatThemes(themes []string) string {
 
 // 辅助函数：格式化角色信息
 func formatCharacters(characters []*models.Character) string {
+	if len(characters) == 0 {
+		return ""
+	}
 	var result strings.Builder
+	// Pre-allocate capacity based on average character entry size
+	// Format: "- " (2) + name (~15) + ": " (2) + personality (~30) + "\n" (1) = ~50 chars per entry
+	const avgEntrySize = 50
+	result.Grow(len(characters) * avgEntrySize)
 	for _, char := range characters {
-		result.WriteString(fmt.Sprintf("- %s: %s\n", char.Name, char.Personality))
+		result.WriteString("- ")
+		result.WriteString(char.Name)
+		result.WriteString(": ")
+		result.WriteString(char.Personality)
+		result.WriteByte('\n')
 	}
 	return result.String()
 }
