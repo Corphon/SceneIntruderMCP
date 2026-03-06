@@ -4,13 +4,14 @@ package storage
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 )
 
 // FileStorage 提供文件存储服务
@@ -25,6 +26,8 @@ type FileStorage struct {
 	cacheMutex   sync.RWMutex
 	cacheExpiry  time.Duration
 	maxCacheSize int
+	// maxCacheEntryBytes limits caching of large files (e.g., images) to avoid memory bloat.
+	maxCacheEntryBytes int
 }
 
 // CacheEntry 缓存条目
@@ -44,6 +47,8 @@ func NewFileStorage(baseDir string) (*FileStorage, error) {
 		cache:        make(map[string]*CacheEntry),
 		cacheExpiry:  5 * time.Minute,
 		maxCacheSize: 100,
+		// 1 MiB: JSON/config/small artifacts benefit; large binary (PNG) should not be cached by default.
+		maxCacheEntryBytes: 1 << 20,
 	}
 
 	// 启动缓存清理
@@ -84,7 +89,10 @@ func (fs *FileStorage) SaveTextFile(dirPath, filename string, content []byte) er
 		// Ensure temp file is cleaned up on error
 		if removeErr := os.Remove(tempPath); removeErr != nil {
 			// Log the cleanup error but return the original error
-			fmt.Printf("Warning: failed to clean up temporary file %s after rename failure: %v\n", tempPath, removeErr)
+			utils.GetLogger().Warn("failed to clean up temp file after rename failure", map[string]interface{}{
+				"temp_path": tempPath,
+				"err":       removeErr.Error(),
+			})
 		}
 		return fmt.Errorf("保存文件失败: %w", err)
 	}
@@ -150,6 +158,9 @@ func (fs *FileStorage) LoadTextFile(dirPath, filename string) ([]byte, error) {
 
 // 缓存管理
 func (fs *FileStorage) updateCache(path string, data []byte) {
+	if fs.maxCacheEntryBytes > 0 && len(data) > fs.maxCacheEntryBytes {
+		return
+	}
 	fs.cacheMutex.Lock()
 	defer fs.cacheMutex.Unlock()
 
@@ -346,7 +357,10 @@ func (fs *FileStorage) enforceMaxCacheSize() {
 		for i := 0; i < removeCount; i++ {
 			delete(fs.cache, entries[i].key)
 		}
-		log.Printf("缓存大小限制执行: 移除了 %d 个最旧的缓存条目", removeCount)
+		utils.GetLogger().Info("file storage cache evicted", map[string]interface{}{
+			"removed":        removeCount,
+			"max_cache_size": fs.maxCacheSize,
+		})
 	}
 }
 
