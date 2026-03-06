@@ -3,6 +3,7 @@ package services
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -11,9 +12,11 @@ import (
 
 // ProgressUpdate 表示进度更新
 type ProgressUpdate struct {
-	Progress int    `json:"progress"` // 进度百分比 (0-100)
-	Message  string `json:"message"`  // 描述性消息
-	Status   string `json:"status"`   // 状态：running, completed, failed
+	Progress  int    `json:"progress"`             // 进度百分比 (0-100)
+	Message   string `json:"message"`              // 描述性消息
+	Status    string `json:"status"`               // 状态：running, completed, failed
+	EventType string `json:"event_type,omitempty"` // 事件类型：progress, image_written...
+	FrameID   string `json:"frame_id,omitempty"`   // 可选：事件关联帧 ID（如 image_written）
 }
 
 // ProgressTracker 跟踪长时间运行任务的进度
@@ -88,6 +91,20 @@ func (s *ProgressService) GetTracker(taskID string) (*ProgressTracker, bool) {
 
 // UpdateProgress 更新任务进度
 func (t *ProgressTracker) UpdateProgress(progress int, message string) {
+	t.EmitProgressEvent(progress, message, "", "")
+}
+
+func normalizeProgressEventType(eventType string) string {
+	eventType = strings.TrimSpace(eventType)
+	if eventType == "" {
+		return "progress"
+	}
+	return eventType
+}
+
+// EmitProgressEvent emits a structured progress event.
+// eventType defaults to "progress" when empty.
+func (t *ProgressTracker) EmitProgressEvent(progress int, message string, eventType string, frameID string) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
@@ -100,9 +117,11 @@ func (t *ProgressTracker) UpdateProgress(progress int, message string) {
 	t.UpdateTime = time.Now()
 
 	update := ProgressUpdate{
-		Progress: t.Progress,
-		Message:  t.Message,
-		Status:   t.Status,
+		Progress:  t.Progress,
+		Message:   t.Message,
+		Status:    t.Status,
+		EventType: normalizeProgressEventType(eventType),
+		FrameID:   strings.TrimSpace(frameID),
 	}
 
 	t.notifySubscribers(update, false)
@@ -123,9 +142,10 @@ func (t *ProgressTracker) Complete(message string) {
 	t.UpdateTime = time.Now()
 
 	update := ProgressUpdate{
-		Progress: 100,
-		Message:  t.Message,
-		Status:   "completed",
+		Progress:  100,
+		Message:   t.Message,
+		Status:    "completed",
+		EventType: "completed",
 	}
 
 	t.notifySubscribers(update, true)
@@ -189,9 +209,10 @@ func (t *ProgressTracker) Fail(errorMsg string) {
 	t.UpdateTime = time.Now()
 
 	update := ProgressUpdate{
-		Progress: t.Progress,
-		Message:  t.Message,
-		Status:   "failed",
+		Progress:  t.Progress,
+		Message:   t.Message,
+		Status:    "failed",
+		EventType: "failed",
 	}
 
 	t.notifySubscribers(update, true)
@@ -215,9 +236,10 @@ func (t *ProgressTracker) Subscribe() chan ProgressUpdate {
 
 	// 立即发送当前状态
 	subscriber <- ProgressUpdate{
-		Progress: t.Progress,
-		Message:  t.Message,
-		Status:   t.Status,
+		Progress:  t.Progress,
+		Message:   t.Message,
+		Status:    t.Status,
+		EventType: normalizeProgressEventType(""),
 	}
 
 	return subscriber
