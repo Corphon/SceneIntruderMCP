@@ -37,6 +37,16 @@ const (
 	ErrorLLMServiceUnavailable = "LLM_SERVICE_UNAVAILABLE"
 	ErrorLLMConfigInvalid      = "LLM_CONFIG_INVALID"
 	ErrorConnectionFailed      = "CONNECTION_FAILED"
+	ErrorLLMNotReady           = "LLM_NOT_READY"
+
+	// Comic（v2）相关错误
+	ErrorComicServiceNotReady     = "COMIC_SERVICE_NOT_READY"
+	ErrorComicAnalysisNotFound    = "COMIC_ANALYSIS_NOT_FOUND"
+	ErrorComicPromptsNotFound     = "COMIC_PROMPTS_NOT_FOUND"
+	ErrorComicKeyElementsNotFound = "COMIC_KEY_ELEMENTS_NOT_FOUND"
+	ErrorComicImageNotFound       = "COMIC_IMAGE_NOT_FOUND"
+	ErrorComicReferencesNotFound  = "COMIC_REFERENCES_NOT_FOUND"
+	ErrorComicReferenceNotFound   = "COMIC_REFERENCE_NOT_FOUND"
 
 	// 文件相关错误
 	ErrorFileUploadFailed = "FILE_UPLOAD_FAILED"
@@ -56,4 +66,6 @@ const (
 	ErrorConfigNotLoaded    = "CONFIG_NOT_LOADED"
 	ErrorLLMProviderMissing = "LLM_PROVIDER_MISSING"
 	ErrorAPIKeyMissing      = "API_KEY_MISSING"
+
+	MessageLLMNotReady = "LLM服务未配置或未就绪"
 )
