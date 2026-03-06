@@ -2,15 +2,20 @@
 package api
 
 import (
+	"archive/zip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"html"
+	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -24,6 +29,1399 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// -------------------------
+// v2 comics endpoints (Phase2)
+
+func isStorageNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if os.IsNotExist(err) {
+		return true
+	}
+	// Windows sometimes returns ERROR_PATH_NOT_FOUND instead of ERROR_FILE_NOT_FOUND.
+	// The storage layer wraps errors, so we also fall back to message inspection.
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "no such file or directory") {
+		return true
+	}
+	if strings.Contains(msg, "the system cannot find the path specified") {
+		return true
+	}
+	if strings.Contains(msg, "the system cannot find the file specified") {
+		return true
+	}
+	if strings.Contains(msg, "文件不存在") {
+		return true
+	}
+	if strings.Contains(msg, "目录不存在") {
+		return true
+	}
+	if strings.Contains(msg, "系统找不到指定的路径") {
+		return true
+	}
+	if strings.Contains(msg, "系统找不到指定的文件") {
+		return true
+	}
+	return false
+}
+
+func (h *Handler) StartComicAnalysis(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	// Optional request body
+	var req struct {
+		TargetFrames *int   `json:"target_frames"`
+		NodeID       string `json:"node_id"`
+		SourceText   string `json:"source_text"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		// Keep backward compatibility: allow empty body
+		if !errors.Is(err, io.EOF) {
+			h.Response.BadRequest(c, "分镜分析入参格式错误")
+			return
+		}
+	}
+
+	nodeID := strings.TrimSpace(req.NodeID)
+	sourceText := strings.TrimSpace(req.SourceText)
+
+	comicSvc := h.getComicService()
+	if comicSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未初始化")
+		return
+	}
+	if comicSvc.LLM == nil || !comicSvc.LLM.IsReady() {
+		readyState := MessageLLMNotReady
+		if comicSvc.LLM != nil {
+			readyState = comicSvc.LLM.GetReadyState()
+		}
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady, MessageLLMNotReady, readyState)
+		return
+	}
+
+	var taskID string
+	var err error
+	if sourceText != "" {
+		targetFrames := 8
+		if req.TargetFrames != nil {
+			targetFrames = *req.TargetFrames
+		}
+		taskID, err = comicSvc.AnalyzeStoryAsyncWithConfigAndSourceText(c.Request.Context(), sceneID, targetFrames, sourceText)
+	} else if req.TargetFrames != nil {
+		taskID, err = comicSvc.AnalyzeStoryAsyncWithConfigAndNode(c.Request.Context(), sceneID, *req.TargetFrames, nodeID)
+	} else {
+		if nodeID != "" {
+			taskID, err = comicSvc.AnalyzeStoryAsyncWithConfigAndNode(c.Request.Context(), sceneID, 8, nodeID)
+		} else {
+			taskID, err = comicSvc.AnalyzeStoryAsync(c.Request.Context(), sceneID)
+		}
+	}
+	if err != nil {
+		if errors.Is(err, services.ErrComicServiceNotReady) || errors.Is(err, services.ErrComicRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "启动分镜分析失败", err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "分镜分析任务已受理")
+}
+
+func (h *Handler) CreateSceneShell(c *gin.Context) {
+	var req struct {
+		Title       string `json:"title" binding:"required"`
+		Description string `json:"description"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数错误", err.Error())
+		return
+	}
+
+	title := strings.TrimSpace(req.Title)
+	if title == "" {
+		h.Response.BadRequest(c, "标题不能为空")
+		return
+	}
+	if len(title) > 200 {
+		h.Response.BadRequest(c, "标题过长", "标题不能超过200个字符")
+		return
+	}
+
+	description := strings.TrimSpace(req.Description)
+	if description == "" {
+		description = "用于独立 Comics 工作流的空白场景"
+	}
+
+	userID, isAuthenticated := GetUserFromContext(c)
+	if !isAuthenticated {
+		userID = "anonymous"
+	}
+
+	scene, err := h.SceneService.CreateScene(userID, title, description, "", "comic_standalone")
+	if err != nil {
+		h.Response.InternalError(c, "创建 comics 场景失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, scene, "comics 场景创建成功")
+}
+
+// DeleteComic deletes all generated comic artifacts for a scene.
+// Route: DELETE /api/scenes/:id/comic
+func (h *Handler) DeleteComic(c *gin.Context) {
+	sceneID := c.Param("id")
+	if err := validateComicSceneID(sceneID); err != nil {
+		h.Response.BadRequest(c, "场景ID不合法", err.Error())
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	if err := repo.DeleteSceneArtifacts(sceneID); err != nil {
+		if errors.Is(err, services.ErrInvalidSceneID) {
+			h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "场景ID不合法", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "删除 comics 失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, gin.H{"scene_id": sceneID}, "comics 已重置")
+}
+
+func (h *Handler) GetComicAnalysis(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	analysis, err := repo.LoadAnalysis(sceneID)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicAnalysisNotFound, "分镜分析结果不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取分镜分析结果失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, analysis, "分镜分析结果获取成功")
+}
+
+func (h *Handler) UpdateComicAnalysis(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	var payload models.ComicBreakdown
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		h.Response.BadRequest(c, "分镜分析入参格式错误")
+		return
+	}
+
+	// Enforce scene_id from path
+	payload.SceneID = sceneID
+
+	// Fill generated_at when omitted
+	if payload.GeneratedAt.IsZero() {
+		payload.GeneratedAt = time.Now()
+	}
+
+	for _, f := range payload.Frames {
+		if strings.TrimSpace(f.ID) == "" {
+			h.Response.BadRequest(c, "frames[].id 不能为空")
+			return
+		}
+	}
+
+	if err := repo.SaveAnalysis(sceneID, &payload); err != nil {
+		h.Response.InternalError(c, "保存分镜分析结果失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, &payload, "分镜分析结果保存成功")
+}
+
+func (h *Handler) StartComicPrompts(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	type startComicPromptsPayload struct {
+		NodeID         string `json:"node_id"`
+		Style          string `json:"style"`
+		ContinuityMode string `json:"continuity_mode"`
+	}
+	var payload startComicPromptsPayload
+	_ = c.ShouldBindJSON(&payload)
+	nodeID := strings.TrimSpace(payload.NodeID)
+	style := strings.TrimSpace(payload.Style)
+	continuityMode := strings.TrimSpace(payload.ContinuityMode)
+
+	comicSvc := h.getComicService()
+	if comicSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未初始化")
+		return
+	}
+	if comicSvc.LLM == nil || !comicSvc.LLM.IsReady() {
+		readyState := MessageLLMNotReady
+		if comicSvc.LLM != nil {
+			readyState = comicSvc.LLM.GetReadyState()
+		}
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady, MessageLLMNotReady, readyState)
+		return
+	}
+
+	// precheck: analysis must exist
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+	if _, err := repo.LoadAnalysis(sceneID); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicAnalysisNotFound, "请先生成分镜分析（analysis.json）")
+			return
+		}
+		h.Response.InternalError(c, "读取分镜分析结果失败", err.Error())
+		return
+	}
+
+	taskID, err := comicSvc.BuildPromptsAsyncWithOptions(c.Request.Context(), sceneID, services.ComicPromptsBuildOptions{
+		NodeID:         nodeID,
+		Style:          style,
+		ContinuityMode: continuityMode,
+	})
+	if err != nil {
+		if errors.Is(err, services.ErrComicServiceNotReady) || errors.Is(err, services.ErrComicRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "启动提示词生成失败", err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "提示词生成任务已受理")
+}
+
+func (h *Handler) GetComicPrompts(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	promptsDir := filepath.Join("scene_"+sceneID, "prompts")
+	absPromptsDir := filepath.Join(repo.BaseDir, promptsDir)
+	entries, err := os.ReadDir(absPromptsDir)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicPromptsNotFound, "提示词不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取提示词目录失败", err.Error())
+		return
+	}
+
+	files := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasSuffix(strings.ToLower(name), ".json") {
+			files = append(files, name)
+		}
+	}
+	if len(files) == 0 {
+		h.Response.Error(c, http.StatusNotFound, ErrorComicPromptsNotFound, "提示词不存在")
+		return
+	}
+	sort.Strings(files)
+
+	out := make([]models.ComicFramePrompt, 0, len(files))
+	for _, name := range files {
+		var fp models.ComicFramePrompt
+		if err := repo.FileStorage.LoadJSONFile(promptsDir, name, &fp); err != nil {
+			h.Response.InternalError(c, "读取提示词失败", err.Error())
+			return
+		}
+		out = append(out, fp)
+	}
+
+	h.Response.Success(c, out, "提示词获取成功")
+}
+
+// UpdateComicPrompt saves a single frame prompt JSON.
+// Route: PUT /api/scenes/:id/comic/prompts/:frameID
+func (h *Handler) UpdateComicPrompt(c *gin.Context) {
+	sceneID := c.Param("id")
+	frameID := c.Param("frameID")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+	if strings.TrimSpace(frameID) == "" {
+		h.Response.BadRequest(c, "缺少 frameID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	var fp models.ComicFramePrompt
+	if err := c.ShouldBindJSON(&fp); err != nil {
+		h.Response.BadRequest(c, "解析提示词失败", err.Error())
+		return
+	}
+
+	// Force frame_id to match path.
+	fp.FrameID = strings.TrimSpace(frameID)
+
+	if err := repo.SavePrompt(sceneID, frameID, &fp); err != nil {
+		if errors.Is(err, services.ErrInvalidSceneID) {
+			h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "非法 frameID", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "保存提示词失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, fp, "提示词已保存")
+}
+
+// GetComicFrameImage serves a single generated frame PNG.
+// Route: GET /api/scenes/:id/comic/images/:frameID
+func (h *Handler) GetComicFrameImage(c *gin.Context) {
+	sceneID := c.Param("id")
+	frameID := c.Param("frameID")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+	if strings.TrimSpace(frameID) == "" {
+		h.Response.BadRequest(c, "缺少 frameID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	data, err := repo.LoadFrameImage(sceneID, frameID)
+	if err != nil {
+		if errors.Is(err, services.ErrInvalidSceneID) {
+			h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "非法 frameID", err.Error())
+			return
+		}
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicImageNotFound, "图片不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取图片失败", err.Error())
+		return
+	}
+
+	// Avoid stale previews after regenerate.
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Data(http.StatusOK, "image/png", data)
+}
+
+// UploadComicReferences uploads one or multiple reference images for extracted elements.
+//
+// Supported forms:
+// 1) Single: element_id=<id>, file=<image>
+// 2) Multi: file_<element_id>=<image> (multiple parts)
+func (h *Handler) UploadComicReferences(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	const maxReferenceSize = 5 << 20 // 5MB
+	if err := c.Request.ParseMultipartForm(8 << 20); err != nil {
+		h.Response.BadRequest(c, "解析上传数据失败", err.Error())
+		return
+	}
+	form := c.Request.MultipartForm
+	if form == nil {
+		h.Response.BadRequest(c, "缺少上传数据")
+		return
+	}
+
+	type uploadItem struct {
+		ElementID   string `json:"element_id"`
+		FileName    string `json:"file_name"`
+		ContentType string `json:"content_type"`
+		SizeBytes   int64  `json:"size_bytes"`
+	}
+
+	uploads := make([]struct {
+		elementID string
+		fileKey   string
+		file      *multipart.FileHeader
+	}, 0)
+
+	// Single form
+	if elementID := strings.TrimSpace(c.PostForm("element_id")); elementID != "" {
+		fh, err := c.FormFile("file")
+		if err != nil {
+			h.Response.BadRequest(c, "缺少上传文件", err.Error())
+			return
+		}
+		uploads = append(uploads, struct {
+			elementID string
+			fileKey   string
+			file      *multipart.FileHeader
+		}{elementID: elementID, fileKey: "file", file: fh})
+	}
+
+	// Multi form: file_<element_id>
+	for key, files := range form.File {
+		if !strings.HasPrefix(key, "file_") {
+			continue
+		}
+		if len(files) == 0 {
+			continue
+		}
+		elementID := strings.TrimSpace(strings.TrimPrefix(key, "file_"))
+		if elementID == "" {
+			continue
+		}
+		uploads = append(uploads, struct {
+			elementID string
+			fileKey   string
+			file      *multipart.FileHeader
+		}{elementID: elementID, fileKey: key, file: files[0]})
+	}
+
+	if len(uploads) == 0 {
+		h.Response.BadRequest(c, "缺少上传文件")
+		return
+	}
+
+	results := make([]uploadItem, 0, len(uploads))
+	for _, u := range uploads {
+		fh := u.file
+		if fh == nil {
+			continue
+		}
+		if fh.Size > maxReferenceSize {
+			h.Response.Error(c, http.StatusBadRequest, ErrorFileInvalid, "参考图过大（最大 5MB）")
+			return
+		}
+
+		f, err := fh.Open()
+		if err != nil {
+			h.Response.Error(c, http.StatusBadRequest, ErrorFileUploadFailed, "打开上传文件失败", err.Error())
+			return
+		}
+		data, readErr := io.ReadAll(io.LimitReader(f, maxReferenceSize+1))
+		_ = f.Close()
+		if readErr != nil {
+			h.Response.Error(c, http.StatusBadRequest, ErrorFileUploadFailed, "读取上传文件失败", readErr.Error())
+			return
+		}
+		if int64(len(data)) > maxReferenceSize {
+			h.Response.Error(c, http.StatusBadRequest, ErrorFileInvalid, "参考图过大（最大 5MB）")
+			return
+		}
+
+		sniff := data
+		if len(sniff) > 512 {
+			sniff = sniff[:512]
+		}
+		contentType := http.DetectContentType(sniff)
+		ext := ""
+		switch contentType {
+		case "image/png":
+			ext = ".png"
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/webp":
+			ext = ".webp"
+		default:
+			h.Response.Error(c, http.StatusBadRequest, ErrorFileInvalid, "仅支持 PNG/JPEG/WEBP 图片")
+			return
+		}
+
+		fileName, err := repo.SaveReferenceForElement(sceneID, u.elementID, ext, data)
+		if err != nil {
+			h.Response.Error(c, http.StatusBadRequest, ErrorFileUploadFailed, "保存参考图失败", err.Error())
+			return
+		}
+		if _, err := repo.UpsertReferenceIndex(sceneID, u.elementID, fileName, contentType, int64(len(data))); err != nil {
+			h.Response.InternalError(c, "更新参考图索引失败", err.Error())
+			return
+		}
+
+		results = append(results, uploadItem{
+			ElementID:   u.elementID,
+			FileName:    fileName,
+			ContentType: contentType,
+			SizeBytes:   int64(len(data)),
+		})
+	}
+
+	// stable order for tests/clients
+	sort.Slice(results, func(i, j int) bool { return results[i].ElementID < results[j].ElementID })
+
+	h.Response.Success(c, gin.H{"uploaded": results}, "参考图上传成功")
+}
+
+// GetComicReferences loads references/index.json.
+// Route: GET /api/scenes/:id/comic/references
+func (h *Handler) GetComicReferences(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	idx, err := repo.LoadReferenceIndex(sceneID)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicReferencesNotFound, "参考图索引不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取参考图索引失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, idx, "参考图索引获取成功")
+}
+
+// GetComicReferenceImage serves a single uploaded reference image bound to an element.
+// Route: GET /api/scenes/:id/comic/references/:elementID/image
+func (h *Handler) GetComicReferenceImage(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+	elementID := strings.TrimSpace(c.Param("elementID"))
+	if elementID == "" {
+		h.Response.BadRequest(c, "缺少 elementID")
+		return
+	}
+	if strings.Contains(elementID, "..") || strings.ContainsAny(elementID, `/\\`) {
+		h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "非法 elementID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	idx, err := repo.LoadReferenceIndex(sceneID)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicReferencesNotFound, "参考图索引不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取参考图索引失败", err.Error())
+		return
+	}
+	if idx == nil || idx.References == nil {
+		h.Response.Error(c, http.StatusNotFound, ErrorComicReferencesNotFound, "参考图索引不存在")
+		return
+	}
+	meta, ok := idx.References[elementID]
+	if !ok || strings.TrimSpace(meta.FileName) == "" {
+		h.Response.Error(c, http.StatusNotFound, ErrorComicReferenceNotFound, "参考图不存在")
+		return
+	}
+
+	data, err := repo.LoadReference(sceneID, meta.FileName)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicReferenceNotFound, "参考图不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取参考图失败", err.Error())
+		return
+	}
+
+	ct := strings.TrimSpace(meta.ContentType)
+	if ct == "" {
+		sniff := data
+		if len(sniff) > 512 {
+			sniff = sniff[:512]
+		}
+		ct = http.DetectContentType(sniff)
+	}
+
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Data(http.StatusOK, ct, data)
+}
+
+// DeleteComicReference deletes an uploaded reference image bound to an element.
+// Route: DELETE /api/scenes/:id/comic/references/:elementID
+func (h *Handler) DeleteComicReference(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+	elementID := strings.TrimSpace(c.Param("elementID"))
+	if elementID == "" {
+		h.Response.BadRequest(c, "缺少 elementID")
+		return
+	}
+	if strings.Contains(elementID, "..") || strings.ContainsAny(elementID, `/\\`) {
+		h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "非法 elementID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	idx, err := repo.DeleteReferenceForElement(sceneID, elementID)
+	if err != nil {
+		if errors.Is(err, services.ErrInvalidSceneID) {
+			h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "非法 elementID", err.Error())
+			return
+		}
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicReferenceNotFound, "参考图不存在")
+			return
+		}
+		h.Response.InternalError(c, "删除参考图失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, idx, "参考图删除成功")
+}
+
+func (h *Handler) StartComicKeyElements(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	comicSvc := h.getComicService()
+	if comicSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未初始化")
+		return
+	}
+	if comicSvc.LLM == nil || !comicSvc.LLM.IsReady() {
+		readyState := MessageLLMNotReady
+		if comicSvc.LLM != nil {
+			readyState = comicSvc.LLM.GetReadyState()
+		}
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady, MessageLLMNotReady, readyState)
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+	analysis, err := repo.LoadAnalysis(sceneID)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicAnalysisNotFound, "请先生成分镜分析（analysis.json）")
+			return
+		}
+		h.Response.InternalError(c, "读取分镜分析结果失败", err.Error())
+		return
+	}
+	if analysis == nil || len(analysis.Frames) == 0 {
+		h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "分镜分析结果为空")
+		return
+	}
+	// precheck: at least one prompt must exist
+	if _, err := repo.LoadPrompt(sceneID, analysis.Frames[0].ID); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicPromptsNotFound, "请先生成每帧提示词（prompts/*.json）")
+			return
+		}
+		h.Response.InternalError(c, "读取提示词失败", err.Error())
+		return
+	}
+
+	taskID, err := comicSvc.ExtractKeyElementsAsync(c.Request.Context(), sceneID)
+	if err != nil {
+		if errors.Is(err, services.ErrComicServiceNotReady) || errors.Is(err, services.ErrComicRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "启动关键元素提取失败", err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "关键元素提取任务已受理")
+}
+
+func (h *Handler) GetComicKeyElements(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	elements, err := repo.LoadKeyElements(sceneID)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicKeyElementsNotFound, "关键元素不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取关键元素失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, elements, "关键元素获取成功")
+}
+
+// UpdateComicKeyElements saves key_elements.json.
+// Route: PUT /api/scenes/:id/comic/key_elements
+func (h *Handler) UpdateComicKeyElements(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	var ke models.ComicKeyElements
+	if err := c.ShouldBindJSON(&ke); err != nil {
+		h.Response.BadRequest(c, "解析关键元素失败", err.Error())
+		return
+	}
+
+	ke.SceneID = sceneID
+	if ke.GeneratedAt.IsZero() {
+		ke.GeneratedAt = time.Now()
+	}
+
+	if err := repo.SaveKeyElements(sceneID, &ke); err != nil {
+		h.Response.InternalError(c, "保存关键元素失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, ke, "关键元素已保存")
+}
+
+// StartComicGenerate starts an async job to generate images for all frames.
+// It requires analysis.json and prompts/*.json to exist.
+func (h *Handler) StartComicGenerate(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	var req struct {
+		Resume bool `json:"resume"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	comicSvc := h.getComicService()
+	if comicSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未初始化")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	analysis, err := repo.LoadAnalysis(sceneID)
+	if err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicAnalysisNotFound, "请先生成分镜分析（analysis.json）")
+			return
+		}
+		h.Response.InternalError(c, "读取分镜分析结果失败", err.Error())
+		return
+	}
+	if analysis == nil || len(analysis.Frames) == 0 {
+		h.Response.Error(c, http.StatusBadRequest, ErrorBadRequest, "分镜分析结果为空")
+		return
+	}
+
+	// precheck: first prompt must exist
+	if _, err := repo.LoadPrompt(sceneID, analysis.Frames[0].ID); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicPromptsNotFound, "请先生成每帧提示词（prompts/*.json）")
+			return
+		}
+		h.Response.InternalError(c, "读取提示词失败", err.Error())
+		return
+	}
+
+	taskID, err := comicSvc.GenerateComicAsyncWithOptions(c.Request.Context(), sceneID, services.ComicGenerateOptions{Resume: req.Resume})
+	if err != nil {
+		if errors.Is(err, services.ErrComicServiceNotReady) || errors.Is(err, services.ErrComicRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "启动图片生成失败", err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "图片生成任务已受理")
+}
+
+// StartComicRegenerateFrame starts an async job to regenerate a single frame image.
+func (h *Handler) StartComicRegenerateFrame(c *gin.Context) {
+	sceneID := c.Param("id")
+	frameID := c.Param("frameID")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+	if strings.TrimSpace(frameID) == "" {
+		h.Response.BadRequest(c, "缺少帧ID")
+		return
+	}
+
+	comicSvc := h.getComicService()
+	if comicSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未初始化")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	if _, err := repo.LoadPrompt(sceneID, frameID); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorComicPromptsNotFound, "提示词不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取提示词失败", err.Error())
+		return
+	}
+
+	taskID, err := comicSvc.RegenerateFrameAsync(c.Request.Context(), sceneID, frameID)
+	if err != nil {
+		if errors.Is(err, services.ErrComicServiceNotReady) || errors.Is(err, services.ErrComicRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "启动图片重绘失败", err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "图片重绘任务已受理")
+}
+
+type comicGenerateFramesRequest struct {
+	FrameIDs []string `json:"frame_ids"`
+}
+
+// StartComicGenerateFrames starts async jobs to regenerate multiple frames in parallel.
+func (h *Handler) StartComicGenerateFrames(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	var req comicGenerateFramesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "无效请求", err.Error())
+		return
+	}
+	if len(req.FrameIDs) == 0 {
+		h.Response.BadRequest(c, "缺少帧ID列表")
+		return
+	}
+
+	comicSvc := h.getComicService()
+	if comicSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未初始化")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	for _, frameID := range req.FrameIDs {
+		frameID = strings.TrimSpace(frameID)
+		if frameID == "" {
+			continue
+		}
+		if _, err := repo.LoadPrompt(sceneID, frameID); err != nil {
+			if isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusNotFound, ErrorComicPromptsNotFound, "提示词不存在")
+				return
+			}
+			h.Response.InternalError(c, "读取提示词失败", err.Error())
+			return
+		}
+	}
+
+	tasks, err := comicSvc.GenerateFramesAsync(c.Request.Context(), sceneID, req.FrameIDs)
+	if err != nil {
+		if errors.Is(err, services.ErrComicServiceNotReady) || errors.Is(err, services.ErrComicRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "启动批量生成失败", err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"tasks": tasks}, "批量生成任务已受理")
+}
+
+// GetComicOverview returns a lightweight overview of a scene's comic artifacts.
+func (h *Handler) GetComicOverview(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorComicServiceNotReady, "ComicRepository 未初始化")
+		return
+	}
+
+	sceneDir := filepath.Join("scene_" + sceneID)
+	absSceneDir := filepath.Join(repo.BaseDir, sceneDir)
+
+	hasAnalysis := false
+	if _, err := repo.LoadAnalysis(sceneID); err == nil {
+		hasAnalysis = true
+	} else if !isStorageNotFound(err) {
+		h.Response.InternalError(c, "读取分镜分析失败", err.Error())
+		return
+	}
+
+	// prompts
+	hasPrompts := false
+	{
+		absPromptsDir := filepath.Join(absSceneDir, "prompts")
+		entries, err := os.ReadDir(absPromptsDir)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				if strings.HasSuffix(strings.ToLower(e.Name()), ".json") {
+					hasPrompts = true
+					break
+				}
+			}
+		} else if !isStorageNotFound(err) {
+			h.Response.InternalError(c, "读取提示词目录失败", err.Error())
+			return
+		}
+	}
+
+	// key elements
+	hasKeyElements := false
+	if _, err := repo.LoadKeyElements(sceneID); err == nil {
+		hasKeyElements = true
+	} else if !isStorageNotFound(err) {
+		h.Response.InternalError(c, "读取关键元素失败", err.Error())
+		return
+	}
+
+	// references
+	refCount := 0
+	if idx, err := repo.LoadReferenceIndex(sceneID); err == nil && idx != nil {
+		refCount = len(idx.References)
+	}
+
+	// images
+	images := make([]string, 0)
+	{
+		absImagesDir := filepath.Join(absSceneDir, "images")
+		entries, err := os.ReadDir(absImagesDir)
+		if err == nil {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				name := e.Name()
+				if strings.HasSuffix(strings.ToLower(name), ".png") {
+					images = append(images, name)
+				}
+			}
+			sort.Strings(images)
+		} else if !isStorageNotFound(err) {
+			h.Response.InternalError(c, "读取图片目录失败", err.Error())
+			return
+		}
+	}
+
+	h.Response.Success(c, gin.H{
+		"scene_id":         sceneID,
+		"has_analysis":     hasAnalysis,
+		"has_prompts":      hasPrompts,
+		"has_key_elements": hasKeyElements,
+		"reference_count":  refCount,
+		"images":           images,
+	}, "comics 概览获取成功")
+}
+
+func validateComicSceneID(sceneID string) error {
+	if strings.TrimSpace(sceneID) == "" {
+		return errors.New("sceneID required")
+	}
+	if strings.Contains(sceneID, "..") {
+		return errors.New("invalid sceneID")
+	}
+	if strings.ContainsAny(sceneID, `/\\`) {
+		return errors.New("invalid sceneID")
+	}
+	return nil
+}
+
+// ExportComic exports comic artifacts as a ZIP download.
+// It best-effort includes files under data/comics/scene_<id>/:
+// - analysis.json, key_elements.json, metrics.json
+// - prompts/*.json
+// - images/*.png
+// - references/* (including index.json)
+func (h *Handler) ExportComic(c *gin.Context) {
+	sceneID := c.Param("id")
+	if err := validateComicSceneID(sceneID); err != nil {
+		h.Response.BadRequest(c, "场景ID不合法", err.Error())
+		return
+	}
+
+	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "zip")))
+	if format != "zip" && format != "html" {
+		h.Response.Error(c, http.StatusBadRequest, ErrorExportFormatInvalid, "不支持的导出格式", "支持的格式: zip/html")
+		return
+	}
+
+	repo := h.getComicRepo()
+	if repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorExportServiceUnavailable, "导出服务未就绪", "ComicRepository 未初始化")
+		return
+	}
+
+	absSceneDir := filepath.Join(repo.BaseDir, "scene_"+sceneID)
+	if _, err := os.Stat(absSceneDir); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 comics 数据")
+			return
+		}
+		h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+		return
+	}
+
+	// HTML export: a self-contained page with embedded images
+	if format == "html" {
+		type frameItem struct {
+			FrameID string
+			Prompt  string
+			PNGPath string
+			PNGBase string
+		}
+
+		breakdown, err := repo.LoadAnalysis(sceneID)
+		if err != nil {
+			if isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 comics 数据", "缺少 analysis.json")
+				return
+			}
+			h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+			return
+		}
+		if breakdown == nil || len(breakdown.Frames) == 0 {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 comics 数据", "分镜为空")
+			return
+		}
+
+		frames := make([]frameItem, 0, len(breakdown.Frames))
+		for _, f := range breakdown.Frames {
+			fp, err := repo.LoadPrompt(sceneID, f.ID)
+			if err != nil {
+				if isStorageNotFound(err) {
+					continue
+				}
+				h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+				return
+			}
+			prompt := ""
+			if fp != nil {
+				prompt = fp.Prompt
+			}
+
+			pngAbs := filepath.Join(absSceneDir, "images", f.ID+".png")
+			b64 := ""
+			if data, err := os.ReadFile(pngAbs); err == nil && len(data) > 0 {
+				b64 = base64.StdEncoding.EncodeToString(data)
+			}
+			frames = append(frames, frameItem{FrameID: f.ID, Prompt: prompt, PNGPath: pngAbs, PNGBase: b64})
+		}
+
+		if len(frames) == 0 {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 comics 数据", "缺少 prompts/images")
+			return
+		}
+
+		ts := time.Now().Format("20060102_150405")
+		filename := fmt.Sprintf("comic_%s_%s.html", sceneID, ts)
+		c.Header("Content-Type", "text/html; charset=utf-8")
+		c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+		c.Header("Cache-Control", "no-store")
+		c.Status(http.StatusOK)
+
+		var b strings.Builder
+		b.WriteString("<!doctype html><html><head><meta charset=\"utf-8\"><title>Comic ")
+		b.WriteString(html.EscapeString(sceneID))
+		b.WriteString("</title></head><body>")
+		b.WriteString("<h1>Comic ")
+		b.WriteString(html.EscapeString(sceneID))
+		b.WriteString("</h1>")
+		for _, fr := range frames {
+			b.WriteString("<hr><h2>")
+			b.WriteString(html.EscapeString(fr.FrameID))
+			b.WriteString("</h2>")
+			if strings.TrimSpace(fr.Prompt) != "" {
+				b.WriteString("<pre>")
+				b.WriteString(html.EscapeString(fr.Prompt))
+				b.WriteString("</pre>")
+			}
+			if fr.PNGBase != "" {
+				b.WriteString("<img style=\"max-width: 100%; height: auto;\" src=\"data:image/png;base64,")
+				b.WriteString(fr.PNGBase)
+				b.WriteString("\"/>")
+			}
+		}
+		b.WriteString("</body></html>")
+		_, _ = c.Writer.Write([]byte(b.String()))
+		return
+	}
+
+	type zipItem struct {
+		absPath string
+		zipName string
+	}
+
+	items := make([]zipItem, 0, 32)
+	zipRoot := "scene_" + sceneID
+
+	addIfExists := func(rel string) error {
+		abs := filepath.Join(absSceneDir, filepath.FromSlash(rel))
+		st, err := os.Stat(abs)
+		if err != nil {
+			if isStorageNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if st.IsDir() {
+			return nil
+		}
+		items = append(items, zipItem{absPath: abs, zipName: filepath.ToSlash(filepath.Join(zipRoot, rel))})
+		return nil
+	}
+
+	// top-level JSON
+	for _, rel := range []string{"analysis.json", "key_elements.json", "metrics.json"} {
+		if err := addIfExists(rel); err != nil {
+			h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+			return
+		}
+	}
+
+	// prompts/*.json
+	{
+		absPromptsDir := filepath.Join(absSceneDir, "prompts")
+		entries, err := os.ReadDir(absPromptsDir)
+		if err != nil {
+			if !isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+				return
+			}
+		} else {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				name := e.Name()
+				if strings.HasSuffix(strings.ToLower(name), ".json") {
+					items = append(items, zipItem{
+						absPath: filepath.Join(absPromptsDir, name),
+						zipName: filepath.ToSlash(filepath.Join(zipRoot, "prompts", name)),
+					})
+				}
+			}
+		}
+	}
+
+	// images/*.png
+	{
+		absImagesDir := filepath.Join(absSceneDir, "images")
+		entries, err := os.ReadDir(absImagesDir)
+		if err != nil {
+			if !isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+				return
+			}
+		} else {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				name := e.Name()
+				if strings.HasSuffix(strings.ToLower(name), ".png") {
+					items = append(items, zipItem{
+						absPath: filepath.Join(absImagesDir, name),
+						zipName: filepath.ToSlash(filepath.Join(zipRoot, "images", name)),
+					})
+				}
+			}
+		}
+	}
+
+	// references/*
+	{
+		absRefsDir := filepath.Join(absSceneDir, "references")
+		entries, err := os.ReadDir(absRefsDir)
+		if err != nil {
+			if !isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+				return
+			}
+		} else {
+			for _, e := range entries {
+				if e.IsDir() {
+					continue
+				}
+				name := e.Name()
+				items = append(items, zipItem{
+					absPath: filepath.Join(absRefsDir, name),
+					zipName: filepath.ToSlash(filepath.Join(zipRoot, "references", name)),
+				})
+			}
+		}
+	}
+
+	if len(items) == 0 {
+		h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 comics 数据")
+		return
+	}
+
+	ts := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("comic_%s_%s.zip", sceneID, ts)
+
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
+	c.Status(http.StatusOK)
+
+	zw := zip.NewWriter(c.Writer)
+	defer func() { _ = zw.Close() }()
+
+	for _, it := range items {
+		st, err := os.Stat(it.absPath)
+		if err != nil {
+			continue
+		}
+		if st.IsDir() {
+			continue
+		}
+
+		hdr, err := zip.FileInfoHeader(st)
+		if err != nil {
+			continue
+		}
+		hdr.Name = it.zipName
+		hdr.Method = zip.Deflate
+
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
+			continue
+		}
+		f, err := os.Open(it.absPath)
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(w, f)
+		_ = f.Close()
+	}
+}
+
 // Handler 处理API请求
 type Handler struct {
 	// 核心服务
@@ -35,10 +1433,27 @@ type Handler struct {
 	ConfigService    *services.ConfigService    // 配置服务
 	StatsService     *services.StatsService     // 统计服务
 	UserService      *services.UserService      // 用户服务
+	ScriptService    *services.ScriptService    // v1.4.0 scripts 服务
 	WebSocketHandler *WebSocketHandler          // WebSocket 处理器
 	Response         *ResponseHelper            // 响应助手
 	Logger           *utils.Logger              // 结构化日志记录器
 	Metrics          *utils.APIMetrics          // 应用指标收集器
+}
+
+type CreateScriptRequest struct {
+	Title     string      `json:"title"`
+	Type      string      `json:"type"`
+	Framework interface{} `json:"framework"`
+}
+
+type UpdateScriptRequest struct {
+	Title     string      `json:"title"`
+	Type      string      `json:"type"`
+	Framework interface{} `json:"framework"`
+}
+
+type RewindScriptRequest struct {
+	DraftID string `json:"draft_id"`
 }
 
 // TriggerCharacterInteractionRequest 触发角色互动的请求结构
@@ -156,8 +1571,15 @@ func (h *Handler) CleanupWebSocketConnections(c *gin.Context) {
 // ExportScene 导出场景数据
 func (h *Handler) ExportScene(c *gin.Context) {
 	sceneID := c.Param("id")
-	format := c.DefaultQuery("format", "json")
+	format := strings.ToLower(c.DefaultQuery("format", "json"))
 	includeConversations := c.DefaultQuery("include_conversations", "false") == "true"
+
+	// 验证导出格式（与 ExportService 对齐）
+	supportedFormats := []string{"json", "markdown", "txt", "html"}
+	if !contains(supportedFormats, format) {
+		h.Response.Error(c, http.StatusBadRequest, ErrorExportFormatInvalid, "不支持的导出格式", "支持的格式: json/markdown/txt/html")
+		return
+	}
 
 	exportService := h.getExportService()
 	if exportService == nil {
@@ -178,7 +1600,7 @@ func (h *Handler) ExportScene(c *gin.Context) {
 // ExportInteractions 导出互动摘要
 func (h *Handler) ExportInteractions(c *gin.Context) {
 	sceneID := c.Param("id")
-	format := c.DefaultQuery("format", "json")
+	format := strings.ToLower(c.DefaultQuery("format", "json"))
 
 	// 验证场景ID
 	if sceneID == "" {
@@ -187,9 +1609,9 @@ func (h *Handler) ExportInteractions(c *gin.Context) {
 	}
 
 	// 验证导出格式
-	supportedFormats := []string{"json", "markdown", "txt", "html", "csv"}
-	if !contains(supportedFormats, strings.ToLower(format)) {
-		h.Response.BadRequest(c, "Unsupported export format", fmt.Sprintf("Supported formats: %v", supportedFormats))
+	supportedFormats := []string{"json", "markdown", "txt", "html"}
+	if !contains(supportedFormats, format) {
+		h.Response.Error(c, http.StatusBadRequest, ErrorExportFormatInvalid, "不支持的导出格式", "支持的格式: json/markdown/txt/html")
 		return
 	}
 	// 获取导出服务
@@ -247,9 +1669,10 @@ func (h *Handler) ExportStory(c *gin.Context) {
 	}
 
 	// 验证导出格式
-	supportedFormats := []string{"json", "markdown", "txt", "html", "pdf"}
-	if !contains(supportedFormats, strings.ToLower(format)) {
-		h.Response.BadRequest(c, "不支持的导出格式", fmt.Sprintf("支持的格式: %v", supportedFormats))
+	format = strings.ToLower(format)
+	supportedFormats := []string{"json", "markdown", "txt", "html"}
+	if !contains(supportedFormats, format) {
+		h.Response.Error(c, http.StatusBadRequest, ErrorExportFormatInvalid, "不支持的导出格式", "支持的格式: json/markdown/txt/html")
 		return
 	}
 
@@ -307,7 +1730,7 @@ func (h *Handler) getExportService() *services.ExportService {
 	container := di.GetContainer()
 	exportService, ok := container.Get("export").(*services.ExportService)
 	if !ok {
-		log.Printf("警告: 无法从容器获取导出服务")
+		utils.GetLogger().Warn("cannot get export service from container", map[string]interface{}{})
 		return nil
 	}
 	return exportService
@@ -323,7 +1746,8 @@ func NewHandler(
 	analyzerService *services.AnalyzerService,
 	configService *services.ConfigService,
 	statsService *services.StatsService,
-	userService *services.UserService) *Handler {
+	userService *services.UserService,
+	scriptService *services.ScriptService) *Handler {
 
 	return &Handler{
 		SceneService:     sceneService,
@@ -334,11 +1758,544 @@ func NewHandler(
 		ConfigService:    configService,
 		StatsService:     statsService,
 		UserService:      userService,
+		ScriptService:    scriptService,
 		WebSocketHandler: NewWebSocketHandler(),
 		Response:         NewResponseHelper(),
 		Logger:           utils.GetLogger(),
 		Metrics:          utils.NewAPIMetrics(),
 	}
+}
+
+// -------------------------
+// v1.4.0 scripts API (P0)
+
+func (h *Handler) GetScripts(c *gin.Context) {
+	items, err := h.ScriptService.ListProjects(c.Request.Context())
+	if err != nil {
+		h.Response.InternalError(c, "获取 scripts 列表失败", err.Error())
+		return
+	}
+	h.Response.Success(c, items, "scripts 列表获取成功")
+}
+
+func (h *Handler) CreateScript(c *gin.Context) {
+	var req CreateScriptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数无效", err.Error())
+		return
+	}
+
+	// Backward-compatible: frontend may send framework as free-text string.
+	framework := map[string]interface{}{}
+	switch v := req.Framework.(type) {
+	case nil:
+		framework = map[string]interface{}{}
+	case map[string]interface{}:
+		framework = v
+	case string:
+		text := strings.TrimSpace(v)
+		if text != "" {
+			framework = map[string]interface{}{
+				"theme": map[string]interface{}{
+					"core": text,
+				},
+			}
+		}
+	default:
+		// best-effort: keep raw value in a stable field
+		framework = map[string]interface{}{"raw": v}
+	}
+
+	project, err := h.ScriptService.CreateProject(c.Request.Context(), req.Title, req.Type, framework)
+	if err != nil {
+		h.Response.BadRequest(c, err.Error())
+		return
+	}
+
+	resp := gin.H{
+		"id":         project.ID,
+		"title":      project.Title,
+		"type":       project.Type,
+		"created_at": project.CreatedAt,
+		"updated_at": project.UpdatedAt,
+	}
+	h.Response.Created(c, resp, "script 创建成功")
+}
+
+func (h *Handler) UpdateScript(c *gin.Context) {
+	id := c.Param("id")
+	var req UpdateScriptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数无效", err.Error())
+		return
+	}
+
+	framework := map[string]interface{}{}
+	switch v := req.Framework.(type) {
+	case nil:
+		framework = nil
+	case map[string]interface{}:
+		framework = v
+	case string:
+		text := strings.TrimSpace(v)
+		if text == "" {
+			framework = map[string]interface{}{}
+		} else {
+			framework = map[string]interface{}{
+				"theme": map[string]interface{}{
+					"core": text,
+				},
+			}
+		}
+	default:
+		framework = map[string]interface{}{"raw": v}
+	}
+
+	project, err := h.ScriptService.UpdateProjectBasics(c.Request.Context(), id, req.Title, req.Type, framework)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "更新 script 失败", err.Error())
+		return
+	}
+
+	resp := gin.H{
+		"id":         project.ID,
+		"title":      project.Title,
+		"type":       project.Type,
+		"created_at": project.CreatedAt,
+		"updated_at": project.UpdatedAt,
+		"framework":  project.Framework,
+	}
+	// keep recommended_commands/state so frontend can reuse immediately
+	if len(project.RecommendedCommands) > 0 {
+		resp["recommended_commands"] = project.RecommendedCommands
+	}
+	if project.State.ActiveDraftID != "" || (project.State.Cursor != models.ScriptCursor{}) {
+		resp["state"] = project.State
+	}
+
+	h.Response.Success(c, resp, "script 更新成功")
+}
+
+func (h *Handler) DeleteScript(c *gin.Context) {
+	id := c.Param("id")
+	if err := h.ScriptService.DeleteProject(c.Request.Context(), id); err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "删除 script 失败", err.Error())
+		return
+	}
+	h.Response.Success(c, gin.H{"id": id}, "script 删除成功")
+}
+
+func (h *Handler) GetScript(c *gin.Context) {
+	id := c.Param("id")
+	project, err := h.ScriptService.GetProject(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "获取 script 失败", err.Error())
+		return
+	}
+
+	// Backward-compatible: keep project fields at root, but attach detail fields for frontend.
+	data := map[string]interface{}{}
+	if b, err := json.Marshal(project); err == nil {
+		_ = json.Unmarshal(b, &data)
+	}
+
+	// best-effort attachments (do not fail the request if missing)
+	if h.ScriptService != nil && h.ScriptService.FileStorage != nil {
+		if drafts, err := h.ScriptService.ListDraftMetas(c.Request.Context(), id); err == nil {
+			data["drafts"] = drafts
+		} else {
+			data["drafts"] = []models.ScriptDraftMeta{}
+		}
+
+		var mem models.ScriptMemory
+		if err := h.ScriptService.FileStorage.LoadJSONFile(id, "memory.json", &mem); err == nil {
+			data["memory"] = mem
+		}
+
+		var sums models.ScriptChapterSummaries
+		if err := h.ScriptService.FileStorage.LoadJSONFile(id, "chapter_summaries.json", &sums); err == nil {
+			data["chapter_summaries"] = sums
+		}
+
+		var chapterDraft models.ScriptChapterDraft
+		if err := h.ScriptService.FileStorage.LoadJSONFile(id, "chapter_draft.json", &chapterDraft); err == nil {
+			if chapterDraft.Chapters == nil {
+				chapterDraft.Chapters = []models.ScriptChapterDraftChapter{}
+			}
+			data["chapter_draft"] = chapterDraft
+		}
+
+		// view-details editable attachments
+		var chars []map[string]interface{}
+		if err := h.ScriptService.FileStorage.LoadJSONFile(id, "characters.json", &chars); err == nil {
+			data["characters"] = chars
+		}
+		var items []map[string]interface{}
+		if err := h.ScriptService.FileStorage.LoadJSONFile(id, "items.json", &items); err == nil {
+			data["items"] = items
+		}
+
+		if project.State.ActiveDraftID != "" {
+			var draft models.ScriptDraft
+			if err := h.ScriptService.FileStorage.LoadJSONFile(filepath.Join(id, "drafts"), project.State.ActiveDraftID+".json", &draft); err == nil {
+				data["active_draft"] = draft
+			}
+		}
+
+		// P0: workflow/command history (keep small recent window)
+		var wf models.ScriptWorkflow
+		if err := h.ScriptService.FileStorage.LoadJSONFile(id, "workflow_items.json", &wf); err == nil {
+			if wf.Items == nil {
+				wf.Items = []models.ScriptWorkflowItem{}
+			}
+			workflowLimit := 3
+			if q := strings.TrimSpace(c.Query("workflow_limit")); q != "" {
+				if parsed, err := strconv.Atoi(q); err == nil && parsed > 0 {
+					workflowLimit = parsed
+				}
+			}
+			if workflowLimit > 200 {
+				workflowLimit = 200
+			}
+			if len(wf.Items) > workflowLimit {
+				wf.Items = wf.Items[len(wf.Items)-workflowLimit:]
+			}
+			data["workflow_items"] = wf.Items
+		} else {
+			data["workflow_items"] = []models.ScriptWorkflowItem{}
+		}
+	}
+
+	h.Response.Success(c, data, "script 获取成功")
+}
+
+func (h *Handler) GetScriptCharacters(c *gin.Context) {
+	id := c.Param("id")
+	chars, err := h.ScriptService.LoadCharacters(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "获取 characters 失败", err.Error())
+		return
+	}
+	h.Response.Success(c, chars, "characters 获取成功")
+}
+
+func (h *Handler) PutScriptCharacters(c *gin.Context) {
+	id := c.Param("id")
+	var raw interface{}
+	if err := c.ShouldBindJSON(&raw); err != nil {
+		h.Response.BadRequest(c, "请求参数无效", err.Error())
+		return
+	}
+
+	chars := make([]map[string]interface{}, 0)
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, it := range v {
+			if m, ok := it.(map[string]interface{}); ok {
+				chars = append(chars, m)
+			}
+		}
+	case map[string]interface{}:
+		if arr, ok := v["characters"].([]interface{}); ok {
+			for _, it := range arr {
+				if m, ok := it.(map[string]interface{}); ok {
+					chars = append(chars, m)
+				}
+			}
+		}
+	default:
+		// ignore
+	}
+
+	if err := h.ScriptService.SaveCharacters(c.Request.Context(), id, chars); err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "保存 characters 失败", err.Error())
+		return
+	}
+	h.Response.Success(c, chars, "characters 保存成功")
+}
+
+func (h *Handler) GetScriptItems(c *gin.Context) {
+	id := c.Param("id")
+	items, err := h.ScriptService.LoadItems(c.Request.Context(), id)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "获取 items 失败", err.Error())
+		return
+	}
+	h.Response.Success(c, items, "items 获取成功")
+}
+
+func (h *Handler) PutScriptItems(c *gin.Context) {
+	id := c.Param("id")
+	var raw interface{}
+	if err := c.ShouldBindJSON(&raw); err != nil {
+		h.Response.BadRequest(c, "请求参数无效", err.Error())
+		return
+	}
+
+	items := make([]map[string]interface{}, 0)
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, it := range v {
+			if m, ok := it.(map[string]interface{}); ok {
+				items = append(items, m)
+			}
+		}
+	case map[string]interface{}:
+		if arr, ok := v["items"].([]interface{}); ok {
+			for _, it := range arr {
+				if m, ok := it.(map[string]interface{}); ok {
+					items = append(items, m)
+				}
+			}
+		}
+	default:
+		// ignore
+	}
+
+	if err := h.ScriptService.SaveItems(c.Request.Context(), id, items); err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "保存 items 失败", err.Error())
+		return
+	}
+	h.Response.Success(c, items, "items 保存成功")
+}
+
+type PutScriptChapterDraftRequest struct {
+	Chapter   int    `json:"chapter"`
+	UserDraft string `json:"user_draft"`
+}
+
+func (h *Handler) PutScriptChapterDraft(c *gin.Context) {
+	id := c.Param("id")
+	var req PutScriptChapterDraftRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数无效", err.Error())
+		return
+	}
+	if req.Chapter <= 0 {
+		h.Response.BadRequest(c, "chapter 必须大于 0")
+		return
+	}
+
+	cd, err := h.ScriptService.UpdateChapterUserDraft(c.Request.Context(), id, req.Chapter, req.UserDraft)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.InternalError(c, "保存章节正文失败", err.Error())
+		return
+	}
+	h.Response.Success(c, cd, "章节正文保存成功")
+}
+
+type ManualEditDraftRequest struct {
+	BaseDraftID string                     `json:"draft_id,omitempty"`
+	Target      models.ScriptCommandTarget `json:"target"`
+	Text        string                     `json:"text"`
+	UserPrompt  string                     `json:"user_prompt,omitempty"`
+}
+
+func (h *Handler) PutScriptDraft(c *gin.Context) {
+	id := c.Param("id")
+	var req ManualEditDraftRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数无效", err.Error())
+		return
+	}
+
+	project, newDraftID, err := h.ScriptService.ManualEditDraft(c.Request.Context(), id, req.BaseDraftID, req.Target, req.Text, req.UserPrompt)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.BadRequest(c, "保存 draft 失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, gin.H{
+		"draft_id":        newDraftID,
+		"active_draft_id": project.State.ActiveDraftID,
+		"cursor":          project.State.Cursor,
+		"updated_at":      project.UpdatedAt,
+	}, "draft 保存成功")
+}
+
+func (h *Handler) ScriptCommand(c *gin.Context) {
+	id := c.Param("id")
+	var req models.ScriptCommandRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数无效")
+		return
+	}
+
+	// LLM readiness: keep behavior consistent with analyze/scene endpoints
+	llmSvc := h.ScriptService.LLM
+	if llmSvc == nil || !llmSvc.IsReady() {
+		readyState := MessageLLMNotReady
+		if llmSvc != nil {
+			readyState = llmSvc.GetReadyState()
+		}
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady, MessageLLMNotReady, readyState)
+		return
+	}
+
+	result, err := h.ScriptService.Command(c.Request.Context(), id, req)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		if errors.Is(err, services.ErrLLMNotReady) {
+			readyState := MessageLLMNotReady
+			if h.ScriptService != nil && h.ScriptService.LLM != nil {
+				readyState = h.ScriptService.LLM.GetReadyState()
+			}
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady, MessageLLMNotReady, readyState)
+			return
+		}
+		h.Response.InternalError(c, "执行 command 失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, result, "command 执行成功")
+}
+
+func (h *Handler) ScriptGenerate(c *gin.Context) {
+	id := c.Param("id")
+
+	// P0：不强约束 body，允许空 JSON 或空 body
+	_ = c.ShouldBindJSON(&struct{}{})
+
+	if h.ScriptService == nil {
+		h.Response.InternalError(c, "scripts 服务未初始化", "Script service unavailable")
+		return
+	}
+
+	llmSvc := h.ScriptService.LLM
+	if llmSvc == nil || !llmSvc.IsReady() {
+		readyState := MessageLLMNotReady
+		if llmSvc != nil {
+			readyState = llmSvc.GetReadyState()
+		}
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady, MessageLLMNotReady, readyState)
+		return
+	}
+
+	// 创建唯一任务ID
+	taskID := fmt.Sprintf("scriptgen_%d", time.Now().UnixNano())
+
+	// 创建进度跟踪器
+	tracker := h.ProgressService.CreateTracker(taskID)
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+
+		tracker.UpdateProgress(1, "任务开始")
+		if err := h.ScriptService.GenerateInitial(ctx, id, tracker); err != nil {
+			tracker.Fail(err.Error())
+			return
+		}
+		tracker.Complete("生成完成")
+	}()
+
+	h.Response.Success(c, map[string]interface{}{
+		"task_id": taskID,
+	}, "生成任务已开始，请订阅进度")
+}
+
+func (h *Handler) ScriptRewind(c *gin.Context) {
+	id := c.Param("id")
+	var req RewindScriptRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "请求参数无效")
+		return
+	}
+
+	project, err := h.ScriptService.Rewind(c.Request.Context(), id, req.DraftID)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		h.Response.BadRequest(c, err.Error())
+		return
+	}
+
+	h.Response.Success(c, project, "rewind 成功")
+}
+
+func (h *Handler) ScriptExport(c *gin.Context) {
+	id := c.Param("id")
+	format := strings.ToLower(strings.TrimSpace(c.Query("format")))
+	if format == "" {
+		format = "markdown"
+	}
+
+	// 格式契约收口：仅允许项目实际支持的导出格式（不支持 pdf/csv 等）。
+	supportedFormats := []string{"json", "markdown", "txt", "html"}
+	if !contains(supportedFormats, format) {
+		h.Response.Error(c, http.StatusBadRequest, ErrorExportFormatInvalid, "不支持的导出格式", "支持的格式: json/markdown/txt/html")
+		return
+	}
+	includeMeta := false
+	if raw := strings.TrimSpace(c.Query("include_meta")); raw != "" {
+		if b, err := strconv.ParseBool(raw); err == nil {
+			includeMeta = b
+		}
+	}
+
+	result, err := h.ScriptService.ExportWithMeta(c.Request.Context(), id, format, includeMeta)
+	if err != nil {
+		if errors.Is(err, services.ErrScriptNotFound) {
+			h.Response.NotFound(c, "script 不存在")
+			return
+		}
+		// P0 简化：导出失败多为缺少草稿/内容
+		h.Response.BadRequest(c, "导出失败", err.Error())
+		return
+	}
+
+	// 注意：ScriptService 当前仅保证 markdown/txt 内容的正确性；
+	// 若请求了其他格式（如 html/pdf），应以“实际导出格式”决定响应头，避免 Content-Type 错配。
+	responseFormat := format
+	if responseFormat != "json" {
+		responseFormat = strings.ToLower(strings.TrimSpace(result.Format))
+		if responseFormat == "" {
+			responseFormat = "markdown"
+		}
+	}
+
+	h.Response.ExportResponse(c, result, responseFormat)
 }
 
 // GetScenes 获取所有场景列表
@@ -467,7 +2424,10 @@ func (h *Handler) CreateScene(c *gin.Context) {
 					"client_ip": c.ClientIP(),
 				})
 			} else {
-				log.Printf("LLM service not ready while creating scene %s", req.Title)
+				utils.GetLogger().Warn("llm service not ready during scene creation", map[string]interface{}{
+					"title":     req.Title,
+					"client_ip": c.ClientIP(),
+				})
 			}
 			h.Metrics.RecordError("llm_not_ready", "llm_service")
 			h.Response.Error(c, http.StatusServiceUnavailable, ErrorLLMNotReady,
@@ -944,7 +2904,27 @@ func (h *Handler) SubscribeProgress(c *gin.Context) {
 	// 获取进度跟踪器
 	tracker, exists := h.ProgressService.GetTracker(taskID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		// If the client requested SSE (e.g. browser EventSource), emit a single failed progress event
+		// so the frontend can show a meaningful message and close the stream.
+		if strings.Contains(strings.ToLower(c.GetHeader("Accept")), "text/event-stream") {
+			c.Writer.Header().Set("Content-Type", "text/event-stream")
+			c.Writer.Header().Set("Cache-Control", "no-cache")
+			c.Writer.Header().Set("Connection", "keep-alive")
+			c.Writer.Header().Set("Transfer-Encoding", "chunked")
+
+			payload := map[string]interface{}{
+				"progress":   0,
+				"message":    "任务不存在（可能已完成并被清理或服务已重启），请重新发起任务",
+				"status":     "failed",
+				"event_type": "task_not_found",
+			}
+			data, _ := json.Marshal(payload)
+			fmt.Fprintf(c.Writer, "event: progress\ndata: %s\n\n", string(data))
+			c.Writer.Flush()
+			return
+		}
+
+		h.Response.Error(c, http.StatusNotFound, "TASK_NOT_FOUND", "任务不存在（可能已完成并被清理或服务已重启）")
 		return
 	}
 
@@ -1000,17 +2980,33 @@ func (h *Handler) SubscribeProgress(c *gin.Context) {
 func (h *Handler) CancelAnalysisTask(c *gin.Context) {
 	taskID := c.Param("taskID")
 
+	// 尝试取消底层任务（如果已接入 JobQueue）
+	canceled := false
+	if container := di.GetContainer(); container != nil {
+		if jq, ok := container.Get("job_queue").(*services.JobQueue); ok && jq != nil {
+			canceled = jq.Cancel(taskID)
+		}
+	}
+
 	// 获取进度跟踪器
 	tracker, exists := h.ProgressService.GetTracker(taskID)
 	if !exists {
-		c.JSON(http.StatusNotFound, gin.H{"error": "任务不存在"})
+		if canceled {
+			h.Response.Success(c, nil, "任务取消请求已发送")
+			return
+		}
+		h.Response.Error(c, http.StatusNotFound, "TASK_NOT_FOUND", "任务不存在（可能已完成并被清理或服务已重启）")
 		return
 	}
 
 	// 标记任务为失败
 	tracker.Fail("用户取消了任务")
 
-	h.Response.Success(c, nil, "任务已取消")
+	if canceled {
+		h.Response.Success(c, nil, "任务已取消")
+		return
+	}
+	h.Response.Success(c, nil, "任务已标记为取消")
 }
 
 // ChatWithEmotion 处理带情绪的聊天请求
@@ -1206,7 +3202,11 @@ func (h *Handler) InsertStoryNode(c *gin.Context) {
 					"node_id":  nodeID,
 				})
 			} else {
-				log.Printf("failed to record sidebar insert for %s/%s: %v", sceneID, nodeID, err)
+				utils.GetLogger().Warn("failed to record sidebar insert", map[string]interface{}{
+					"scene_id": sceneID,
+					"node_id":  nodeID,
+					"err":      err.Error(),
+				})
 			}
 		}
 	}
@@ -1283,13 +3283,13 @@ func (h *Handler) BatchStoryOperations(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		h.Response.BadRequest(c, "请求参数错误", err.Error())
 		return
 	}
 
 	storyService := h.getStoryService()
 	if storyService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务不可用"})
+		h.Response.InternalError(c, "故事服务不可用")
 		return
 	}
 
@@ -1311,14 +3311,11 @@ func (h *Handler) BatchStoryOperations(c *gin.Context) {
 	})
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "批量操作失败: " + err.Error()})
+		h.Response.InternalError(c, "批量操作失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "批量操作执行成功",
-	})
+	h.Response.Success(c, gin.H{"operations": len(req.Operations)}, "批量操作执行成功")
 }
 
 // AdvanceStory 推进故事情节
@@ -1326,7 +3323,7 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 	sceneID := c.Param("id")
 
 	if sceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 
@@ -1343,7 +3340,7 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 	// 获取StoryService实例
 	storyService := h.getStoryService()
 	if storyService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		h.Response.InternalError(c, "故事服务未初始化")
 		return
 	}
 
@@ -1367,17 +3364,17 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 		if strings.Contains(err.Error(), "故事数据不存在") {
 			_, initErr := storyService.InitializeStoryForScene(sceneID, preferences)
 			if initErr != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("初始化故事失败: %v", initErr)})
+				h.Response.InternalError(c, "初始化故事失败", initErr.Error())
 				return
 			}
 			// 初始化后再次尝试推进
 			storyUpdate, err = storyService.AdvanceStory(sceneID, preferences)
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("推进故事失败: %v", err)})
+				h.Response.InternalError(c, "推进故事失败", err.Error())
 				return
 			}
 		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("推进故事失败: %v", err)})
+			h.Response.InternalError(c, "推进故事失败", err.Error())
 			return
 		}
 	}
@@ -1386,20 +3383,16 @@ func (h *Handler) AdvanceStory(c *gin.Context) {
 	storyData, err := storyService.GetStoryData(sceneID, preferences)
 	if err != nil {
 		// 即使获取完整数据失败，也返回更新信息
-		c.JSON(http.StatusOK, gin.H{
-			"success":      true,
-			"message":      "故事已推进",
+		h.Response.Success(c, gin.H{
 			"story_update": storyUpdate,
-		})
+		}, "故事已推进")
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"success":      true,
-		"message":      "故事已推进",
+	h.Response.Success(c, gin.H{
 		"story_update": storyUpdate,
 		"story_data":   storyData,
-	})
+	}, "故事已推进")
 }
 
 // HandleSceneCommand 统一处理网页端的自由指令
@@ -1476,7 +3469,11 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 			} else if h.Logger != nil {
 				h.Logger.Warn("获取节点旁白失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID, "node_id": activeNode.ID})
 			} else {
-				log.Printf("failed to load node narration for %s/%s: %v", sceneID, activeNode.ID, err)
+				utils.GetLogger().Warn("failed to load node narration", map[string]interface{}{
+					"scene_id": sceneID,
+					"node_id":  activeNode.ID,
+					"err":      err.Error(),
+				})
 			}
 		}
 		systemPrompt = buildStoryModeSystemPrompt(sceneData)
@@ -1499,7 +3496,10 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 			} else if h.Logger != nil {
 				h.Logger.Warn("获取剧情旁白失败", map[string]interface{}{"error": err.Error(), "scene_id": sceneID})
 			} else {
-				log.Printf("failed to load narration context for %s: %v", sceneID, err)
+				utils.GetLogger().Warn("failed to load narration context", map[string]interface{}{
+					"scene_id": sceneID,
+					"err":      err.Error(),
+				})
 			}
 		}
 		contextPrompt, legacySystemPrompt := buildSceneCommandContext(sceneData, storyData, mode, &req, narrationContext)
@@ -1557,7 +3557,11 @@ func (h *Handler) HandleSceneCommand(c *gin.Context) {
 								"node_id":  activeNode.ID,
 							})
 						} else {
-							log.Printf("failed to update node choices for %s/%s: %v", sceneID, activeNode.ID, err)
+							utils.GetLogger().Warn("failed to update node choices", map[string]interface{}{
+								"scene_id": sceneID,
+								"node_id":  activeNode.ID,
+								"err":      err.Error(),
+							})
 						}
 					} else {
 						choiceSummaries = summarizeStoryChoiceModels(translatedChoices)
@@ -2117,20 +4121,20 @@ func (h *Handler) RewindStory(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数: " + err.Error()})
+		h.Response.BadRequest(c, "无效的请求参数", err.Error())
 		return
 	}
 
 	// 验证参数
 	if sceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 
 	// 获取StoryService实例
 	storyService := h.getStoryService()
 	if storyService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		h.Response.InternalError(c, "故事服务未初始化")
 		return
 	}
 
@@ -2142,18 +4146,18 @@ func (h *Handler) RewindStory(c *gin.Context) {
 	if req.NodeID == "new_start" {
 		storyDataCurrent, err := storyService.GetStoryForScene(sceneID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取故事数据失败: %v", err)})
+			h.Response.InternalError(c, "获取故事数据失败", err.Error())
 			return
 		}
 		if storyDataCurrent == nil || len(storyDataCurrent.Nodes) == 0 {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "故事数据为空，无法回溯"})
+			h.Response.InternalError(c, "故事数据为空，无法回溯")
 			return
 		}
 		firstNode := storyDataCurrent.Nodes[0]
 
 		storyData, err := storyService.RewindToNode(sceneID, firstNode.ID)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("回溯故事失败: %v", err)})
+			h.Response.InternalError(c, "回溯故事失败", err.Error())
 			return
 		}
 
@@ -2163,7 +4167,7 @@ func (h *Handler) RewindStory(c *gin.Context) {
 			if err == nil {
 				sceneData.Context.Conversations = []models.Conversation{}
 				if err := h.ContextService.SceneService.UpdateContext(sceneID, &sceneData.Context); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("清理上下文失败: %v", err)})
+					h.Response.InternalError(c, "清理上下文失败", err.Error())
 					return
 				}
 
@@ -2183,22 +4187,19 @@ func (h *Handler) RewindStory(c *gin.Context) {
 			h.StatsService.RecordAPIRequest(2)
 		}
 
-		response := gin.H{
-			"success":          true,
-			"message":          "回溯至起点并清空上下文",
+		h.Response.Success(c, gin.H{
 			"story":            storyData,
 			"branch_view":      branchView,
 			"target_node":      firstNode,
 			"removed_node_ids": []string{},
-		}
-		c.JSON(http.StatusOK, response)
+		}, "回溯至起点并清空上下文")
 		return
 	}
 
 	// 执行回溯操作
 	storyData, err := storyService.RewindToNode(sceneID, req.NodeID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("回溯故事失败: %v", err)})
+		h.Response.InternalError(c, "回溯故事失败", err.Error())
 		return
 	}
 
@@ -2266,8 +4267,6 @@ func (h *Handler) RewindStory(c *gin.Context) {
 	}
 
 	response := gin.H{
-		"success":        true,
-		"message":        "故事已成功回溯",
 		"story_data":     branchView,
 		"progress":       storyData.Progress,
 		"current_state":  storyData.CurrentState,
@@ -2284,7 +4283,7 @@ func (h *Handler) RewindStory(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, response)
+	h.Response.Success(c, response, "故事已成功回溯")
 }
 
 // GetStoryBranches 获取场景的所有故事分支
@@ -2294,7 +4293,7 @@ func (h *Handler) GetStoryBranches(c *gin.Context) {
 	// 获取StoryService实例
 	storyService := h.getStoryService()
 	if storyService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		h.Response.InternalError(c, "故事服务未初始化")
 		return
 	}
 
@@ -2304,7 +4303,9 @@ func (h *Handler) GetStoryBranches(c *gin.Context) {
 		preferences = &models.UserPreferences{}
 		if err := json.Unmarshal([]byte(prefJSON), preferences); err != nil {
 			// 解析失败，记录日志但继续使用默认值
-			log.Printf("解析用户偏好失败: %v", err)
+			h.Logger.Warn("failed to parse user preferences", map[string]interface{}{
+				"err": err.Error(),
+			})
 			preferences = nil
 		}
 	}
@@ -2312,14 +4313,14 @@ func (h *Handler) GetStoryBranches(c *gin.Context) {
 	// 获取故事数据
 	storyData, err := storyService.GetStoryData(sceneID, preferences)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("获取故事数据失败: %v", err)})
+		h.Response.InternalError(c, "获取故事数据失败", err.Error())
 		return
 	}
 
 	// 构建分支视图数据
 	branchView := buildStoryBranchView(storyData)
 
-	c.JSON(http.StatusOK, branchView)
+	h.Response.Success(c, branchView, "故事分支获取成功")
 }
 
 // 获取StoryService实例（从DI容器或其他地方）
@@ -2328,10 +4329,30 @@ func (h *Handler) getStoryService() *services.StoryService {
 	container := di.GetContainer()
 	storyService, ok := container.Get("story").(*services.StoryService)
 	if !ok {
-		log.Printf("警告: 无法从容器获取故事服务")
+		utils.GetLogger().Warn("cannot get story service from container", map[string]interface{}{})
 		return nil
 	}
 	return storyService
+}
+
+func (h *Handler) getComicService() *services.ComicService {
+	container := di.GetContainer()
+	comicService, ok := container.Get("comic").(*services.ComicService)
+	if !ok {
+		utils.GetLogger().Warn("cannot get comic service from container", map[string]interface{}{})
+		return nil
+	}
+	return comicService
+}
+
+func (h *Handler) getComicRepo() *services.ComicRepository {
+	container := di.GetContainer()
+	repo, ok := container.Get("comic_repo").(*services.ComicRepository)
+	if !ok {
+		utils.GetLogger().Warn("cannot get comic repo from container", map[string]interface{}{})
+		return nil
+	}
+	return repo
 }
 
 // 构建故事分支视图结构
@@ -2480,39 +4501,37 @@ func (h *Handler) RewindStoryToNode(c *gin.Context) {
 	}
 
 	if err := c.BindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的请求参数"})
+		h.Response.BadRequest(c, "无效的请求参数", err.Error())
 		return
 	}
 
 	// 验证参数
 	if sceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 
 	// 获取StoryService实例
 	storyService := h.getStoryService()
 	if storyService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "故事服务未初始化"})
+		h.Response.InternalError(c, "故事服务未初始化")
 		return
 	}
 
 	// 执行回溯操作
 	storyData, err := storyService.RewindToNode(sceneID, req.NodeID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("回溯故事失败: %v", err)})
+		h.Response.InternalError(c, "回溯故事失败", err.Error())
 		return
 	}
 
 	// 构建分支视图数据
 	branchView := buildStoryBranchView(storyData)
 
-	c.JSON(http.StatusOK, gin.H{
-		"success":     true,
-		"message":     "故事已成功回溯",
+	h.Response.Success(c, gin.H{
 		"story_data":  branchView,
 		"target_node": req.NodeID,
-	})
+	}, "故事已成功回溯")
 }
 
 // 添加这个方法，作为前端 API.getSettings() 的对应接口
@@ -2525,11 +4544,29 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		llmConfig["has_api_key"] = cfg.LLMConfig["api_key"] != ""
 	}
 
+	visionConfig := make(map[string]interface{})
+	if cfg.VisionConfig != nil {
+		for k, v := range cfg.VisionConfig {
+			if k == "api_key" {
+				continue
+			}
+			visionConfig[k] = v
+		}
+		visionConfig["has_api_key"] = cfg.VisionConfig["api_key"] != ""
+	} else {
+		visionConfig["has_api_key"] = false
+	}
+
 	data := map[string]interface{}{
-		"llm_provider": cfg.LLMProvider,
-		"debug_mode":   cfg.DebugMode,
-		"port":         cfg.Port,
-		"llm_config":   llmConfig,
+		"llm_provider":           cfg.LLMProvider,
+		"debug_mode":             cfg.DebugMode,
+		"port":                   cfg.Port,
+		"llm_config":             llmConfig,
+		"vision_provider":        cfg.VisionProvider,
+		"vision_default_model":   cfg.VisionDefaultModel,
+		"vision_config":          visionConfig,
+		"vision_model_providers": cfg.VisionModelProviders,
+		"vision_models":          cfg.VisionModels,
 	}
 
 	h.Response.Success(c, data, "设置获取成功")
@@ -2541,6 +4578,12 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 		LLMProvider string                 `json:"llm_provider"`
 		LLMConfig   map[string]interface{} `json:"llm_config"` // Use interface{} to handle different types
 		DebugMode   bool                   `json:"debug_mode"`
+
+		VisionProvider       string                   `json:"vision_provider"`
+		VisionDefaultModel   string                   `json:"vision_default_model"`
+		VisionConfig         map[string]interface{}   `json:"vision_config"`
+		VisionModelProviders map[string]interface{}   `json:"vision_model_providers"`
+		VisionModels         []config.VisionModelInfo `json:"vision_models"`
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -2549,48 +4592,71 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 	}
 
 	// Convert interface{} map to string map, handling different types
-	stringConfig := make(map[string]string)
-	for key, value := range request.LLMConfig {
-		switch v := value.(type) {
-		case string:
-			stringConfig[key] = v
-		case float64: // JSON numbers are unmarshaled as float64
-			// Check if it's actually an integer (whole number)
-			if v == float64(int64(v)) {
-				// It's a whole number, convert to int then string
-				stringConfig[key] = strconv.FormatInt(int64(v), 10)
-			} else {
-				// It's a decimal number, convert directly to string
-				stringConfig[key] = strconv.FormatFloat(v, 'f', -1, 64)
+	toStringMap := func(in map[string]interface{}) map[string]string {
+		out := make(map[string]string)
+		for key, value := range in {
+			switch v := value.(type) {
+			case string:
+				out[key] = v
+			case float64: // JSON numbers are unmarshaled as float64
+				// Check if it's actually an integer (whole number)
+				if v == float64(int64(v)) {
+					// It's a whole number, convert to int then string
+					out[key] = strconv.FormatInt(int64(v), 10)
+				} else {
+					// It's a decimal number, convert directly to string
+					out[key] = strconv.FormatFloat(v, 'f', -1, 64)
+				}
+			case float32:
+				// Check if it's actually an integer
+				if v == float32(int64(v)) {
+					out[key] = strconv.FormatInt(int64(v), 10)
+				} else {
+					out[key] = strconv.FormatFloat(float64(v), 'f', -1, 64)
+				}
+			case int:
+				out[key] = strconv.Itoa(v)
+			case int32:
+				out[key] = strconv.FormatInt(int64(v), 10)
+			case int64:
+				out[key] = strconv.FormatInt(v, 10)
+			case bool:
+				out[key] = strconv.FormatBool(v)
+			case nil:
+				out[key] = ""
+			default:
+				// Handle unexpected types gracefully
+				out[key] = fmt.Sprintf("%v", v) // fallback to string representation
 			}
-		case float32:
-			// Check if it's actually an integer
-			if v == float32(int64(v)) {
-				stringConfig[key] = strconv.FormatInt(int64(v), 10)
-			} else {
-				stringConfig[key] = strconv.FormatFloat(float64(v), 'f', -1, 64)
-			}
-		case int:
-			stringConfig[key] = strconv.Itoa(v)
-		case int32:
-			stringConfig[key] = strconv.FormatInt(int64(v), 10)
-		case int64:
-			stringConfig[key] = strconv.FormatInt(v, 10)
-		case bool:
-			stringConfig[key] = strconv.FormatBool(v)
-		case nil:
-			stringConfig[key] = ""
-		default:
-			// Handle unexpected types gracefully
-			stringConfig[key] = fmt.Sprintf("%v", v) // fallback to string representation
 		}
+		return out
 	}
+
+	stringConfig := toStringMap(request.LLMConfig)
 
 	// 保存LLM配置
 	if request.LLMProvider != "" && len(stringConfig) > 0 {
 		err := h.ConfigService.UpdateLLMConfig(request.LLMProvider, stringConfig, "web_ui")
 		if err != nil {
 			h.Response.InternalError(c, "保存LLM配置失败", err.Error())
+			return
+		}
+	}
+
+	// 保存Vision配置（Phase5）
+	if request.VisionProvider != "" {
+		visionCfg := toStringMap(request.VisionConfig)
+		visionModelProviders := toStringMap(request.VisionModelProviders)
+		err := h.ConfigService.UpdateVisionConfig(
+			request.VisionProvider,
+			visionCfg,
+			request.VisionDefaultModel,
+			visionModelProviders,
+			request.VisionModels,
+			"web_ui",
+		)
+		if err != nil {
+			h.Response.InternalError(c, "保存Vision配置失败", err.Error())
 			return
 		}
 	}
@@ -2744,9 +4810,7 @@ func (h *Handler) GetLLMStatus(c *gin.Context) {
 	container := di.GetContainer()
 	llmService, ok := container.Get("llm").(*services.LLMService)
 	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "无法获取LLM服务实例",
-		})
+		h.Response.InternalError(c, "无法获取LLM服务实例")
 		return
 	}
 
@@ -2777,7 +4841,7 @@ func (h *Handler) GetLLMStatus(c *gin.Context) {
 		status["configured"] = cfgReady
 	}
 
-	c.JSON(http.StatusOK, status)
+	h.Response.Success(c, status, "LLM状态获取成功")
 }
 
 // UpdateLLMConfig 更新LLM配置
@@ -2850,7 +4914,7 @@ func (h *Handler) GetConfigMetrics(c *gin.Context) {
 func (h *Handler) GetLLMModels(c *gin.Context) {
 	provider := c.Query("provider")
 	if provider == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少提供商参数"})
+		h.Response.BadRequest(c, "缺少提供商参数")
 		return
 	}
 
@@ -2870,18 +4934,16 @@ func (h *Handler) GetLLMModels(c *gin.Context) {
 		}
 
 		if !providerExists {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "不支持的LLM提供商: " + provider,
-			})
+			h.Response.BadRequest(c, "不支持的LLM提供商", provider)
 			return
 		}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
+	h.Response.Success(c, gin.H{
 		"provider": provider,
 		"models":   models,
 		"count":    len(models),
-	})
+	}, "模型列表获取成功")
 }
 
 // TriggerCharacterInteraction 处理函数 - 触发角色互动
@@ -3114,7 +5176,7 @@ func (h *Handler) GetSceneAggregate(c *gin.Context) {
 	// 获取场景聚合服务
 	aggregateService := h.getSceneAggregateService()
 	if aggregateService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "场景聚合服务未初始化"})
+		h.Response.InternalError(c, "场景聚合服务未初始化")
 		return
 	}
 
@@ -3125,11 +5187,11 @@ func (h *Handler) GetSceneAggregate(c *gin.Context) {
 	// 获取聚合数据
 	aggregateData, err := aggregateService.GetSceneAggregate(ctx, sceneID, options)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取场景数据失败: " + err.Error()})
+		h.Response.InternalError(c, "获取场景数据失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, aggregateData)
+	h.Response.Success(c, aggregateData, "场景聚合数据获取成功")
 }
 
 // getSceneAggregateService 获取场景聚合服务实例
@@ -3551,10 +5613,15 @@ func (h *Handler) GetSceneConversations(c *gin.Context) {
 		if convs, err := h.ContextService.GetRecentConversations(sceneID, limit); err == nil {
 			conversations = convs
 		} else {
-			log.Printf("警告: 获取场景(%s)对话失败: %v", sceneID, err)
+			h.Logger.Warn("failed to get scene conversations", map[string]interface{}{
+				"scene_id": sceneID,
+				"err":      err.Error(),
+			})
 		}
 	} else {
-		log.Printf("警告: ContextService 未初始化，无法获取场景(%s)对话", sceneID)
+		h.Logger.Warn("context service not initialized; cannot get scene conversations", map[string]interface{}{
+			"scene_id": sceneID,
+		})
 	}
 
 	h.Response.Success(c, map[string]interface{}{
@@ -3607,32 +5674,30 @@ func (h *Handler) ProcessInteractionAggregate(c *gin.Context) {
 	var request services.InteractionRequest
 
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "无效的请求参数: " + err.Error(),
-		})
+		h.Response.BadRequest(c, "无效的请求参数", err.Error())
 		return
 	}
 
 	// 验证必要参数
 	if request.SceneID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少场景ID"})
+		h.Response.BadRequest(c, "缺少场景ID")
 		return
 	}
 
 	if len(request.CharacterIDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要选择一个角色"})
+		h.Response.BadRequest(c, "至少需要选择一个角色")
 		return
 	}
 
 	if request.Message == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "消息内容不能为空"})
+		h.Response.BadRequest(c, "消息内容不能为空")
 		return
 	}
 
 	// 获取交互聚合服务
 	interactionService := h.getInteractionAggregateService()
 	if interactionService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "交互聚合服务未初始化"})
+		h.Response.InternalError(c, "交互聚合服务未初始化")
 		return
 	}
 
@@ -3643,13 +5708,11 @@ func (h *Handler) ProcessInteractionAggregate(c *gin.Context) {
 	// 处理交互
 	result, err := interactionService.ProcessInteraction(ctx, &request)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "处理交互失败: " + err.Error(),
-		})
+		h.Response.InternalError(c, "处理交互失败", err.Error())
 		return
 	}
 
-	c.JSON(http.StatusOK, result)
+	h.Response.Success(c, result, "交互处理成功")
 }
 
 // getInteractionAggregateService 获取交互聚合服务实例
@@ -3657,7 +5720,7 @@ func (h *Handler) getInteractionAggregateService() *services.InteractionAggregat
 	container := di.GetContainer()
 	service, ok := container.Get("interaction_aggregate").(*services.InteractionAggregateService)
 	if !ok {
-		log.Printf("警告: 无法从容器获取交互聚合服务")
+		utils.GetLogger().Warn("cannot get interaction aggregate service from container", map[string]interface{}{})
 		return nil
 	}
 	return service
@@ -3671,32 +5734,19 @@ func (h *Handler) ExportInteractionSummary(c *gin.Context) {
 	// 获取交互聚合服务
 	interactionService := h.getInteractionAggregateService()
 	if interactionService == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "交互聚合服务未初始化"})
+		h.Response.InternalError(c, "交互聚合服务未初始化")
 		return
 	}
 
 	// 导出交互摘要
 	result, err := interactionService.ExportInteraction(c.Request.Context(), sceneID, format)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		h.Response.InternalError(c, "导出交互摘要失败", err.Error())
 		return
 	}
 
-	// 根据格式返回不同的响应
-	switch strings.ToLower(format) {
-	case "json":
-		c.JSON(http.StatusOK, result)
-	case "markdown", "txt":
-		c.Header("Content-Type", "text/plain; charset=utf-8")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(result.FilePath)))
-		c.String(http.StatusOK, result.Content)
-	case "html":
-		c.Header("Content-Type", "text/html; charset=utf-8")
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filepath.Base(result.FilePath)))
-		c.String(http.StatusOK, result.Content)
-	default:
-		c.JSON(http.StatusOK, result)
-	}
+	// 根据格式返回不同的响应（统一响应/下载语义）
+	h.Response.ExportResponse(c, result, format)
 }
 
 // Login 处理用户登录请求
