@@ -2,6 +2,8 @@
 
 本文档以“当前代码实际行为”为准，说明后端启动、静态资源加载、配置/密钥、反向代理注意事项。
 
+截至 v2.0.0，部署产物已同时包含三类前端工作区：互动场景、comics 5-step 工作台，以及 New Script 写作助手；整体仍然是“单个 Go 后端 + 单个 SPA 前端 bundle”的部署模型。
+
 ## 系统要求
 
 - Go 1.21+
@@ -15,6 +17,13 @@ go run ./cmd/server
 ```
 
 默认地址：`http://localhost:8080`
+
+启动后建议至少检查以下路由是否可访问：
+
+- `/` —— 首页 / scenes
+- `/settings` —— LLM + Vision 设置
+- `/scripts` —— New Script 工作区
+- `/scenes/:id/comic` —— comics 5-step 工作流
 
 ## 前端静态资源（Go 服务如何提供）
 
@@ -54,6 +63,26 @@ npm run build
 - `TEMPLATES_DIR`（默认 `frontend/dist`）
 - `DEBUG_MODE`（默认 `true`）
 
+### 生产环境常见 provider 凭据回退
+
+后端支持优先从环境变量读取 provider 凭据，适合不希望将密钥持久化写入 `data/config.json` 的部署方式。
+
+- LLM 示例：`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`、`GROK_API_KEY`、`GITHUB_TOKEN` 等
+- GLM 图像示例：`GLM_API_KEY`、`BIGMODEL_API_KEY`、`ZHIPUAI_API_KEY`
+
+v2.0.0 出图链路最常见的持久化 Vision 字段包括：
+
+- `vision_provider`
+- `vision_default_model`
+- `vision_config.endpoint`
+- `vision_config.api_key`
+
+若使用 GLM Image，推荐值为：
+
+- provider：`glm`
+- 默认模型：`glm-image`
+- endpoint：`https://open.bigmodel.cn/api/paas/v4`
+
 ### LLM 凭据加密
 
 配置文件会将 LLM API Key 以 AES-GCM 加密后存储在 `encrypted_llm_config.api_key`。
@@ -77,12 +106,20 @@ npm run build
 - `/ws/scene/:id`
 - `/ws/user/status`
 
+前端的长任务进度还依赖 **SSE**：
+
+- `/api/progress/:taskID`
+
+反代时请避免对 SSE 响应做激进缓冲，否则 comics / scripts 的进度更新会明显滞后。
+
 反代时需确保：
 
 - 转发 WebSocket Upgrade 相关头
 - `Host`/`Origin` 保持一致（服务端会校验 Origin，同源是最安全的默认）
 
 若由反向代理终止 TLS，请使用 `wss://` 访问。
+
+另外，comics 参考图上传走 multipart，请确认代理层允许足够的上传体积。
 
 <!--
 
