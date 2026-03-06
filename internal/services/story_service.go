@@ -53,8 +53,17 @@ type CachedStoryData struct {
 
 // NewStoryService 创建故事服务
 func NewStoryService(llmService *LLMService) *StoryService {
+	return NewStoryServiceWithBasePath(llmService, "data/stories")
+}
+
+// NewStoryServiceWithBasePath 创建故事服务（允许注入 stories 的 basePath，便于测试隔离与可配置性）
+func NewStoryServiceWithBasePath(llmService *LLMService, basePath string) *StoryService {
+	basePath = strings.TrimSpace(basePath)
+	if basePath == "" {
+		basePath = "data/stories"
+	}
+
 	// 创建基础路径
-	basePath := "data/stories"
 	if err := os.MkdirAll(basePath, 0755); err != nil {
 		utils.GetLogger().Error("failed to create story data directory", map[string]interface{}{
 			"base_path": basePath,
@@ -632,11 +641,30 @@ func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, err
 		s.cacheMutex.RUnlock()
 	}
 
-	// 缓存过期或不存在，需要重新加载
-	storyPath := filepath.Join(s.BasePath, sceneID, "story.json")
+	basePath := strings.TrimSpace(s.BasePath)
+	if basePath == "" {
+		basePath = "data/stories"
+		s.BasePath = basePath
+	}
+	if s.FileStorage == nil {
+		fs, err := storage.NewFileStorage(basePath)
+		if err != nil {
+			return nil, fmt.Errorf("初始化故事存储失败: %w", err)
+		}
+		s.FileStorage = fs
+	}
+	// 兼容：历史代码/测试可能会在构造后直接修改 BasePath。
+	// 为避免绕过 FileStorage 后出现 BaseDir 与 BasePath 不一致，这里做一次轻量同步。
+	if filepath.Clean(s.FileStorage.BaseDir) != filepath.Clean(s.BasePath) {
+		fs, err := storage.NewFileStorage(s.BasePath)
+		if err != nil {
+			return nil, fmt.Errorf("初始化故事存储失败: %w", err)
+		}
+		s.FileStorage = fs
+	}
 
-	// 检查文件是否存在
-	if _, err := os.Stat(storyPath); os.IsNotExist(err) {
+	// 缓存过期或不存在，需要重新加载
+	if !s.FileStorage.FileExists(sceneID, "story.json") {
 		return nil, fmt.Errorf("故事数据不存在")
 	}
 
@@ -659,16 +687,9 @@ func (s *StoryService) loadStoryDataSafe(sceneID string) (*models.StoryData, err
 
 	// 使用 sync.Once 确保只加载一次
 	loading.Do(func() {
-		// 读取文件
-		storyDataBytes, err := os.ReadFile(storyPath)
-		if err != nil {
-			loadErr = fmt.Errorf("读取故事数据失败: %w", err)
-			return
-		}
-
 		var storyData models.StoryData
-		if err := json.Unmarshal(storyDataBytes, &storyData); err != nil {
-			loadErr = fmt.Errorf("解析故事数据失败: %w", err)
+		if err := s.FileStorage.LoadJSONFile(sceneID, "story.json", &storyData); err != nil {
+			loadErr = fmt.Errorf("读取故事数据失败: %w", err)
 			return
 		}
 
