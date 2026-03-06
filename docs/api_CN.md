@@ -102,7 +102,7 @@ Authorization: Bearer <token>
 }
 ```
 
-少数旧路径可能直接返回 `{"error": "..."}`（例如部分 SSE 错误分支）。
+少数旧路径可能直接返回 `{"error": "..."}`。该行为正在逐步收敛到统一 `APIResponse`。
 
 ## REST 接口清单
 
@@ -127,12 +127,215 @@ Authorization: Bearer <token>
 
 - `GET /api/scenes`
 - `POST /api/scenes`
+- `POST /api/scenes/shell`
 - `GET /api/scenes/:id`
 - `DELETE /api/scenes/:id`
 - `GET /api/scenes/:id/characters`
 - `GET /api/scenes/:id/conversations`
 - `GET /api/scenes/:id/nodes/:node_id/content`
 - `GET /api/scenes/:id/aggregate`
+
+#### v2 Comics（分镜 / 提示词 / 关键元素）
+
+这些接口用于启动异步任务（返回 202 + `task_id`），并在任务完成后读取落盘结果。进度请订阅 `GET /api/progress/:taskID`（SSE）。
+
+v2.0.0 新增的 standalone comics 典型流程为：
+
+1. 先通过 `POST /api/scenes/shell` 创建一个空的 comics 工作区
+2. 前端跳转到 `/scenes/:id/comic?entry=comic_standalone`
+3. 再通过 `source_text` 启动分镜分析，而不是依赖已有 story node
+
+- `POST /api/scenes/:id/comic/analysis` — 启动分镜分析（落盘 `data/comics/scene_<id>/analysis.json`）
+- `GET /api/scenes/:id/comic/analysis` — 读取分镜分析结果
+- `POST /api/scenes/:id/comic/prompts` — 启动每帧提示词生成（落盘 `data/comics/scene_<id>/prompts/*.json`）
+- `GET /api/scenes/:id/comic/prompts` — 读取所有帧提示词
+- `POST /api/scenes/:id/comic/key_elements` — 启动关键元素提取（落盘 `data/comics/scene_<id>/key_elements.json`）
+- `GET /api/scenes/:id/comic/key_elements` — 读取关键元素
+- `POST /api/scenes/:id/comic/references` — 上传参考图（multipart；落盘 `data/comics/scene_<id>/references/*` + `references/index.json`）
+- `POST /api/scenes/:id/comic/generate` — 启动图片生成（异步；落盘 `data/comics/scene_<id>/images/*.png`）
+- `POST /api/scenes/:id/comic/frames/:frameID/regenerate` — 单帧重绘（异步）
+- `GET /api/scenes/:id/comic/images/:frameID` — 获取单帧 PNG 图片（用于前端预览；读取 `data/comics/scene_<id>/images/<frameID>.png`）
+- `GET /api/scenes/:id/comic` — comics 概览（是否有分析/提示词/关键元素，参考图数量、图片数量等）
+- `GET /api/scenes/:id/comic/export?format=zip|html` — 导出下载（ZIP/HTML）
+
+说明：
+
+- 这些路由使用 `RequireAuthForScene()` 保护。
+  - 未携带/携带无效 `Authorization` 时，通常会按 guest 模式继续执行。
+  - 若携带有效 token，中间件可能会额外校验场景是否存在（未来也可扩展为校验归属/权限）。
+- 若希望以“已登录用户”身份调用，可额外添加请求头：`-H "Authorization: Bearer <token>"`
+
+可复制 curl 示例（替换占位符）：
+
+启动分镜分析（返回 202 + `task_id`）：
+
+```bash
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/analysis \
+  -d '{}'
+```
+
+订阅进度（SSE），直到 `status=completed/failed`（然后服务端会关闭连接）：
+
+```bash
+curl -N \
+  -H "Accept: text/event-stream" \
+  http://localhost:8080/api/progress/<task_id>
+```
+
+读取落盘结果：
+
+```bash
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic/analysis
+
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic/prompts
+
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic/key_elements
+```
+
+启动提示词生成 / 关键元素提取（都返回 202 + `task_id`，进度订阅同上）：
+
+```bash
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/prompts -d '{}'
+
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/key_elements -d '{}'
+```
+
+上传参考图（multipart；仅 PNG/JPEG/WEBP；单文件 <= 5MB）：
+
+单个上传（`element_id` + `file`）：
+
+```bash
+curl -sS -X POST \
+  -F "element_id=<element_id>" \
+  -F "file=@./reference.png" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/references
+```
+
+批量上传（多个 `file_<element_id>` part）：
+
+```bash
+curl -sS -X POST \
+  -F "file_<element_id_1>=@./ref1.png" \
+  -F "file_<element_id_2>=@./ref2.jpg" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/references
+```
+
+启动图片生成 / 单帧重绘（都返回 202 + `task_id`）：
+
+```bash
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/generate -d '{}'
+
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/frames/<frame_id>/regenerate -d '{}'
+```
+
+comics 概览：
+
+```bash
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic
+```
+
+导出（ZIP/HTML）：
+
+```bash
+curl -fSL -o comic_<scene_id>.zip \
+  "http://localhost:8080/api/scenes/<scene_id>/comic/export?format=zip"
+
+curl -fSL -o comic_<scene_id>.html \
+  "http://localhost:8080/api/scenes/<scene_id>/comic/export?format=html"
+```
+
+启动分镜分析：
+
+```http
+POST /api/scenes/<scene_id>/comic/analysis
+Content-Type: application/json
+
+{}
+```
+
+Standalone 文本分析示例：
+
+```http
+POST /api/scenes/<scene_id>/comic/analysis
+Content-Type: application/json
+
+{
+  "source_text": "侦探走进废弃车站，在停摆的时钟下发现了第一条线索……",
+  "target_frames": 6
+}
+```
+
+创建独立 comics scene shell：
+
+```http
+POST /api/scenes/shell
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Comic",
+  "description": "Standalone comic workspace"
+}
+```
+
+响应（202）：
+
+```json
+{
+  "success": true,
+  "data": { "task_id": "comic_analyze_<scene_id>_..." },
+  "message": "分镜分析任务已受理",
+  "timestamp": "..."
+}
+```
+
+读取分镜分析结果：
+
+```http
+GET /api/scenes/<scene_id>/comic/analysis
+```
+
+响应（200）：
+
+```json
+{
+  "success": true,
+  "data": {
+    "scene_id": "<scene_id>",
+    "target_frames": 8,
+    "frames": [
+      { "id": "frame_1", "order": 1, "description": "..." }
+    ]
+  },
+  "message": "分镜分析结果获取成功",
+  "timestamp": "..."
+}
+```
+
+常见错误码：
+
+- `LLM_NOT_READY`：LLM 未配置或未就绪（启动任务时会直接返回 503）
+- `COMIC_SERVICE_NOT_READY`：ComicService/Repo 未初始化或依赖缺失（503）
+- `COMIC_ANALYSIS_NOT_FOUND`：分镜分析结果不存在（404）
+- `COMIC_PROMPTS_NOT_FOUND`：提示词不存在（404）
+- `COMIC_KEY_ELEMENTS_NOT_FOUND`：关键元素不存在（404）
+
+导出 comics：
+
+```http
+GET /api/scenes/<scene_id>/comic/export?format=zip
+```
+
+响应（200）：文件下载
+
+- `Content-Type`：`application/zip` / `text/html; charset=utf-8`
+- `Content-Disposition`：`attachment; filename="comic_<scene_id>_<timestamp>.<ext>"`
 
 ### 场景物品
 
@@ -159,7 +362,7 @@ Authorization: Bearer <token>
 
 ### Export
 
-导出接口支持 `?format=`（常见：`json`、`markdown`、`txt`、`html`，部分导出也可能支持 `csv`/`pdf`，以实际 handler 为准）。
+导出接口支持 `?format=`（当前统一为：`json`、`markdown`、`txt`、`html`；comics 导出为 `zip|html`）。
 
 - `GET /api/scenes/:id/export/scene`
 - `GET /api/scenes/:id/export/interactions`
@@ -184,6 +387,63 @@ Authorization: Bearer <token>
 - `POST /api/analyze`
 - `GET /api/progress/:taskID`（SSE）
 - `POST /api/cancel/:taskID`
+
+#### 进度订阅（SSE）
+
+通过 Server-Sent Events 订阅任务进度：
+
+```http
+GET /api/progress/<taskID>
+Accept: text/event-stream
+```
+
+SSE 事件类型：
+
+- `event: connected`（连接建立时发送一次）
+- `event: progress`（JSON payload）
+- `event: heartbeat`（保活）
+
+`progress` 事件 payload 结构：
+
+```json
+{
+  "progress": 42,
+  "message": "...",
+  "status": "running"
+}
+```
+
+`status` 取值：`running` / `completed` / `failed`。当状态变为 `completed` 或 `failed` 时，服务端会关闭 SSE 连接。
+
+当任务不存在时，接口会返回普通 JSON 错误（非 SSE）：
+
+```json
+{
+  "success": false,
+  "error": { "code": "TASK_NOT_FOUND", "message": "任务不存在" },
+  "timestamp": "..."
+}
+```
+
+若客户端请求 SSE（例如设置 `Accept: text/event-stream`），服务端会发送一次 `event: progress`（`status="failed"`）后关闭连接，便于前端展示原因并收敛。
+
+常见原因：
+
+- 服务端重启（进度 tracker 目前是内存态）。
+- 任务完成/失败后被自动清理。
+- taskID 无效。
+
+#### 取消任务
+
+按 taskID 取消任务：
+
+```http
+POST /api/cancel/<taskID>
+Authorization: Bearer <token>
+```
+
+- 若 JobQueue 中存在同 taskID 的运行任务，会尝试向底层任务传播取消。
+- ProgressTracker 会标记为失败（"用户取消"），确保 SSE 订阅端能及时收敛。
 
 ### Config / Metrics
 
@@ -588,6 +848,60 @@ POST /api/scenes
   "preferred_model": "gpt-4"
 }
 ```
+
+### 新建剧本（New Script 写作助手）
+
+```http
+POST /api/scripts
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "我的悬疑小说",
+  "type": "novel",
+  "framework": {
+    "genre": "mystery",
+    "chapter_count": 12,
+    "notes": "慢热悬疑，共12章"
+  }
+}
+```
+
+**响应示例（201）**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "script_12345",
+    "title": "我的悬疑小说",
+    "state": { "active_draft_id": "", "cursor": { "chapter": 1, "scene": 1 } }
+  },
+  "message": "Script created"
+}
+```
+
+**显式启动生成**
+
+```http
+POST /api/scripts/{id}/generate
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{}
+```
+
+**响应（202）**
+
+```json
+{
+  "success": true,
+  "data": { "task_id": "task_abc123" },
+  "message": "Generation started; subscribe to /api/progress/{task_id} for progress (SSE)"
+}
+```
+
+> 说明：生成过程会向 `/api/progress/:taskID` 发送进度事件（SSE），使用 `GET /api/progress/<taskID>` 并设置 `Accept: text/event-stream` 以接收 `progress` 事件。
 
 **参数描述：**
 
@@ -1006,25 +1320,43 @@ GET /api/settings
 {
   "success": true,
   "data": {
-    "llm": {
-      "default_provider": "openai",
-      "available_providers": ["openai", "anthropic", "deepseek"],
-      "models": {
-        "openai": ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
-        "anthropic": ["claude-3-sonnet-20240229", "claude-3-5-sonnet-20241022"]
+    "llm_provider": "openai",
+    "llm_config": {
+      "model": "gpt-4o",
+      "has_api_key": true
+    },
+    "debug_mode": false,
+    "port": "8080",
+
+    "vision_provider": "sdwebui",
+    "vision_default_model": "sd",
+    "vision_config": {
+      "endpoint": "http://localhost:7860"
+    },
+    "vision_model_providers": {
+      "sd": "sdwebui",
+      "placeholder": "placeholder"
+    },
+    "vision_models": [
+      {
+        "key": "sd",
+        "label": "Stable Diffusion",
+        "provider": "sdwebui",
+        "supports_reference_image": true
+      },
+      {
+        "key": "gpt-image-1.5",
+        "label": "GPT Image",
+        "provider": "openai",
+        "supports_reference_image": false
+      },
+      {
+        "key": "glm-image",
+        "label": "GLM Image",
+        "provider": "glm",
+        "supports_reference_image": false
       }
-    },
-    "server": {
-      "version": "1.1.0",
-      "uptime": 3600,
-      "debug_mode": false
-    },
-    "features": {
-      "story_branching": true,
-      "character_interaction": true,
-      "data_export": true,
-      "user_customization": true
-    }
+    ]
   }
 }
 ```
@@ -1040,33 +1372,65 @@ POST /api/settings
 **请求体：**
 ```json
 {
-  "llm": {
-    "default_provider": "openai",
-    "providers": {
-      "openai": {
-        "api_key": "your-openai-api-key",
-        "base_url": "https://api.openai.com/v1",
-        "default_model": "gpt-4o"
-      },
-      "anthropic": {
-        "api_key": "your-claude-api-key", 
-        "default_model": "claude-3-5-sonnet-20241022"
-      },
-      "deepseek": {
-        "api_key": "your-deepseek-api-key",
-        "default_model": "deepseek-chat"
-      }
+  "llm_provider": "openai",
+  "llm_config": {
+    "api_key": "your-openai-api-key",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o"
+  },
+
+  "debug_mode": false,
+
+  "vision_provider": "openai",
+  "vision_default_model": "gpt-image-1.5",
+  "vision_config": {
+    "endpoint": "https://api.openai.com/v1",
+    "api_key": "your-openai-api-key",
+    "model_gpt-image-1.5": "gpt-image-1",
+    "size_gpt-image-1.5": "1024x1024"
+  },
+  "vision_model_providers": {
+    "gpt-image-1.5": "openai"
+  },
+  "vision_models": [
+    {
+      "key": "gpt-image-1.5",
+      "label": "GPT Image 1.5",
+      "provider": "openai",
+      "supports_reference_image": false
     }
+  ]
+}
+```
+
+**GLM Image 示例：**
+```json
+{
+  "vision_provider": "glm",
+  "vision_default_model": "glm-image",
+  "vision_config": {
+    "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "your-glm-api-key",
+    "model_glm-image": "glm-image",
+    "size_glm-image": "1280x1280"
   },
-  "server": {
-    "port": 8080,
-    "debug": false
-  },
-  "storage": {
-    "data_path": "./data"
+  "vision_model_providers": {
+    "glm-image": "glm"
   }
 }
 ```
+
+说明：
+
+- `GET /api/settings` 的 `llm_config` 为摘要形态（`model` + `has_api_key`）。
+- `POST /api/settings` 可提交完整的 `llm_config` / `vision_config` 映射；具体 key 随 provider 不同而不同，常见字段包括：
+  - `vision_config.endpoint`（或 `base_url`）与 `vision_config.api_key`
+  - per-model 覆盖：`vision_config.model_<modelKey>` / `vision_config.size_<modelKey>`
+  - 重试开关：`vision_config.max_attempts`（整数字符串，默认 1）
+  - PNG 重压缩阈值：`vision_config.png_recompress_threshold_bytes`（整数字符串，默认 262144；设为 0 可禁用）
+- 当前支持的 `vision_provider` 包括：`placeholder`、`sdwebui`、`dashscope`、`gemini`、`ark`、`openai`、`glm`。
+- 前端会在两个位置消费 `GET /api/settings` 返回的 `vision_models`：comics Step4 模型选择器，以及 Settings 页的 Vision 配置区。
+- Settings 页现在会在切换 Vision provider 时自动带入推荐的 `vision_default_model` 与 `vision_config.endpoint`；该行为属于前端交互增强，底层仍对应上述 API 字段。
 
 ### 测试连接
 
@@ -1076,11 +1440,20 @@ POST /api/settings
 POST /api/settings/test-connection
 ```
 
-**请求体：**
+该接口用于测试 **LLM** 连通性。请求体可选：
+
+- 不传请求体：测试当前已保存的 LLM 配置是否可用。
+- 传入临时配置：服务端会先校验配置，再发起一次小的测试请求。
+
+**请求体（临时配置）：**
 ```json
 {
   "provider": "openai",
-  "model": "gpt-4"
+  "llm_config": {
+    "api_key": "your-openai-api-key",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o"
+  }
 }
 ```
 
@@ -1280,7 +1653,7 @@ GET /api/scenes/{scene_id}/export/scene?format=json&include_conversations=true
 
 | 参数 | 类型 | 描述 |
 |------|------|------|
-| `format` | string | 导出格式：`json`, `markdown`, `html` |
+| `format` | string | 导出格式：`json`, `markdown`, `txt`, `html` |
 | `include_conversations` | boolean | 是否包含对话历史 |
 
 **响应示例：**
@@ -1298,6 +1671,8 @@ GET /api/scenes/{scene_id}/export/scene?format=json&include_conversations=true
 
 导出互动摘要。
 
+支持格式：`json`, `markdown`, `txt`, `html`。
+
 ```http
 GET /api/scenes/{scene_id}/export/interactions?format=markdown
 ```
@@ -1305,6 +1680,8 @@ GET /api/scenes/{scene_id}/export/interactions?format=markdown
 ### 导出故事文档
 
 将故事导出为可读文档。
+
+支持格式：`json`, `markdown`, `txt`, `html`。
 
 ```http
 GET /api/scenes/{scene_id}/export/story?format=html
