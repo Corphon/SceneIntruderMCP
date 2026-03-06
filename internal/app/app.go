@@ -4,10 +4,10 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -16,6 +16,7 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/services"
 	"github.com/Corphon/SceneIntruderMCP/internal/storage"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 
 	// Import LLM providers for their init() functions to register the providers
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/anthropic"
@@ -72,6 +73,10 @@ func InitServices() error {
 	container.Register("progress", progressService)
 	progressService.StartAutoCleanup()
 
+	// Phase1: 最小 JobQueue（异步任务执行与取消的统一底座）
+	jobQueue := services.NewJobQueue(runtime.NumCPU(), 256)
+	container.Register("job_queue", jobQueue)
+
 	statsService := services.NewStatsService()
 	container.Register("stats", statsService)
 
@@ -117,6 +122,41 @@ func InitServices() error {
 	// 5. 聚合服务（依赖多个其他服务）
 	exportService := services.NewExportService(contextService, storyService, sceneService)
 	container.Register("export", exportService)
+
+	// 6. v1.4.0 scripts（新增，不影响现有 scene/story 主路径）
+	scriptService, err := services.NewScriptService(cfg.DataDir+"/scripts", llmService)
+	if err != nil {
+		return fmt.Errorf("初始化 scripts 服务失败: %w", err)
+	}
+	container.Register("script", scriptService)
+
+	// 7. v2 comics repository（最小落盘结构）
+	comicRepo, err := services.NewComicRepository(cfg.DataDir + "/comics")
+	if err != nil {
+		return fmt.Errorf("初始化 comics 存储失败: %w", err)
+	}
+	container.Register("comic_repo", comicRepo)
+
+	// 7.5 v2 vision service（Phase1：至少 1 个可用 provider）
+	visionService := services.NewVisionService(comicRepo)
+	visionService.Stats = statsService
+	// Phase5: apply vision settings from config (best-effort, fallback to placeholder).
+	if err := services.ApplyVisionConfig(visionService, cfg); err != nil {
+		utils.GetLogger().Warn("failed to apply vision config; using placeholder", map[string]interface{}{"err": err.Error()})
+	}
+	container.Register("vision", visionService)
+
+	// 8. v2 comics service（骨架，后续逐步落地 analyze/prompts/generate）
+	comicService := services.NewComicService(
+		comicRepo,
+		jobQueue,
+		progressService,
+		llmService,
+		visionService,
+		sceneService,
+		storyService,
+	)
+	container.Register("comic", comicService)
 
 	sceneAggregateService := services.NewSceneAggregateService(
 		sceneService, characterService, contextService, storyService, progressService)
@@ -214,24 +254,14 @@ func ReinitializeLLMService() error {
 
 // 初始化日志系统
 func initLogger(logDir string) error {
-	// 确保日志目录存在
-	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf("创建日志目录失败: %w", err)
+	logFile := fmt.Sprintf("%s/app_%s.log", logDir, time.Now().Format("2006-01-02"))
+	if err := utils.InitLogger(logFile); err != nil {
+		return fmt.Errorf("初始化结构化日志失败: %w", err)
 	}
 
-	// 设置日志输出
-	logFile, err := os.OpenFile(
-		fmt.Sprintf("%s/app_%s.log", logDir, time.Now().Format("2006-01-02")),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY,
-		0644,
-	)
-	if err != nil {
-		return fmt.Errorf("创建日志文件失败: %w", err)
-	}
-
-	// 设置多输出
-	log.SetOutput(logFile)
-
+	utils.GetLogger().Info("日志系统已初始化", map[string]interface{}{
+		"log_file": logFile,
+	})
 	return nil
 }
 
@@ -257,16 +287,20 @@ func Run() error {
 
 	// 在独立的goroutine中启动服务器
 	go func() {
-		log.Printf("服务器启动，监听端口: %s", app.config.Port)
+		utils.GetLogger().Info("服务器启动，监听端口", map[string]interface{}{
+			"port": app.config.Port,
+		})
 
 		if err := app.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("服务器启动失败: %v", err)
+			utils.GetLogger().Fatal("服务器启动失败", map[string]interface{}{
+				"err": err,
+			})
 		}
 	}()
 
 	// 等待停止信号
 	<-app.stopChan
-	log.Println("接收到停止信号，正在关闭服务器...")
+	utils.GetLogger().Info("接收到停止信号，正在关闭服务器", nil)
 
 	// 优雅关闭
 	return app.Shutdown()
@@ -283,7 +317,7 @@ func (a *App) Shutdown() error {
 		return fmt.Errorf("服务器关闭失败: %w", err)
 	}
 
-	log.Println("服务器已成功关闭")
+	utils.GetLogger().Info("服务器已成功关闭", nil)
 
 	// 执行清理操作
 	a.cleanup()
@@ -293,7 +327,7 @@ func (a *App) Shutdown() error {
 
 // 清理资源
 func (a *App) cleanup() {
-	log.Println("开始清理资源...")
+	utils.GetLogger().Info("开始清理资源", nil)
 
 	// 获取依赖注入容器
 	container := di.GetContainer()
@@ -301,32 +335,39 @@ func (a *App) cleanup() {
 	// 进度服务的优雅关闭
 	if progressService, ok := container.Get("progress").(*services.ProgressService); ok && progressService != nil {
 		progressService.Stop()
-		log.Println("进度服务已停止")
+		utils.GetLogger().Info("进度服务已停止", nil)
+	}
+
+	// JobQueue 的优雅关闭
+	if jobQueue, ok := container.Get("job_queue").(*services.JobQueue); ok && jobQueue != nil {
+		jobQueue.Stop()
+		utils.GetLogger().Info("JobQueue 已停止", nil)
 	}
 
 	// 清理LLM服务缓存
 	if llmService, ok := container.Get("llm").(*services.LLMService); ok && llmService != nil {
 		// 如果需要，可以调用LLM服务的清理方法
-		log.Println("清理LLM服务缓存")
+		utils.GetLogger().Info("清理LLM服务缓存", nil)
+		_ = llmService
 	}
 
 	// 清理文件缓存
 	if fileCacheService, ok := container.Get("fileCache").(*storage.FileStorage); ok && fileCacheService != nil {
 		fileCacheService.StartCacheCleanup()
-		log.Println("文件缓存已清理")
+		utils.GetLogger().Info("文件缓存已清理", nil)
 	}
 
 	// 保存未完成的任务状态
 	if progressService, ok := container.Get("progress").(*services.ProgressService); ok && progressService != nil {
 		// 清理已完成的旧任务，保留最近10分钟的记录
 		progressService.CleanupCompletedTasks(10 * time.Minute)
-		log.Println("旧任务数据已清理")
+		utils.GetLogger().Info("旧任务数据已清理", nil)
 	}
 
 	// 关闭可能的数据库连接
 	// db.Close() // 如果将来添加数据库
 
-	log.Println("资源清理完成")
+	utils.GetLogger().Info("资源清理完成", nil)
 }
 
 // GetConfig 返回应用配置
