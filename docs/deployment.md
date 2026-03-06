@@ -2,6 +2,8 @@
 
 This guide focuses on **how the current backend actually boots and serves the app** (config, static assets, auth secrets, and reverse proxy notes).
 
+As of v2.0.0, the deployed app includes three first-class frontend workspaces: interactive scenes, the comics 5-step studio, and the New Script writing assistant. The deployment path is still a single Go binary serving one SPA bundle.
+
 ## System requirements
 
 - Go 1.21+
@@ -15,6 +17,13 @@ go run ./cmd/server
 ```
 
 Default URL: `http://localhost:8080`
+
+For local validation of the full v2.0.0 UI, verify these routes after boot:
+
+- `/` — Home / scenes
+- `/settings` — LLM + Vision settings
+- `/scripts` — New Script workspace
+- `/scenes/:id/comic` — comics 5-step workflow
 
 ## Frontend assets (how they are served)
 
@@ -54,6 +63,26 @@ On first boot, the server initializes and saves `data/config.json`.
 - `TEMPLATES_DIR` (default `frontend/dist`)
 - `DEBUG_MODE` (`true` by default)
 
+### Provider credential fallbacks you may want in production
+
+The backend can also resolve provider credentials from environment variables, which is useful when you do not want to persist keys into `data/config.json`.
+
+- LLM examples: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `DEEPSEEK_API_KEY`, `GROK_API_KEY`, `GITHUB_TOKEN`, etc.
+- GLM image examples: `GLM_API_KEY`, `BIGMODEL_API_KEY`, `ZHIPUAI_API_KEY`
+
+For v2.0.0 image generation, the most common persisted Vision settings are:
+
+- `vision_provider`
+- `vision_default_model`
+- `vision_config.endpoint`
+- `vision_config.api_key`
+
+Recommended GLM image values:
+
+- provider: `glm`
+- default model: `glm-image`
+- endpoint: `https://open.bigmodel.cn/api/paas/v4`
+
 ### LLM credential encryption
 
 The config file stores the LLM API key encrypted (AES-GCM) under `encrypted_llm_config.api_key`.
@@ -77,12 +106,20 @@ This project uses **plain WebSocket** endpoints:
 - `/ws/scene/:id`
 - `/ws/user/status`
 
+The frontend also relies on **SSE** for long-running jobs:
+
+- `/api/progress/:taskID`
+
+When proxying, make sure SSE responses are not buffered aggressively, otherwise comics/script progress updates may appear delayed.
+
 When proxying, ensure:
 
 - WebSocket upgrade headers are forwarded
 - `Host` and `Origin` stay consistent (the WebSocket upgrader validates origin; same-origin is the safe default)
 
 If you terminate TLS at the proxy, clients should connect using `wss://`.
+
+For comics/reference upload flows, also ensure your proxy accepts multipart uploads large enough for image references.
 
 <!--
 
