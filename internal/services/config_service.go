@@ -306,6 +306,78 @@ func (s *ConfigService) UpdateLLMConfig(provider string, configMap map[string]st
 	return nil
 }
 
+// UpdateVisionConfig updates vision provider configuration and applies it to the live VisionService.
+// This is intentionally minimal for Phase5.
+func (s *ConfigService) UpdateVisionConfig(provider string, visionCfg map[string]string, defaultModel string, modelProviders map[string]string, models []config.VisionModelInfo, changedBy string) error {
+	if provider == "" {
+		return errors.New("provider cannot be empty")
+	}
+
+	// Copy inputs to avoid aliasing.
+	normalizedVisionCfg := make(map[string]string)
+	for k, v := range visionCfg {
+		normalizedVisionCfg[k] = v
+	}
+	normalizedModelProviders := make(map[string]string)
+	for k, v := range modelProviders {
+		normalizedModelProviders[k] = v
+	}
+	modelsCopy := make([]config.VisionModelInfo, len(models))
+	copy(modelsCopy, models)
+
+	var oldConfig *config.AppConfig
+	var subscribers []ConfigChangeSubscriber
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		oldConfig = s.getCurrentConfigUnsafe()
+		subscribers = make([]ConfigChangeSubscriber, len(s.subscribers))
+		copy(subscribers, s.subscribers)
+
+		s.recordAuditUnsafe("write", "Vision配置", changedBy)
+		s.configVersion++
+	}()
+
+	if err := config.UpdateVisionConfig(provider, normalizedVisionCfg, defaultModel, normalizedModelProviders, modelsCopy); err != nil {
+		s.mu.Lock()
+		s.configVersion--
+		s.mu.Unlock()
+		return fmt.Errorf("更新vision配置失败: %w", err)
+	}
+
+	var newConfig *config.AppConfig
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		s.cachedConfig = config.GetCurrentConfig()
+		s.lastUpdated = time.Now()
+		newConfig = s.cachedConfig
+
+		s.recordChangeUnsafe("Vision提供商", oldConfig.VisionProvider, provider, changedBy)
+		s.recordChangeUnsafe("Vision默认模型", oldConfig.VisionDefaultModel, newConfig.VisionDefaultModel, changedBy)
+		s.recordChangeUnsafe("Vision配置", oldConfig.VisionConfig, normalizedVisionCfg, changedBy)
+		s.recordChangeUnsafe("Vision模型路由", oldConfig.VisionModelProviders, normalizedModelProviders, changedBy)
+		s.recordChangeUnsafe("Vision模型列表", oldConfig.VisionModels, modelsCopy, changedBy)
+	}()
+
+	s.notifySubscribersAsyncSafe(oldConfig, newConfig, subscribers)
+
+	// Apply to live service (best effort).
+	go func() {
+		container := di.GetContainer()
+		visionService, ok := container.Get("vision").(*VisionService)
+		if !ok || visionService == nil {
+			return
+		}
+		cfg := config.GetCurrentConfig()
+		_ = ApplyVisionConfig(visionService, cfg)
+	}()
+
+	return nil
+}
+
 // 异步通知方法
 func (s *ConfigService) notifySubscribersAsyncSafe(oldConfig, newConfig *config.AppConfig, subscribers []ConfigChangeSubscriber) {
 	for _, subscriber := range subscribers {
