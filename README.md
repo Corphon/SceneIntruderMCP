@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![SceneIntruderMCP Logo](static/images/logo.png)
+![SceneIntruderMCP Logo](temp/logo.png)
 
 **🎭 AI-Powered Immersive Interactive Storytelling & Comics Drawing Platform**
 
