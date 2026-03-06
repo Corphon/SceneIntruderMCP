@@ -105,6 +105,7 @@ var rateLimiter = NewRateLimiter()
 // RateLimitMiddleware creates a rate limiting middleware
 func RateLimitMiddleware(limit int, window time.Duration, keyFunc func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		rh := NewResponseHelper()
 		key := keyFunc(c)
 
 		if !rateLimiter.Allow(key, limit, window) {
@@ -115,12 +116,7 @@ func RateLimitMiddleware(limit int, window time.Duration, keyFunc func(*gin.Cont
 			c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 			c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
 
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"success":   false,
-				"error":     "Rate limit exceeded",
-				"code":      "RATE_LIMIT_EXCEEDED",
-				"timestamp": time.Now().Format(time.RFC3339),
-			})
+			rh.Error(c, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded")
 			c.Abort()
 			return
 		}
