@@ -102,7 +102,7 @@ Error responses usually look like:
 }
 ```
 
-Some older handlers may return `{"error": "..."}` directly (notably some SSE error paths).
+Some older handlers may still return `{"error": "..."}` directly. This is being phased out in favor of the unified `APIResponse`.
 
 ## REST endpoints
 
@@ -127,12 +127,227 @@ Some older handlers may return `{"error": "..."}` directly (notably some SSE err
 
 - `GET /api/scenes`
 - `POST /api/scenes`
+- `POST /api/scenes/shell`
 - `GET /api/scenes/:id`
 - `DELETE /api/scenes/:id`
 - `GET /api/scenes/:id/characters`
 - `GET /api/scenes/:id/conversations`
 - `GET /api/scenes/:id/nodes/:node_id/content`
 - `GET /api/scenes/:id/aggregate`
+
+#### v2 Comics (analysis / prompts / key elements)
+
+These endpoints start asynchronous jobs (returning 202 + `task_id`) and allow fetching persisted results after completion. For progress, subscribe to `GET /api/progress/:taskID` (SSE).
+
+For the standalone comics entry added in v2.0.0, the typical flow is:
+
+1. `POST /api/scenes/shell` to create an empty comic workspace
+2. Navigate to `/scenes/:id/comic?entry=comic_standalone`
+3. Start analysis with `source_text` instead of grounding on an existing story node
+
+- `POST /api/scenes/:id/comic/analysis` — Start comic breakdown analysis (persists `data/comics/scene_<id>/analysis.json`)
+- `GET /api/scenes/:id/comic/analysis` — Fetch analysis result
+- `POST /api/scenes/:id/comic/prompts` — Start per-frame prompt generation (persists `data/comics/scene_<id>/prompts/*.json`)
+- `GET /api/scenes/:id/comic/prompts` — Fetch all frame prompts
+- `POST /api/scenes/:id/comic/key_elements` — Start key elements extraction (persists `data/comics/scene_<id>/key_elements.json`)
+- `GET /api/scenes/:id/comic/key_elements` — Fetch key elements
+- `POST /api/scenes/:id/comic/references` — Upload reference images (multipart; persists `data/comics/scene_<id>/references/*` + `references/index.json`)
+- `POST /api/scenes/:id/comic/generate` — Start image generation (asynchronous; persists `data/comics/scene_<id>/images/*.png`)
+- `POST /api/scenes/:id/comic/frames/:frameID/regenerate` — Regenerate one frame (asynchronous)
+- `GET /api/scenes/:id/comic/images/:frameID` — Fetch a single frame PNG (for preview; reads `data/comics/scene_<id>/images/<frameID>.png`)
+- `GET /api/scenes/:id/comic` — Comic overview (availability + counts)
+- `GET /api/scenes/:id/comic/export?format=zip|html` — Download export (ZIP/HTML)
+
+Notes:
+
+- These routes are protected by `RequireAuthForScene()`.
+  - If `Authorization` is missing/invalid, the server typically continues in guest mode.
+  - If you do provide a valid token, the middleware may validate that the scene exists (and can later be extended to enforce ownership/permissions).
+- To run as an authenticated user, add: `-H "Authorization: Bearer <token>"`
+
+Copy-paste curl workflow (replace placeholders):
+
+Start analysis (202 + `task_id`):
+
+```bash
+curl -sS -X POST \
+  -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/analysis \
+  -d '{}'
+```
+
+Subscribe to progress (SSE) until `status=completed/failed` (then the server closes the stream):
+
+```bash
+curl -N \
+  -H "Accept: text/event-stream" \
+  http://localhost:8080/api/progress/<task_id>
+```
+
+Fetch results:
+
+```bash
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic/analysis
+
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic/prompts
+
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic/key_elements
+```
+
+Start prompts / key elements (both return 202 + `task_id`; subscribe via `/api/progress/<task_id>`):
+
+```bash
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/prompts -d '{}'
+
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/key_elements -d '{}'
+```
+
+Upload reference images (multipart; PNG/JPEG/WEBP; <= 5MB each):
+
+Single upload (`element_id` + `file`):
+
+```bash
+curl -sS -X POST \
+  -F "element_id=<element_id>" \
+  -F "file=@./reference.png" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/references
+```
+
+Batch upload (`file_<element_id>` parts):
+
+```bash
+curl -sS -X POST \
+  -F "file_<element_id_1>=@./ref1.png" \
+  -F "file_<element_id_2>=@./ref2.jpg" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/references
+```
+
+Generate images / regenerate one frame (both return 202 + `task_id`):
+
+```bash
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/generate -d '{}'
+
+curl -sS -X POST -H "Content-Type: application/json" \
+  http://localhost:8080/api/scenes/<scene_id>/comic/frames/<frame_id>/regenerate -d '{}'
+```
+
+Overview:
+
+```bash
+curl -sS http://localhost:8080/api/scenes/<scene_id>/comic
+```
+
+Export (ZIP/HTML):
+
+```bash
+curl -fSL -o comic_<scene_id>.zip \
+  "http://localhost:8080/api/scenes/<scene_id>/comic/export?format=zip"
+
+curl -fSL -o comic_<scene_id>.html \
+  "http://localhost:8080/api/scenes/<scene_id>/comic/export?format=html"
+```
+
+Start analysis:
+
+```http
+POST /api/scenes/<scene_id>/comic/analysis
+Content-Type: application/json
+
+{}
+```
+
+Standalone analysis example:
+
+```http
+POST /api/scenes/<scene_id>/comic/analysis
+Content-Type: application/json
+
+{
+  "source_text": "A detective enters the abandoned station and finds a broken clock...",
+  "target_frames": 6
+}
+```
+
+Create a standalone comic scene shell:
+
+```http
+POST /api/scenes/shell
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Comic",
+  "description": "Standalone comic workspace"
+}
+```
+
+Response (202):
+
+```json
+{
+  "success": true,
+  "data": { "task_id": "comic_analyze_<scene_id>_..." },
+  "message": "分镜分析任务已受理",
+  "timestamp": "..."
+}
+```
+
+Fetch analysis:
+
+```http
+GET /api/scenes/<scene_id>/comic/analysis
+```
+
+Response (200):
+
+```json
+{
+  "success": true,
+  "data": {
+    "scene_id": "<scene_id>",
+    "target_frames": 8,
+    "frames": [
+      { "id": "frame_1", "order": 1, "description": "..." }
+    ]
+  },
+  "message": "分镜分析结果获取成功",
+  "timestamp": "..."
+}
+```
+
+Common error codes:
+
+- `LLM_NOT_READY`: LLM is not configured or not ready (503)
+- `COMIC_SERVICE_NOT_READY`: ComicService/Repo is not initialized (503)
+- `COMIC_ANALYSIS_NOT_FOUND`: analysis is missing (404)
+- `COMIC_PROMPTS_NOT_FOUND`: prompts are missing (404)
+- `COMIC_KEY_ELEMENTS_NOT_FOUND`: key elements are missing (404)
+
+Export comic:
+
+```http
+GET /api/scenes/<scene_id>/comic/export?format=zip
+```
+
+Response (200): file download
+
+- `Content-Type`: `application/zip` / `text/html; charset=utf-8`
+- `Content-Disposition`: `attachment; filename="comic_<scene_id>_<timestamp>.<ext>"`
+
+### Scripts (New Script assistant)
+
+- `GET /api/scripts` — List scripts
+- `POST /api/scripts` — Create a new script project (New Script). This endpoint creates the project and initializes draft-related files; to start generation explicitly, call `POST /api/scripts/:id/generate` (returns a `task_id` for SSE progress).
+- `GET /api/scripts/:id` — Get script details (project metadata, active draft, outline, memory, chapter summaries, workflow items)
+- `POST /api/scripts/:id/generate` — Start (or restart) initial generation for the script (asynchronous). Returns `{ "task_id": "..." }`. Subscribe to `/api/progress/:task_id` (SSE) for progress updates.
+- `POST /api/scripts/:id/command` — Execute a command (e.g., `assist_mode`: `inspiration`, `completion`, `polish`) to expand or edit a chapter/scene; may return draft/workflow ids and output.
+- `PUT /api/scripts/:id/chapter_draft` — Update per-chapter `user_draft` (best-effort persist to `chapter_draft.json`).
+- `PUT /api/scripts/:id/draft` — Save/replace a draft (creates new draft version and updates active draft).
+- `POST /api/scripts/:id/rewind` — Rewind to a previous draft (body: `{ "draft_id": "draft_xxx" }`).
+- `GET /api/scripts/:id/export` — Export script in formats: `json|markdown|txt|html` (e.g., `?format=markdown|txt|html&include_meta=true`).
 
 ### Scene items
 
@@ -159,7 +374,7 @@ Some older handlers may return `{"error": "..."}` directly (notably some SSE err
 
 ### Export
 
-All export endpoints accept `?format=` (commonly `json`, `markdown`, `txt`, `html`, and some exports also support `csv`/`pdf` depending on handler).
+All export endpoints accept `?format=` (commonly `json`, `markdown`, `txt`, `html`, and some exports also support `csv` depending on handler).
 
 - `GET /api/scenes/:id/export/scene`
 - `GET /api/scenes/:id/export/interactions`
@@ -184,6 +399,63 @@ All export endpoints accept `?format=` (commonly `json`, `markdown`, `txt`, `htm
 - `POST /api/analyze`
 - `GET /api/progress/:taskID` (SSE)
 - `POST /api/cancel/:taskID`
+
+#### Progress (SSE)
+
+Subscribe to task progress updates via Server-Sent Events.
+
+```http
+GET /api/progress/<taskID>
+Accept: text/event-stream
+```
+
+SSE events:
+
+- `event: connected` (sent once on connect)
+- `event: progress` (JSON payload)
+- `event: heartbeat` (keep-alive)
+
+`progress` event payload schema:
+
+```json
+{
+  "progress": 42,
+  "message": "...",
+  "status": "running"
+}
+```
+
+`status` is one of: `running` / `completed` / `failed`. When `completed` or `failed`, the server closes the SSE stream.
+
+If the task does not exist, the endpoint returns a normal JSON error response (not SSE):
+
+```json
+{
+  "success": false,
+  "error": { "code": "TASK_NOT_FOUND", "message": "任务不存在" },
+  "timestamp": "..."
+}
+```
+
+If the client requests SSE (e.g. `Accept: text/event-stream`), the server emits a single `event: progress` with `status="failed"` and then closes the stream.
+
+Common reasons include:
+
+- The server restarted (progress trackers are in-memory).
+- The task was cleaned up after completion/failure.
+- The task ID is invalid.
+
+#### Cancel a task
+
+Cancel a task by its task ID:
+
+```http
+POST /api/cancel/<taskID>
+Authorization: Bearer <token>
+```
+
+- If a running job exists in the JobQueue, cancellation will be propagated to it.
+- The progress tracker is marked as failed with a "用户取消" reason so SSE subscribers can converge.
 
 ### Config / Metrics
 
@@ -228,6 +500,60 @@ Authorization: Bearer <token>
   "text": "...source text..."
 }
 ```
+
+### Create a script (New Script assistant)
+
+```http
+POST /api/scripts
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{
+  "title": "My Novel",
+  "type": "novel",
+  "framework": {
+    "genre": "mystery",
+    "chapter_count": 12,
+    "notes": "slow-burn mystery with 12 chapters"
+  }
+}
+```
+
+**Response (201)**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "script_12345",
+    "title": "My Novel",
+    "state": { "active_draft_id": "", "cursor": { "chapter": 1, "scene": 1 } }
+  },
+  "message": "Script created"
+}
+```
+
+**Start generation explicitly**
+
+```http
+POST /api/scripts/{id}/generate
+Content-Type: application/json
+Authorization: Bearer <token>
+
+{}
+```
+
+**Response (202)**
+
+```json
+{
+  "success": true,
+  "data": { "task_id": "task_abc123" },
+  "message": "Generation started; subscribe to /api/progress/{task_id} for progress (SSE)"
+}
+```
+
+> Note: The generation process posts progress events to `/api/progress/:taskID` (SSE). Use `GET /api/progress/<taskID>` with `Accept: text/event-stream` to receive `progress` events.
 
 ### Start analysis with SSE progress
 
@@ -1293,25 +1619,43 @@ GET /api/settings
 {
   "success": true,
   "data": {
-    "llm": {
-      "default_provider": "openai",
-      "available_providers": ["openai", "anthropic", "deepseek"],
-      "models": {
-        "openai": ["gpt-3.5-turbo", "gpt-4", "gpt-4-turbo"],
-        "anthropic": ["claude-3-sonnet-20240229", "claude-3-5-sonnet-20241022"]
+    "llm_provider": "openai",
+    "llm_config": {
+      "model": "gpt-4o",
+      "has_api_key": true
+    },
+    "debug_mode": false,
+    "port": "8080",
+
+    "vision_provider": "sdwebui",
+    "vision_default_model": "sd",
+    "vision_config": {
+      "endpoint": "http://localhost:7860"
+    },
+    "vision_model_providers": {
+      "sd": "sdwebui",
+      "placeholder": "placeholder"
+    },
+    "vision_models": [
+      {
+        "key": "sd",
+        "label": "Stable Diffusion",
+        "provider": "sdwebui",
+        "supports_reference_image": true
+      },
+      {
+        "key": "gpt-image-1.5",
+        "label": "GPT Image",
+        "provider": "openai",
+        "supports_reference_image": false
+      },
+      {
+        "key": "glm-image",
+        "label": "GLM Image",
+        "provider": "glm",
+        "supports_reference_image": false
       }
-    },
-    "server": {
-      "version": "1.0.0",
-      "uptime": 3600,
-      "debug_mode": false
-    },
-    "features": {
-      "story_branching": true,
-      "character_interaction": true,
-      "data_export": true,
-      "user_customization": true
-    }
+    ]
   }
 }
 ```
@@ -1327,33 +1671,65 @@ POST /api/settings
 **Request Body:**
 ```json
 {
-  "llm": {
-    "default_provider": "openai",
-    "providers": {
-      "openai": {
-        "api_key": "your-openai-api-key",
-        "base_url": "https://api.openai.com/v1",
-        "default_model": "gpt-4o"
-      },
-      "anthropic": {
-        "api_key": "your-claude-api-key", 
-        "default_model": "claude-3-5-sonnet-20241022"
-      },
-      "deepseek": {
-        "api_key": "your-deepseek-api-key",
-        "default_model": "deepseek-chat"
-      }
+  "llm_provider": "openai",
+  "llm_config": {
+    "api_key": "your-openai-api-key",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o"
+  },
+
+  "debug_mode": false,
+
+  "vision_provider": "openai",
+  "vision_default_model": "gpt-image-1.5",
+  "vision_config": {
+    "endpoint": "https://api.openai.com/v1",
+    "api_key": "your-openai-api-key",
+    "model_gpt-image-1.5": "gpt-image-1",
+    "size_gpt-image-1.5": "1024x1024"
+  },
+  "vision_model_providers": {
+    "gpt-image-1.5": "openai"
+  },
+  "vision_models": [
+    {
+      "key": "gpt-image-1.5",
+      "label": "GPT Image 1.5",
+      "provider": "openai",
+      "supports_reference_image": false
     }
+  ]
+}
+```
+
+**GLM Image example:**
+```json
+{
+  "vision_provider": "glm",
+  "vision_default_model": "glm-image",
+  "vision_config": {
+    "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "your-glm-api-key",
+    "model_glm-image": "glm-image",
+    "size_glm-image": "1280x1280"
   },
-  "server": {
-    "port": 8080,
-    "debug": false
-  },
-  "storage": {
-    "data_path": "./data"
+  "vision_model_providers": {
+    "glm-image": "glm"
   }
 }
 ```
+
+Notes:
+
+- `GET /api/settings` returns `llm_config` in a summarized form (`model` + `has_api_key`).
+- `POST /api/settings` accepts full `llm_config` / `vision_config` maps. Keys are provider-specific; common keys include:
+  - `vision_config.endpoint` (or `base_url`) and `vision_config.api_key`
+  - per-model overrides like `vision_config.model_<modelKey>` / `vision_config.size_<modelKey>`
+  - retry knob: `vision_config.max_attempts` (integer as string, default 1)
+  - PNG recompress threshold: `vision_config.png_recompress_threshold_bytes` (integer as string, default 262144; set to 0 to disable)
+- Currently supported `vision_provider` values: `placeholder`, `sdwebui`, `dashscope`, `gemini`, `ark`, `openai`, `glm`.
+- The frontend consumes `vision_models` from `GET /api/settings` in two places: the comics Step4 model picker and the Settings page’s Vision configuration UI.
+- The Settings page now auto-fills recommended `vision_default_model` and `vision_config.endpoint` values when the user switches Vision providers; this is a frontend behavior layered on top of the API fields above.
 
 ### Test Connection
 
@@ -1363,11 +1739,20 @@ Test connection status of AI service providers.
 POST /api/settings/test-connection
 ```
 
-**Request Body:**
+This endpoint tests **LLM** connectivity. The request body is optional:
+
+- If you omit the body, the server tests the currently saved LLM configuration.
+- If you pass a temporary config, the server validates it and performs a small test call.
+
+**Request Body (temporary config):**
 ```json
 {
   "provider": "openai",
-  "model": "gpt-4"
+  "llm_config": {
+    "api_key": "your-openai-api-key",
+    "base_url": "https://api.openai.com/v1",
+    "model": "gpt-4o"
+  }
 }
 ```
 
@@ -1567,7 +1952,7 @@ GET /api/scenes/{scene_id}/export/scene?format=json&include_conversations=true
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `format` | string | Export format: `json`, `markdown`, `html` |
+| `format` | string | Export format: `json`, `markdown`, `txt`, `html` |
 | `include_conversations` | boolean | Whether to include conversation history |
 
 **Response Example:**
@@ -1585,6 +1970,8 @@ GET /api/scenes/{scene_id}/export/scene?format=json&include_conversations=true
 
 Export interaction summary.
 
+Supported formats: `json`, `markdown`, `txt`, `html`.
+
 ```http
 GET /api/scenes/{scene_id}/export/interactions?format=markdown
 ```
@@ -1592,6 +1979,8 @@ GET /api/scenes/{scene_id}/export/interactions?format=markdown
 ### Export Story Document
 
 Export story as a readable document.
+
+Supported formats: `json`, `markdown`, `txt`, `html`.
 
 ```http
 GET /api/scenes/{scene_id}/export/story?format=html
