@@ -1,6 +1,6 @@
 # Frontend Developer Guide
 
-This document walks through the practical steps for working on the SceneIntruderMCP frontend (Vite + React). It covers prerequisites, project setup, live development, quality gates, and production build expectations so every contributor follows the same workflow.
+This document walks through the practical steps for working on the SceneIntruderMCP frontend (Vite + React). As of v2.0.0, the frontend spans Home/scenes, comics v2, Settings (LLM + Vision), and the New Script workspace. This guide covers prerequisites, project setup, live development, quality gates, and production build expectations so every contributor follows the same workflow.
 
 ## Tech Stack Snapshot
 
@@ -8,7 +8,7 @@ This document walks through the practical steps for working on the SceneIntruder
 - **Bundler/Dev Server**: Vite 5
 - **State Management**: Redux Toolkit + React Redux slices under `src/store`
 - **Styling/UI**: MUI v5, Emotion, and custom CSS modules
-- **Realtime/Networking**: Axios for REST calls (`src/api`), **plain WebSocket** for live updates (backend uses Gorilla WebSocket)
+- **Realtime/Networking**: Axios for REST calls (`src/api`), **SSE (EventSource)** for long-task progress (`GET /api/progress/:task_id`), and plain WebSocket for optional live updates (backend uses Gorilla WebSocket)
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ npm -v
 	```bash
 	npm install
 	```
-	This installs both runtime deps (React, MUI, Axios, Socket.IO) and dev tooling (Vite, ESLint, React plugin).
+	This installs both runtime deps (React, MUI, Axios) and dev tooling (Vite, ESLint, Vitest, Playwright).
 
 > 💡 Tip: Keep `package-lock.json` under version control so everyone resolves packages identically.
 
@@ -69,6 +69,38 @@ If you need to point to a different backend host/port, update the Vite proxy tar
 
 4. **API integrations**: Use the thin Axios clients under `src/api/*.js`. Keep endpoints centralized there to avoid scattering URLs.
 
+
+### New Script integration (v2.0.0) 🔧
+
+- Endpoints you will use:
+  - `POST /api/scripts` — create a new script project (returns project metadata)
+  - `POST /api/scripts/:id/generate` — start asynchronous generation (returns `{ "task_id": "..." }`)
+  - `POST /api/scripts/:id/command` — execute assist commands (e.g., `assist_mode`: `inspiration`, `completion`, `polish`)
+  - `GET /api/progress/:task_id` — subscribe to SSE progress updates (see below)
+
+- Frontend files to edit / reference:
+  - API client: `frontend/src/api/scripts.js`
+  - Pages: `frontend/src/pages/Scripts.jsx`, `frontend/src/pages/ScriptDetail.jsx`
+  - Components: `frontend/src/components/scripts/ScriptCreator.jsx`, `frontend/src/components/scripts/ScriptCard.jsx`
+
+- Local dev & testing notes:
+  - Workflow: start backend → `POST /api/scripts` to create a project → `POST /api/scripts/:id/generate` to begin generation → subscribe to `/api/progress/:task_id` (SSE) to receive progress events.
+  - Simple SSE subscription example (browser):
+
+```js
+const es = new EventSource(`/api/progress/${taskId}`);
+es.onmessage = (e) => { console.log('progress:', e.data); };
+es.addEventListener('progress', (e) => { console.log('progress event:', e.data); });
+es.addEventListener('connected', () => { console.log('connected'); });
+```
+
+  - Tests: backend endpoint tests live in `internal/api/scripts_endpoints_test.go` (covers create/list/get/generate/export/rewind).
+
+- Important note: **`POST /api/scripts` only creates the project and initializes files; it does not automatically trigger generation.** You must call `POST /api/scripts/:id/generate` to start generation.
+
+
+5. **API integrations**: Use the thin Axios clients under `src/api/*.js`. Keep endpoints centralized there to avoid scattering URLs.
+
 ## Quality Gates
 
 ### Linting
@@ -84,9 +116,125 @@ npm run lint
 
 The project currently relies on plain JS. If you need stronger contracts for a feature, consider adding JSDoc typings or incrementally introducing TypeScript via Vite’s TS template.
 
-## Testing (Planned)
+## Testing
 
-No automated UI tests are wired in yet. If you add them, prefer Vitest + Testing Library and expose them through `npm run test` for consistency.
+### Unit / component tests (Vitest)
+
+```bash
+npm test
+```
+
+- Uses Vitest + Testing Library.
+- Common locations:
+	- `frontend/src/pages/__tests__/*`
+	- `frontend/src/components/**/__tests__/*`
+
+### E2E smoke tests (Playwright)
+
+```bash
+npm run test:e2e
+```
+
+- The comics wizard has a minimal E2E smoke suite with route-level mocking (does not require the backend).
+
+### Demo recordings (Playwright video/trace)
+
+To generate reproducible demo artifacts (video + trace + screenshots) from the comics wizard E2E (still mocked, no backend required):
+
+```bash
+npm --prefix frontend run test:e2e:demo
+```
+
+Outputs are written under:
+
+- `frontend/test-results/` (videos, traces, screenshots)
+
+Notes:
+
+- This uses `frontend/playwright.demo.config.js` to force `video: 'on'` and `trace: 'on'` even when tests pass.
+- If you want a GIF, you can convert the recorded video using your preferred tool (e.g. `ffmpeg`) outside the repo; we do not commit large binary media by default.
+
+## Comics (v2) developer notes
+
+### Entry
+
+- Route: `/scenes/:sceneId/comic`
+- Page: `frontend/src/pages/ComicGenerator.jsx`
+- Components: `frontend/src/components/comic/*`
+- Standalone entry: Home page → `frontend/src/components/comic/ComicCreatorDialog.jsx` → `POST /api/scenes/shell` → `/scenes/:id/comic?entry=comic_standalone`
+
+### Standalone New Comic flow
+
+- API client: `frontend/src/api/scenes.js` → `createSceneShell()`
+- Home entry: `frontend/src/pages/Home.jsx`
+- Standalone query marker: `entry=comic_standalone`
+- Redux support: `frontend/src/store/comicSlice.js` stores `standaloneSourceText`
+- Analysis payload: Step1 can send `source_text` instead of `node_id`
+
+This is the main v2.0.0 change for comics UX. It allows users to create a comic workspace first and only then paste/write story text directly into Step1.
+
+### Core endpoints (backend)
+
+- `POST /api/scenes/:sceneId/comic/analysis` (202 + `{ task_id }`)
+- `POST /api/scenes/:sceneId/comic/prompts` (202 + `{ task_id }`)
+- `POST /api/scenes/:sceneId/comic/key_elements` (202 + `{ task_id }`)
+- `POST /api/scenes/:sceneId/comic/generate` (202 + `{ task_id }`)
+- `GET  /api/progress/:task_id` (SSE)
+- `POST /api/cancel/:task_id` (cancel)
+- `GET  /api/scenes/:sceneId/comic` (overview)
+- `GET  /api/scenes/:sceneId/comic/images/:frameId` (PNG direct output)
+- `GET  /api/scenes/:sceneId/comic/export?format=zip|html` (download)
+
+### Vision model list (frontend)
+
+- The comics Step4 model dropdown is driven by `GET /api/settings`.
+- The backend returns `vision_models` as an array of:
+	- `key` (stable model key written into prompts as `model`)
+	- `label` (human readable label)
+	- `provider` (routing hint; backend still decides the actual provider mapping)
+	- `supports_reference_image` (whether the model supports img2img/reference images)
+- Frontend behavior:
+	- `frontend/src/pages/ComicGenerator.jsx` best-effort fetches settings and passes `vision_models` into Step4 UI.
+	- If `vision_models` is missing/empty or settings fetch fails, the UI falls back to a small built-in default list for compatibility.
+
+Notes:
+
+- The Settings page (`frontend/src/pages/Settings.jsx`) now manages both **LLM** and **Vision** settings.
+- Vision settings currently expose the common fields needed for operational setup:
+	- `vision_provider`
+	- `vision_default_model`
+	- `vision_config.endpoint`
+	- `vision_config.api_key`
+- The Vision provider dropdown includes `placeholder`, `sdwebui`, `dashscope`, `gemini`, `ark`, `openai`, and `glm`.
+- For `glm`, the recommended endpoint is `https://open.bigmodel.cn/api/paas/v4` and the recommended default model is `glm-image`.
+- Switching the Vision provider now auto-fills the recommended `vision_default_model` and `vision_config.endpoint`.
+- The Vision section also exposes an explicit “apply recommended defaults” action for the current provider.
+- `POST /api/settings/test-connection` still validates **LLM** connectivity only; Vision configuration should be verified through actual image generation/regeneration.
+
+### Recommended frontend regression coverage for v2.0.0
+
+- Settings page: `frontend/src/pages/__tests__/Settings.test.jsx`
+- Comics page: `frontend/src/pages/__tests__/ComicGenerator.test.jsx`
+- Comics UI cards: `frontend/src/components/comic/__tests__/*`
+- Redux slice: `frontend/src/store/__tests__/comicSlice.test.js`
+- E2E: `frontend/tests/e2e/comic-wizard.spec.ts`, `frontend/tests/e2e/comic-home-entry.spec.ts`
+
+### SSE progress subscription
+
+Frontend uses a small hook wrapper around EventSource:
+
+- Hook: `frontend/src/hooks/useSSEProgress.js`
+- Expected event: `event: progress` with JSON payload containing at least `{ status, message, progress }`.
+
+### Backend-only E2E script (PowerShell)
+
+When you want to validate the backend chain (analysis -> prompts -> key_elements -> generate -> export) without the frontend UI, run:
+
+```powershell
+pwsh -File .\docs\comics_e2e.ps1 -SceneId scene_123
+```
+
+This script polls GET endpoints until results are ready and downloads export artifacts into the `docs/` folder.
 
 ## Building for Production
 
