@@ -459,13 +459,14 @@ func (s *LLMService) CreateChatCompletion(ctx context.Context, request ChatCompl
 }
 
 // 增强版ChatCompletion: 支持结构化输出
-// 🔧 优化后的 CreateStructuredCompletion
-func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt string, systemPrompt string, outputSchema interface{}) error {
+// 🔧 CreateStructuredCompletionWithMetrics 会在解析成功后返回 provider 的 token usage 与调用耗时。
+// cached=true 表示命中了 LLM 缓存，此时 tokens/duration 记为 0。
+func (s *LLMService) CreateStructuredCompletionWithMetrics(ctx context.Context, prompt string, systemPrompt string, outputSchema interface{}) (resp *llm.CompletionResponse, callDuration time.Duration, cached bool, err error) {
 	// 获取默认模型（线程安全）
 	s.providerMutex.RLock()
 	if !s.isReady || s.provider == nil {
 		s.providerMutex.RUnlock()
-		return fmt.Errorf("LLM service not ready: %s", s.readyState)
+		return nil, 0, false, fmt.Errorf("LLM service not ready: %s", s.readyState)
 	}
 	provider := s.provider
 	s.providerMutex.RUnlock()
@@ -477,7 +478,14 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 
 	// 检查缓存
 	if s.checkAndUseCache(cacheKey, outputSchema) {
-		return nil
+		return &llm.CompletionResponse{
+			FinishReason: "cache",
+			TokensUsed:   0,
+			PromptTokens: 0,
+			OutputTokens: 0,
+			ModelName:    model,
+			ProviderName: s.providerName,
+		}, 0, true, nil
 	}
 
 	// 修改系统提示以请求特定格式
@@ -495,9 +503,11 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 	}
 
 	// 调用实际Provider
-	resp, err := provider.CompleteText(ctx, req)
+	callStart := time.Now()
+	resp, err = provider.CompleteText(ctx, req)
+	callDuration = time.Since(callStart)
 	if err != nil {
-		return err
+		return nil, callDuration, false, err
 	}
 
 	// 尝试解析结构化输出
@@ -506,13 +516,19 @@ func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt stri
 	// 解析JSON到提供的结构中
 	err = json.Unmarshal([]byte(text), outputSchema)
 	if err != nil {
-		return fmt.Errorf("failed to parse AI response into structured data: %w\nAI return: %s", err, text)
+		return resp, callDuration, false, fmt.Errorf("failed to parse AI response into structured data: %w\nAI return: %s", err, text)
 	}
 
 	// 保存到缓存
 	s.saveToCache(cacheKey, outputSchema)
 
-	return nil
+	return resp, callDuration, false, nil
+}
+
+// 🔧 优化后的 CreateStructuredCompletion
+func (s *LLMService) CreateStructuredCompletion(ctx context.Context, prompt string, systemPrompt string, outputSchema interface{}) error {
+	_, _, _, err := s.CreateStructuredCompletionWithMetrics(ctx, prompt, systemPrompt, outputSchema)
+	return err
 }
 
 // 清理JSON字符串，去除前后非JSON内容
