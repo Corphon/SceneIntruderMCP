@@ -4,7 +4,7 @@
 
 ![SceneIntruderMCP Logo](static/images/logo.png)
 
-**🎭 AI-Powered Immersive Interactive Storytelling Platform**
+**🎭 AI-Powered Immersive Interactive Storytelling & Comics Drawing Platform**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
@@ -17,7 +17,7 @@ English | [简体中文](README_CN.md)
 
 ## 🌟 Project Overview
 
-SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform that combines traditional text analysis with modern AI technology, providing users with an unprecedented immersive role-playing and story creation experience.
+SceneIntruderMCP is an AI-native storytelling workspace that now covers three complete creation flows: interactive scenes, a v2 comics studio, and the New Script writing assistant. It combines structured text analysis, long-running generation workflows, and configurable LLM/Vision providers in one integrated app.
 
 ### ✨ Core Features
 
@@ -43,6 +43,18 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 - **Context Preservation**: Maintain story context when returning to scenes
 - **Timeline Management**: Sophisticated handling of non-linear story timelines
 
+#### 🎬 **v2 Comics Studio**
+- **Standalone New Comic entry**: Create a comic workspace directly from Home via `POST /api/scenes/shell`
+- **5-step generation flow**: Analysis → prompts → key elements → prompt review → image generation/export
+- **SSE progress tracking**: Long-running jobs stream progress through `GET /api/progress/:task_id`
+- **Reference-image workflow**: Upload per-element references and reuse them during generation/regeneration
+- **Model-aware rendering**: Step4 consumes `vision_models` from Settings and supports provider-specific defaults
+
+#### ✍️ **New Script Workspace**
+- **Project-based writing flow**: Create script projects, generate initial outline/draft, then iterate chapter by chapter
+- **Assist modes**: Inspiration, completion, and polish workflows exposed through `/api/scripts/:id/command`
+- **Draft versioning**: Rewind, export, and persist `chapter_draft.json` for per-chapter editing continuity
+
 #### 🎲 **Interactive Game Mechanics**
 - **Inventory System**: Rich object management with interactive items
 - **Skill System**: User-defined abilities affecting story outcomes
@@ -66,16 +78,21 @@ SceneIntruderMCP is a revolutionary AI-driven interactive storytelling platform 
 - **API Integration**: Full CRUD operations available via API for managing user-defined content
 
 #### 🔗 **Multi-LLM Support**
-- **OpenAI GPT**: GPT-4.1/4o/5-chat series
-- **Anthropic Claude**: Claude-3.5/4.5 series
-- **DeepSeek**: DeepSeek--chat series
-- **Google Gemini**: Gemini-2.5/3.0 series
-- **Grok**: xAI's Grok-4/3 series
+- **OpenAI GPT**: GPT-3.5/4/4o/5-chat series
+- **Anthropic Claude**: Claude-3/3.5/3.7 series
+- **DeepSeek**: DeepSeek-R1/Coder series
+- **Google Gemini**: Gemini-2.0/1.5 series with thinking models
+- **Grok**: xAI's Grok-2/2-mini/3 series
 - **Mistral**: Mistral-large/small series
-- **Qwen**: Alibaba Cloud Qwen3 series
-- **GitHub Models**: Via GitHub Models platform (GPT-4o/4.1, etc.)
+- **Qwen**: Alibaba Cloud Qwen2.5/32b series including qwq models
+- **GitHub Models**: Via GitHub Models platform (GPT-4o, o1 series, Phi-4, etc.)
 - **OpenRouter**: Open source model aggregation platform with free tiers
 - **GLM**: Zhipu AI's GLM-4/4-plus series
+
+#### 🖼️ **Multi-Vision Support**
+- **Built-in providers**: `sdwebui`, `dashscope`, `gemini`, `ark`, `openai`, `glm`, `placeholder`
+- **Recommended GLM image model**: `glm-image`
+- **Centralized Vision settings**: Configure `vision_provider`, `vision_default_model`, `vision_config.endpoint`, and `vision_config.api_key` from the Settings page
 
 ## 🏗️ Technical Architecture
 
@@ -115,6 +132,21 @@ SceneIntruderMCP/
 - **Storage**: File system-based JSON storage with database extension support
 - **Frontend**: React, responsive design
 - **Deployment**: Containerization support, cloud-native architecture
+
+## 🆕 Release Highlights (v2.0.0 · 2026-03-06)
+
+- **Comics v2 is complete** – Home now has a standalone **New Comic** entry that creates a scene shell and jumps directly into the comics 5-step workflow.
+- **Standalone analysis input** – Comics Step1 supports `source_text`, so a comic workspace can be driven by direct story text without pre-existing story nodes.
+- **Vision provider readiness** – Settings now exposes both LLM and Vision configuration, including `glm` / `glm-image`, provider-based endpoint autofill, and recommended default values.
+- **Operationally aligned docs/APIs** – `GET /api/settings` now acts as the frontend source of truth for Vision model lists, while comics, scripts, export, and deployment guidance are synchronized.
+
+---
+
+## 🆕 Release Highlights (v1.4.0 · 2025-12-25)
+
+- **New Script — One‑click writing assistant (core feature)** – Added a **"New Script"** assistant that creates a Script project and immediately generates an initial chapter outline and the first scene draft (an atomic CreateProject + GenerateInitial flow). Usage: open the **Scripts** page and click **New Script** to create a project; the system will initialize `chapter_draft.json`, create the first draft and workflow entry, and make the new project ready for editing and further generation.
+
+---
 
 ## 🆕 Release Highlights (v1.2.0 · 2025-11-27)
 
@@ -167,10 +199,23 @@ go mod download
 3. **Configure Environment**
 
 On first start, the server initializes a configuration file at `data/config.json` (or `${DATA_DIR}/config.json`).
-You can configure the LLM provider/API key either:
+You can configure both LLM and Vision providers either:
 
 - via the Settings UI: `http://localhost:8080/settings`, or
 - by editing `data/config.json` directly.
+
+For Vision/image generation in v2.0.0, the most common fields are:
+
+- `vision_provider`
+- `vision_default_model`
+- `vision_config.endpoint`
+- `vision_config.api_key`
+
+For GLM Image, the recommended values are:
+
+- provider: `glm`
+- default model: `glm-image`
+- endpoint: `https://open.bigmodel.cn/api/paas/v4`
 
 4. **Start Service**
 ```bash
@@ -246,7 +291,7 @@ Open browser: http://localhost:8080
 
 #### 📁 Export Functionality Details
 
-- **Multiple Formats**: Export data in JSON, Markdown, HTML, TXT, CSV, and PDF formats
+- **Multiple Formats**: Export data in JSON, Markdown, HTML, TXT, and CSV formats
 - **Comprehensive Scene Data**: Export full scene information including characters, locations, items, themes, atmosphere, and settings
 - **Character Interactions**: Export detailed interaction records between characters with timestamps and emotional context
 - **Story Branches**: Export complete story trees with all possible branches, choices, and outcomes
@@ -271,10 +316,40 @@ Open browser: http://localhost:8080
 ```http
 GET    /api/scenes                      # Get scene list
 POST   /api/scenes                      # Create scene  
+POST   /api/scenes/shell                # Create a standalone comic workspace shell
 GET    /api/scenes/{id}                 # Get scene details
 GET    /api/scenes/{id}/characters      # Get scene characters
 GET    /api/scenes/{id}/conversations   # Get scene conversations
 GET    /api/scenes/{id}/aggregate       # Get scene aggregate data
+```
+
+#### Comics v2
+```http
+POST   /api/scenes/{id}/comic/analysis                 # Start comic analysis (supports source_text)
+GET    /api/scenes/{id}/comic/analysis                 # Get analysis result
+POST   /api/scenes/{id}/comic/prompts                  # Start frame prompt generation
+GET    /api/scenes/{id}/comic/prompts                  # Get all frame prompts
+POST   /api/scenes/{id}/comic/key_elements             # Start key element extraction
+GET    /api/scenes/{id}/comic/key_elements             # Get key elements
+POST   /api/scenes/{id}/comic/references               # Upload reference images
+POST   /api/scenes/{id}/comic/generate                 # Start image generation
+POST   /api/scenes/{id}/comic/frames/{frame_id}/regenerate # Regenerate a frame
+GET    /api/scenes/{id}/comic/images/{frame_id}        # Get generated PNG
+GET    /api/scenes/{id}/comic                          # Get comic overview
+GET    /api/scenes/{id}/comic/export?format=zip|html   # Export comic
+```
+
+#### Scripts
+```http
+GET    /api/scripts                    # List script projects
+POST   /api/scripts                    # Create script project
+GET    /api/scripts/{id}               # Get script details
+POST   /api/scripts/{id}/generate      # Start initial generation
+POST   /api/scripts/{id}/command       # Execute assist command
+PUT    /api/scripts/{id}/chapter_draft # Save chapter draft
+PUT    /api/scripts/{id}/draft         # Save/replace active draft
+POST   /api/scripts/{id}/rewind        # Rewind to a previous draft
+GET    /api/scripts/{id}/export        # Export script
 ```
 
 #### Story System
