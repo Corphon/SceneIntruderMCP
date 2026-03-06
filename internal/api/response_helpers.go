@@ -4,13 +4,13 @@ package api
 import (
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Corphon/SceneIntruderMCP/internal/models"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -56,28 +56,46 @@ func (rh *ResponseHelper) Created(c *gin.Context, data interface{}, message ...s
 	c.JSON(http.StatusCreated, response)
 }
 
+// Accepted 请求已受理（用于异步任务等场景）
+func (rh *ResponseHelper) Accepted(c *gin.Context, data interface{}, message ...string) {
+	response := &APIResponse{
+		Success:   true,
+		Data:      data,
+		Timestamp: time.Now(),
+		RequestID: rh.getRequestID(c),
+	}
+
+	if len(message) > 0 {
+		response.Message = message[0]
+	} else {
+		response.Message = "accepted"
+	}
+
+	c.JSON(http.StatusAccepted, response)
+}
+
 // sanitizeErrorMessage removes sensitive information from error messages
 func sanitizeErrorMessage(message string) string {
 	// Remove potential sensitive information like API keys, file paths, etc.
 	// This is a basic implementation - you might want to expand this list
 	sensitivePatterns := []string{
-		"api_key", "API_KEY", "apikey", "ApiKey", 
-		"password", "secret", "token", 
+		"api_key", "API_KEY", "apikey", "ApiKey",
+		"password", "secret", "token",
 		"config", "CONFIG", "config_",
 		"env", "ENV", "environment",
 		"/", "\\", "C:", "D:", // File path indicators
 		".json", ".yaml", ".yml", ".env", // File extensions that might contain sensitive info
 	}
-	
+
 	sanitized := message
 	for _, pattern := range sensitivePatterns {
 		// Replace occurrences with generic text to prevent information disclosure
 		if strings.Contains(strings.ToLower(sanitized), strings.ToLower(pattern)) {
 			// For security reasons, we'll replace the entire message if it contains sensitive patterns
 			// This is conservative approach - in production you might want more sophisticated sanitization
-			if strings.Contains(strings.ToLower(sanitized), "api_key") || 
-			   strings.Contains(strings.ToLower(sanitized), "secret") ||
-			   strings.Contains(strings.ToLower(sanitized), "token") {
+			if strings.Contains(strings.ToLower(sanitized), "api_key") ||
+				strings.Contains(strings.ToLower(sanitized), "secret") ||
+				strings.Contains(strings.ToLower(sanitized), "token") {
 				return "An internal error occurred"
 			}
 		}
@@ -89,7 +107,7 @@ func sanitizeErrorMessage(message string) string {
 func (rh *ResponseHelper) Error(c *gin.Context, statusCode int, errorCode, message string, details ...string) {
 	// Sanitize the error message to prevent information disclosure
 	sanitizedMessage := sanitizeErrorMessage(message)
-	
+
 	apiError := &APIError{
 		Code:    errorCode,
 		Message: sanitizedMessage,
@@ -195,14 +213,14 @@ func (rh *ResponseHelper) ExportResponse(c *gin.Context, result *models.ExportRe
 	switch strings.ToLower(format) {
 	case "json":
 		rh.Success(c, result, "导出成功")
-	case "markdown", "txt":
+	case "markdown":
+		rh.FileResponse(c, result.Content, filepath.Base(result.FilePath), "text/markdown; charset=utf-8")
+	case "txt":
 		rh.FileResponse(c, result.Content, filepath.Base(result.FilePath), "text/plain; charset=utf-8")
 	case "html":
 		rh.FileResponse(c, result.Content, filepath.Base(result.FilePath), "text/html; charset=utf-8")
 	case "csv":
 		rh.FileResponse(c, result.Content, filepath.Base(result.FilePath), "text/csv; charset=utf-8")
-	case "pdf":
-		rh.FileResponse(c, result.Content, filepath.Base(result.FilePath), "application/pdf")
 	default:
 		rh.Success(c, result, "导出成功")
 	}
@@ -216,8 +234,13 @@ func (rh *ResponseHelper) StreamResponse(c *gin.Context, contentType string, cal
 
 	c.Stream(func(w io.Writer) bool {
 		if err := callback(c.Writer); err != nil {
-			// 记录错误但不中断流
-			log.Printf("流式响应错误: %v", err)
+			utils.GetLogger().Warn("api StreamResponse callback error", map[string]interface{}{
+				"request_id":   rh.getRequestID(c),
+				"method":       c.Request.Method,
+				"path":         c.Request.URL.Path,
+				"content_type": contentType,
+				"err":          err,
+			})
 			return false
 		}
 		return true
