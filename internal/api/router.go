@@ -67,6 +67,11 @@ func SetupRouter() (*gin.Engine, error) {
 		return nil, fmt.Errorf("用户服务未正确初始化")
 	}
 
+	scriptService, ok := container.Get("script").(*services.ScriptService)
+	if !ok {
+		return nil, fmt.Errorf("scripts 服务未正确初始化")
+	}
+
 	// ✅ 创建API处理器 - 只传递从容器获取的服务
 	handler := NewHandler(
 		sceneService,
@@ -77,6 +82,7 @@ func SetupRouter() (*gin.Engine, error) {
 		configService,
 		statsService,
 		userService,
+		scriptService,
 	)
 
 	// 创建路由
@@ -105,19 +111,7 @@ func SetupRouter() (*gin.Engine, error) {
 	spaHandler := serveSPAHandler(spaIndexPath)
 	registerSPARoutes(r, spaHandler)
 
-	r.NoRoute(func(c *gin.Context) {
-		path := c.Request.URL.Path
-		if strings.HasPrefix(path, "/api") {
-			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
-				"error":   "API endpoint not found",
-				"path":    path,
-				"success": false,
-			})
-			return
-		}
-
-		spaHandler(c)
-	})
+	registerNoRoute(r, spaHandler, handler.Response)
 
 	// WebSocket 支持
 	r.GET("/ws/scene/:id", handler.SceneWebSocket)
@@ -169,12 +163,43 @@ func SetupRouter() (*gin.Engine, error) {
 		{
 			scenesGroup.GET("", handler.GetScenes)
 			scenesGroup.POST("", AuthMiddleware(), handler.CreateScene)
+			scenesGroup.POST("/shell", AuthMiddleware(), handler.CreateSceneShell)
 			scenesGroup.GET("/:id", RequireAuthForScene(), handler.GetScene)
 			scenesGroup.DELETE("/:id", RequireAuthForScene(), handler.DeleteScene)
 			scenesGroup.GET("/:id/characters", RequireAuthForScene(), handler.GetCharacters)
 			scenesGroup.GET("/:id/conversations", RequireAuthForScene(), handler.GetConversations)
 			scenesGroup.GET("/:id/nodes/:node_id/content", RequireAuthForScene(), handler.GetStoryNodeContent)
 
+			// v2 comics（Phase2）：分镜/提示词/关键元素
+			comicGroup := scenesGroup.Group("/:id/comic")
+			comicGroup.Use(RequireAuthForScene())
+			{
+				comicGroup.DELETE("", handler.DeleteComic)
+				comicGroup.POST("/analysis", handler.StartComicAnalysis)
+				comicGroup.GET("/analysis", handler.GetComicAnalysis)
+				comicGroup.PUT("/analysis", handler.UpdateComicAnalysis)
+				comicGroup.POST("/prompts", handler.StartComicPrompts)
+				comicGroup.GET("/prompts", handler.GetComicPrompts)
+				comicGroup.PUT("/prompts/:frameID", handler.UpdateComicPrompt)
+				comicGroup.POST("/key_elements", handler.StartComicKeyElements)
+				comicGroup.GET("/key_elements", handler.GetComicKeyElements)
+				comicGroup.PUT("/key_elements", handler.UpdateComicKeyElements)
+				// Phase3：参考图上传
+				comicGroup.POST("/references", handler.UploadComicReferences)
+				comicGroup.GET("/references", handler.GetComicReferences)
+				comicGroup.GET("/references/:elementID/image", handler.GetComicReferenceImage)
+				comicGroup.DELETE("/references/:elementID", handler.DeleteComicReference)
+				// Phase3：生成与重绘
+				comicGroup.POST("/generate", handler.StartComicGenerate)
+				comicGroup.POST("/frames/generate", handler.StartComicGenerateFrames)
+				comicGroup.POST("/frames/:frameID/regenerate", handler.StartComicRegenerateFrame)
+				// Phase3：comics 概览
+				comicGroup.GET("", handler.GetComicOverview)
+				// Phase4：图片直出（用于前端预览）
+				comicGroup.GET("/images/:frameID", handler.GetComicFrameImage)
+				// Phase3：导出（ZIP）
+				comicGroup.GET("/export", handler.ExportComic)
+			}
 			// 物品管理路由
 			itemsGroup := scenesGroup.Group("/:id/items")
 			{
@@ -213,6 +238,29 @@ func SetupRouter() (*gin.Engine, error) {
 				exportGroup.GET("/interactions", RequireAuthForScene(), handler.ExportInteractions)
 				exportGroup.GET("/story", RequireAuthForScene(), handler.ExportStory)
 			}
+		}
+
+		// ===============================
+		// scripts（v1.4.0 New Script，P0 最小闭环）
+		// ===============================
+		scriptsGroup := api.Group("/scripts")
+		scriptsGroup.Use(AuthMiddleware())
+		{
+			scriptsGroup.GET("", handler.GetScripts)
+			scriptsGroup.POST("", handler.CreateScript)
+			scriptsGroup.PUT("/:id", handler.UpdateScript)
+			scriptsGroup.DELETE("/:id", handler.DeleteScript)
+			scriptsGroup.GET("/:id", handler.GetScript)
+			scriptsGroup.GET("/:id/characters", handler.GetScriptCharacters)
+			scriptsGroup.PUT("/:id/characters", handler.PutScriptCharacters)
+			scriptsGroup.GET("/:id/items", handler.GetScriptItems)
+			scriptsGroup.PUT("/:id/items", handler.PutScriptItems)
+			scriptsGroup.PUT("/:id/chapter_draft", handler.PutScriptChapterDraft)
+			scriptsGroup.PUT("/:id/draft", handler.PutScriptDraft)
+			scriptsGroup.POST("/:id/generate", handler.ScriptGenerate)
+			scriptsGroup.POST("/:id/command", handler.ScriptCommand)
+			scriptsGroup.POST("/:id/rewind", handler.ScriptRewind)
+			scriptsGroup.GET("/:id/export", handler.ScriptExport)
 		}
 
 		// ===============================
@@ -302,6 +350,19 @@ func SetupRouter() (*gin.Engine, error) {
 	return r, nil
 }
 
+func registerNoRoute(r *gin.Engine, spaHandler gin.HandlerFunc, rh *ResponseHelper) {
+	r.NoRoute(func(c *gin.Context) {
+		path := c.Request.URL.Path
+		if strings.HasPrefix(path, "/api") {
+			rh.Error(c, http.StatusNotFound, ErrorNotFound, "API endpoint not found", path)
+			c.Abort()
+			return
+		}
+
+		spaHandler(c)
+	})
+}
+
 // corsMiddleware 实现跨域资源共享
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -371,6 +432,8 @@ func registerSPARoutes(r *gin.Engine, spaHandler gin.HandlerFunc) {
 		"/login",
 		"/scenes",
 		"/scenes/*path",
+		"/scripts",
+		"/scripts/*path",
 		"/user",
 		"/user/*path",
 	}
