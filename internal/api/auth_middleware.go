@@ -3,7 +3,6 @@ package api
 
 import (
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +12,7 @@ import (
 	"github.com/Corphon/SceneIntruderMCP/internal/config"
 	"github.com/Corphon/SceneIntruderMCP/internal/di"
 	"github.com/Corphon/SceneIntruderMCP/internal/services"
+	"github.com/Corphon/SceneIntruderMCP/internal/utils"
 	"github.com/gin-gonic/gin"
 )
 
@@ -38,7 +38,9 @@ func InitializeAuth() error {
 		if os.Getenv("DEBUG_MODE") == "true" || cfg.DebugMode {
 			// Use a consistent key during development to avoid session issues on restart
 			secret = []byte("dev_auth_key_for_testing_purposes_only_")
-			log.Printf("⚠️ 警告: 开发模式下使用固定认证密钥，生产环境请通过环境变量设置 AUTH_SECRET_KEY")
+			utils.GetLogger().Warn("auth using fixed dev secret (set AUTH_SECRET_KEY in production)", map[string]interface{}{
+				"debug_mode": true,
+			})
 		} else {
 			// Generate a truly random secret key if none is provided
 			secret, err = auth.GenerateSecureKey(32) // 256-bit key
@@ -46,7 +48,10 @@ func InitializeAuth() error {
 				// Fallback to a reasonably secure key based on multiple entropy sources
 				entropy := fmt.Sprintf("%s_%d_%d", cfg.DataDir, time.Now().UnixNano(), os.Getpid())
 				secret = []byte(entropy)
-				log.Printf("Warning: When using derived keys, it is recommended to set them in environment variables AUTH_SECRET_KEY")
+				utils.GetLogger().Warn("auth using derived secret (set AUTH_SECRET_KEY in production)", map[string]interface{}{
+					"debug_mode": false,
+					"err":        err.Error(),
+				})
 			}
 		}
 	}
@@ -99,10 +104,30 @@ func AuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
+		// Guard: if auth was not initialized, do not panic on token parse.
+		if tokenConfig == nil {
+			utils.GetLogger().Error("auth not initialized; treating request as guest", map[string]interface{}{
+				"method": c.Request.Method,
+				"path":   c.Request.URL.Path,
+			})
+			c.Set("user_id", "console_user")
+			c.Set("user_authenticated", false)
+			c.Set("auth_error", "auth not initialized")
+			c.Next()
+			return
+		}
+
 		// Parse and validate token
 		parsedToken, err := auth.ParseToken(token, tokenConfig)
 		if err != nil {
-			log.Printf("AuthMiddleware: invalid token detected (%v), downgrading to console_user", err)
+			// Do not log the token itself.
+			utils.GetLogger().Warn("auth invalid token; downgraded to guest", map[string]interface{}{
+				"method":    c.Request.Method,
+				"path":      c.Request.URL.Path,
+				"client_ip": c.ClientIP(),
+				"token_len": len(token),
+				"err":       err.Error(),
+			})
 			c.Set("user_id", "console_user")
 			c.Set("user_authenticated", false)
 			c.Set("auth_error", err.Error())
@@ -230,11 +255,7 @@ func RequireAuthForScene() gin.HandlerFunc {
 			_, err := sceneService.LoadScene(sceneID)
 			if err != nil {
 				// Scene doesn't exist or can't be loaded
-				c.JSON(http.StatusNotFound, gin.H{
-					"success": false,
-					"error":   "Scene not found",
-					"code":    "SCENE_NOT_FOUND",
-				})
+				NewResponseHelper().Error(c, http.StatusNotFound, ErrorSceneNotFound, "场景不存在")
 				c.Abort()
 				return
 			}
@@ -262,22 +283,14 @@ func RequireAuthForUser() gin.HandlerFunc {
 				c.Next()
 				return
 			}
-			c.JSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"error":   "Authentication required",
-				"code":    "FORBIDDEN",
-			})
+			NewResponseHelper().Forbidden(c, "Authentication required")
 			c.Abort()
 			return
 		}
 
 		// Allow access if the requested user ID matches the authenticated user ID
 		if requestedUserID != authUserID {
-			c.JSON(http.StatusForbidden, gin.H{
-				"success": false,
-				"error":   "Access denied: Cannot access other users' data",
-				"code":    "FORBIDDEN",
-			})
+			NewResponseHelper().Forbidden(c, "Access denied: Cannot access other users' data")
 			c.Abort()
 			return
 		}
