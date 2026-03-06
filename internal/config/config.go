@@ -4,7 +4,6 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -41,6 +40,25 @@ type AppConfig struct {
 
 	// Encrypted API key storage (stored as encrypted string)
 	EncryptedLLMConfig map[string]string `json:"encrypted_llm_config,omitempty"`
+
+	// Encrypted Vision API key storage (stored as encrypted string)
+	EncryptedVisionConfig map[string]string `json:"encrypted_vision_config,omitempty"`
+
+	// Vision 相关配置（Phase5）
+	VisionProvider       string            `json:"vision_provider,omitempty"`
+	VisionDefaultModel   string            `json:"vision_default_model,omitempty"`
+	VisionConfig         map[string]string `json:"vision_config,omitempty"`
+	VisionModelProviders map[string]string `json:"vision_model_providers,omitempty"`
+	VisionModels         []VisionModelInfo `json:"vision_models,omitempty"`
+}
+
+// VisionModelInfo describes one vision model option that can be surfaced to the frontend.
+// Key is the stable identifier used in prompts.model.
+type VisionModelInfo struct {
+	Key                    string `json:"key"`
+	Label                  string `json:"label"`
+	Provider               string `json:"provider"`
+	SupportsReferenceImage bool   `json:"supports_reference_image"`
 }
 
 // Config 存储应用配置
@@ -69,8 +87,8 @@ func generateEncryptionKey() string {
 		// Only show warning once
 		if !encryptionKeyWarningShown {
 			// In production, this should be a fatal error rather than using a default key
-			log.Println("⚠️ 警告: 未设置 CONFIG_ENCRYPTION_KEY 环境变量")
-			log.Println("💡 建议: 在生产环境中设置一个安全的32字符加密密钥")
+			utils.GetLogger().Warn("未设置 CONFIG_ENCRYPTION_KEY 环境变量", nil)
+			utils.GetLogger().Info("建议在生产环境中设置安全的32字符加密密钥", nil)
 			encryptionKeyWarningShown = true
 		}
 
@@ -79,22 +97,22 @@ func generateEncryptionKey() string {
 			// Try to load existing key from file, or generate a new one
 			persistentKey, err := loadOrGeneratePersistentKey()
 			if err != nil {
-				log.Printf("⚠️ 警告: 无法加载或生成持久化密钥: %v", err)
+				utils.GetLogger().Warn("无法加载或生成持久化密钥", map[string]interface{}{"err": err})
 				// Fallback to a more secure derived key if persistent key fails
 				derivedKey := fmt.Sprintf("%-32s", fmt.Sprintf("dev_key_%d", time.Now().UnixNano()))[:32]
-				log.Println("⚠️ 警告: 使用基于时间的开发密钥，不建议用于生产环境")
+				utils.GetLogger().Warn("使用基于时间的开发密钥，不建议用于生产环境", nil)
 				return derivedKey
 			}
-			log.Println("✅ 为开发环境生成了安全的随机加密密钥")
+			utils.GetLogger().Info("为开发环境生成了安全的随机加密密钥", nil)
 			return persistentKey
 		} else {
-			log.Fatal("❌ 生产环境中必须设置 CONFIG_ENCRYPTION_KEY 环境变量")
+			utils.GetLogger().Fatal("生产环境中必须设置 CONFIG_ENCRYPTION_KEY 环境变量", nil)
 		}
 	}
 
 	// Validate key length
 	if len(key) < 32 {
-		log.Fatalf("❌ 加密密钥长度不足。请使用至少32字符的密钥")
+		utils.GetLogger().Fatal("加密密钥长度不足，请使用至少32字符的密钥", map[string]interface{}{"key_len": len(key)})
 	}
 
 	return key
@@ -121,7 +139,7 @@ func loadOrGeneratePersistentKey() (string, error) {
 		if len(key) >= 32 {
 			return key, nil
 		}
-		log.Println("⚠️ 警告: 现有加密密钥长度不足，将生成新密钥")
+		utils.GetLogger().Warn("现有加密密钥长度不足，将生成新密钥", map[string]interface{}{"key_len": len(key)})
 	}
 
 	// Generate a new secure key
@@ -163,7 +181,7 @@ func Load() (*Config, error) {
 	// 验证OpenAI API密钥 (这是可选的，可以通过设置页面配置)
 	if config.OpenAIAPIKey == "" {
 		// 只记录提示信息，不是警告 - 因为用户可以通过页面配置
-		log.Println("💡 提示: 可通过设置页面配置LLM API密钥以使用AI功能")
+		utils.GetLogger().Info("可通过设置页面配置LLM API密钥以使用AI功能", nil)
 	}
 
 	return config, nil
@@ -186,7 +204,7 @@ func getEnvPath(key, defaultValue string) string {
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		err = os.MkdirAll(path, 0755)
 		if err != nil {
-			fmt.Printf("警告: 创建目录失败 %s: %v\n", path, err)
+			utils.GetLogger().Warn("创建目录失败", map[string]interface{}{"path": path, "err": err})
 		}
 	}
 
@@ -248,8 +266,8 @@ func (c *AppConfig) getDecryptedAPIKey() string {
 			}
 			// Decryption failed - likely due to changed encryption key
 			// Clear the invalid encrypted key and fall back to unencrypted config
-			log.Printf("⚠️ 警告: 无法解密已保存的API密钥(可能是加密密钥已变更)")
-			log.Printf("💡 提示: 请在设置页面重新配置API密钥")
+			utils.GetLogger().Warn("无法解密已保存的API密钥（可能是加密密钥已变更）", nil)
+			utils.GetLogger().Info("请在设置页面重新配置API密钥", nil)
 			delete(c.EncryptedLLMConfig, "api_key")
 		}
 	}
@@ -281,6 +299,74 @@ func (c *AppConfig) setEncryptedAPIKey(apiKey string) error {
 	}
 	c.EncryptedLLMConfig["api_key"] = encryptedKey
 	return nil
+}
+
+// getDecryptedVisionAPIKey gets the decrypted API key from VisionConfig.
+func (c *AppConfig) getDecryptedVisionAPIKey() string {
+	if !isEncryptionEnabled() {
+		if c.VisionConfig != nil {
+			return c.VisionConfig["api_key"]
+		}
+		return ""
+	}
+
+	if c.EncryptedVisionConfig != nil {
+		encryptedKey := c.EncryptedVisionConfig["api_key"]
+		if encryptedKey != "" {
+			decryptedKey, err := decryptAPIKey(encryptedKey)
+			if err == nil {
+				return decryptedKey
+			}
+			utils.GetLogger().Warn("无法解密已保存的Vision API密钥（可能是加密密钥已变更）", nil)
+			utils.GetLogger().Info("请在设置页面重新配置Vision API密钥", nil)
+			delete(c.EncryptedVisionConfig, "api_key")
+		}
+	}
+
+	// Backward compatibility: check unencrypted config
+	if c.VisionConfig != nil {
+		return c.VisionConfig["api_key"]
+	}
+	return ""
+}
+
+// setEncryptedVisionAPIKey stores the vision api_key either encrypted (default) or plaintext when encryption is disabled.
+func (c *AppConfig) setEncryptedVisionAPIKey(apiKey string) error {
+	if !isEncryptionEnabled() {
+		if c.VisionConfig == nil {
+			c.VisionConfig = make(map[string]string)
+		}
+		c.VisionConfig["api_key"] = apiKey
+		return nil
+	}
+
+	if c.EncryptedVisionConfig == nil {
+		c.EncryptedVisionConfig = make(map[string]string)
+	}
+
+	encryptedKey, err := encryptAPIKey(apiKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt Vision API key: %w", err)
+	}
+	c.EncryptedVisionConfig["api_key"] = encryptedKey
+	return nil
+}
+
+// getVisionConfig returns the current vision config with decrypted api_key injected.
+func (c *AppConfig) getVisionConfig() map[string]string {
+	out := make(map[string]string)
+	if c.VisionConfig != nil {
+		for k, v := range c.VisionConfig {
+			if k == "api_key" {
+				continue
+			}
+			out[k] = v
+		}
+	}
+	if v := c.getDecryptedVisionAPIKey(); v != "" {
+		out["api_key"] = v
+	}
+	return out
 }
 
 // getLLMConfig returns the current LLM config with decrypted API key
@@ -320,23 +406,44 @@ func InitConfig(dataDir string) error {
 	defer configMutex.Unlock()
 
 	currentConfig = &AppConfig{
-		Port:               baseConfig.Port,
-		OpenAIAPIKey:       baseConfig.OpenAIAPIKey,
-		DataDir:            baseConfig.DataDir,
-		StaticDir:          baseConfig.StaticDir,
-		TemplatesDir:       baseConfig.TemplatesDir,
-		LogDir:             baseConfig.LogDir,
-		DebugMode:          baseConfig.DebugMode,
-		LLMProvider:        "",                      // No default provider
-		LLMConfig:          make(map[string]string), // Empty config initially
-		EncryptedLLMConfig: make(map[string]string),
+		Port:                  baseConfig.Port,
+		OpenAIAPIKey:          baseConfig.OpenAIAPIKey,
+		DataDir:               baseConfig.DataDir,
+		StaticDir:             baseConfig.StaticDir,
+		TemplatesDir:          baseConfig.TemplatesDir,
+		LogDir:                baseConfig.LogDir,
+		DebugMode:             baseConfig.DebugMode,
+		LLMProvider:           "",                      // No default provider
+		LLMConfig:             make(map[string]string), // Empty config initially
+		EncryptedLLMConfig:    make(map[string]string),
+		EncryptedVisionConfig: make(map[string]string),
+		VisionProvider:        "placeholder",
+		VisionDefaultModel:    "placeholder",
+		VisionConfig:          make(map[string]string),
+		VisionModelProviders: map[string]string{
+			"placeholder": "placeholder",
+		},
+		VisionModels: []VisionModelInfo{
+			{Key: "qwen-image-max", Label: "qwen-image-max", Provider: "", SupportsReferenceImage: false},
+			{Key: "qwen-image-2.0", Label: "qwen-image-2.0", Provider: "", SupportsReferenceImage: false},
+			{Key: "nano-banana-pro", Label: "nano-banana-pro", Provider: "", SupportsReferenceImage: false},
+			{Key: "nano-banana", Label: "nano-banana", Provider: "", SupportsReferenceImage: false},
+			{Key: "flux", Label: "flux", Provider: "", SupportsReferenceImage: false},
+			{Key: "doubao-seedream-4.5", Label: "doubao-seedream-4.5", Provider: "", SupportsReferenceImage: false},
+			{Key: "gpt-image-1.5", Label: "gpt-image-1.5", Provider: "", SupportsReferenceImage: false},
+			{Key: "glm-image", Label: "glm-image", Provider: "", SupportsReferenceImage: false},
+			{Key: "dalle3", Label: "dalle3", Provider: "", SupportsReferenceImage: false},
+			{Key: "sd", Label: "sd", Provider: "", SupportsReferenceImage: true},
+			{Key: "midjourney", Label: "midjourney", Provider: "", SupportsReferenceImage: false},
+			{Key: "placeholder", Label: "Placeholder", Provider: "placeholder", SupportsReferenceImage: false},
+		},
 	}
 
 	// Set encrypted API key from base config if available
 	if baseConfig.OpenAIAPIKey != "" {
 		err := currentConfig.setEncryptedAPIKey(baseConfig.OpenAIAPIKey)
 		if err != nil {
-			log.Printf("⚠️ 警告: 无法加密环境变量中的API密钥: %v", err)
+			utils.GetLogger().Warn("无法加密环境变量中的API密钥", map[string]interface{}{"err": err})
 		}
 	}
 
@@ -347,7 +454,7 @@ func InitConfig(dataDir string) error {
 			var savedConfig AppConfig
 			if json.Unmarshal(data, &savedConfig) == nil {
 				// Check if the config file is just a template (empty or default values)
-				// Only load the config if it has meaningful values (not empty provider, not empty default model, has API key)
+				// Only load the config if it has meaningful values.
 				hasMeaningfulValues := false
 
 				// Check if there's an actual provider that's not just the default
@@ -376,6 +483,35 @@ func InitConfig(dataDir string) error {
 					hasMeaningfulValues = true
 				}
 
+				// Vision meaningful checks (Phase5): allow vision-only config to be loaded even when LLM is untouched.
+				if savedConfig.VisionProvider != "" && savedConfig.VisionProvider != "placeholder" {
+					hasMeaningfulValues = true
+				}
+				if savedConfig.VisionDefaultModel != "" && savedConfig.VisionDefaultModel != "placeholder" {
+					hasMeaningfulValues = true
+				}
+				if savedConfig.VisionConfig != nil {
+					if v := savedConfig.VisionConfig["endpoint"]; v != "" {
+						hasMeaningfulValues = true
+					}
+					if v := savedConfig.VisionConfig["base_url"]; v != "" {
+						hasMeaningfulValues = true
+					}
+					if v := savedConfig.VisionConfig["api_key"]; v != "" {
+						hasMeaningfulValues = true
+					}
+				}
+				if savedConfig.EncryptedVisionConfig != nil && savedConfig.EncryptedVisionConfig["api_key"] != "" {
+					hasMeaningfulValues = true
+				}
+				if len(savedConfig.VisionModelProviders) > 0 {
+					hasMeaningfulValues = true
+				}
+				if len(savedConfig.VisionModels) > 0 {
+					// Treat any explicit models list as meaningful.
+					hasMeaningfulValues = true
+				}
+
 				if hasMeaningfulValues {
 					// 合并配置，保留文件中的LLM设置，但使用最新的基础配置
 					savedConfig.Port = baseConfig.Port
@@ -393,14 +529,14 @@ func InitConfig(dataDir string) error {
 								// If encryption is now enabled, encrypt the existing API key
 								err := savedConfig.setEncryptedAPIKey(apiKey)
 								if err != nil {
-									log.Printf("⚠️ 警告: 无法加密旧配置中的API密钥: %v", err)
-									log.Printf("💡 建议: 请通过设置页面重新配置API密钥")
+									utils.GetLogger().Warn("无法加密旧配置中的API密钥", map[string]interface{}{"err": err})
+									utils.GetLogger().Info("建议通过设置页面重新配置API密钥", nil)
 								} else {
-									log.Println("✅ 已自动将旧配置中的API密钥升级为加密存储")
+									utils.GetLogger().Info("已自动将旧配置中的API密钥升级为加密存储", nil)
 								}
 							} else {
 								// If encryption is disabled, just keep it in the unencrypted config
-								log.Println("💡 配置: 加密已禁用，API密钥将以明文形式存储")
+								utils.GetLogger().Info("配置: 加密已禁用，API密钥将以明文形式存储", nil)
 							}
 							// Remove api_key from the unencrypted config to avoid duplication
 							// This will be handled by setEncryptedAPIKey if encryption is used
@@ -409,10 +545,55 @@ func InitConfig(dataDir string) error {
 						}
 					}
 
+					// Ensure vision defaults when loading older configs.
+					if savedConfig.VisionProvider == "" {
+						savedConfig.VisionProvider = "placeholder"
+					}
+					if savedConfig.VisionDefaultModel == "" {
+						savedConfig.VisionDefaultModel = "placeholder"
+					}
+					if savedConfig.VisionConfig == nil {
+						savedConfig.VisionConfig = make(map[string]string)
+					}
+					if savedConfig.EncryptedVisionConfig == nil {
+						savedConfig.EncryptedVisionConfig = make(map[string]string)
+					}
+					if savedConfig.VisionModelProviders == nil {
+						savedConfig.VisionModelProviders = make(map[string]string)
+					}
+					if savedConfig.VisionModels == nil {
+						savedConfig.VisionModels = []VisionModelInfo{}
+					}
+
+					// Handle backward compatibility with unencrypted Vision API keys in old configs.
+					if savedConfig.VisionConfig != nil {
+						if apiKey := savedConfig.VisionConfig["api_key"]; apiKey != "" {
+							if isEncryptionEnabled() {
+								if err := savedConfig.setEncryptedVisionAPIKey(apiKey); err != nil {
+									utils.GetLogger().Warn("无法加密旧配置中的Vision API密钥", map[string]interface{}{"err": err})
+									utils.GetLogger().Info("建议通过设置页面重新配置Vision API密钥", nil)
+								} else {
+									utils.GetLogger().Info("已自动将旧配置中的Vision API密钥升级为加密存储", nil)
+								}
+							} else {
+								utils.GetLogger().Info("配置: 加密已禁用，Vision API密钥将以明文形式存储", nil)
+							}
+							delete(savedConfig.VisionConfig, "api_key")
+						}
+					}
+
+					// If config file doesn't provide an API key, fall back to environment variable key.
+					// This preserves the old behavior where empty keys are filled from OPENAI_API_KEY.
+					if baseConfig.OpenAIAPIKey != "" && savedConfig.getDecryptedAPIKey() == "" {
+						if err := savedConfig.setEncryptedAPIKey(baseConfig.OpenAIAPIKey); err != nil {
+							utils.GetLogger().Warn("无法使用环境变量中的API密钥填充配置", map[string]interface{}{"err": err})
+						}
+					}
+
 					currentConfig = &savedConfig
 				} else {
 					// The config file exists but only contains template/default values, don't load it
-					log.Println("📝 配置文件仅包含模板值，使用默认配置而不加载文件")
+					utils.GetLogger().Info("配置文件仅包含模板值，使用默认配置而不加载文件", nil)
 				}
 			}
 		}
@@ -431,16 +612,37 @@ func GetCurrentConfig() *AppConfig {
 		// 紧急情况，返回一个基本配置
 		baseConfig, _ := Load()
 		appConfig := &AppConfig{
-			Port:               baseConfig.Port,
-			OpenAIAPIKey:       baseConfig.OpenAIAPIKey,
-			DataDir:            baseConfig.DataDir,
-			StaticDir:          baseConfig.StaticDir,
-			TemplatesDir:       baseConfig.TemplatesDir,
-			LogDir:             baseConfig.LogDir,
-			DebugMode:          baseConfig.DebugMode,
-			LLMProvider:        "",
-			LLMConfig:          make(map[string]string),
-			EncryptedLLMConfig: make(map[string]string),
+			Port:                  baseConfig.Port,
+			OpenAIAPIKey:          baseConfig.OpenAIAPIKey,
+			DataDir:               baseConfig.DataDir,
+			StaticDir:             baseConfig.StaticDir,
+			TemplatesDir:          baseConfig.TemplatesDir,
+			LogDir:                baseConfig.LogDir,
+			DebugMode:             baseConfig.DebugMode,
+			LLMProvider:           "",
+			LLMConfig:             make(map[string]string),
+			EncryptedLLMConfig:    make(map[string]string),
+			EncryptedVisionConfig: make(map[string]string),
+			VisionProvider:        "placeholder",
+			VisionDefaultModel:    "placeholder",
+			VisionConfig:          make(map[string]string),
+			VisionModelProviders: map[string]string{
+				"placeholder": "placeholder",
+			},
+			VisionModels: []VisionModelInfo{
+				{Key: "qwen-image-max", Label: "qwen-image-max", Provider: "", SupportsReferenceImage: false},
+				{Key: "qwen-image-2.0", Label: "qwen-image-2.0", Provider: "", SupportsReferenceImage: false},
+				{Key: "nano-banana-pro", Label: "nano-banana-pro", Provider: "", SupportsReferenceImage: false},
+				{Key: "nano-banana", Label: "nano-banana", Provider: "", SupportsReferenceImage: false},
+				{Key: "flux", Label: "flux", Provider: "", SupportsReferenceImage: false},
+				{Key: "doubao-seedream-4.5", Label: "doubao-seedream-4.5", Provider: "", SupportsReferenceImage: false},
+				{Key: "gpt-image-1.5", Label: "gpt-image-1.5", Provider: "", SupportsReferenceImage: false},
+				{Key: "glm-image", Label: "glm-image", Provider: "", SupportsReferenceImage: false},
+				{Key: "dalle3", Label: "dalle3", Provider: "", SupportsReferenceImage: false},
+				{Key: "sd", Label: "sd", Provider: "", SupportsReferenceImage: true},
+				{Key: "midjourney", Label: "midjourney", Provider: "", SupportsReferenceImage: false},
+				{Key: "placeholder", Label: "Placeholder", Provider: "placeholder", SupportsReferenceImage: false},
+			},
 		}
 
 		// Set encrypted API key if available
@@ -455,7 +657,155 @@ func GetCurrentConfig() *AppConfig {
 	configCopy := *currentConfig
 	// Return a copy with decrypted LLM config
 	configCopy.LLMConfig = currentConfig.getLLMConfig()
+	// Return a copy with decrypted Vision config.
+	configCopy.VisionConfig = currentConfig.getVisionConfig()
+	if currentConfig.VisionModelProviders != nil {
+		configCopy.VisionModelProviders = make(map[string]string, len(currentConfig.VisionModelProviders))
+		for k, v := range currentConfig.VisionModelProviders {
+			configCopy.VisionModelProviders[k] = v
+		}
+	}
+	if currentConfig.VisionModels != nil {
+		configCopy.VisionModels = make([]VisionModelInfo, len(currentConfig.VisionModels))
+		copy(configCopy.VisionModels, currentConfig.VisionModels)
+	}
 	return &configCopy
+}
+
+// validateVisionProvider validates a supported vision provider.
+func validateVisionProvider(provider string) error {
+	supported := []string{"placeholder", "sdwebui", "dashscope", "gemini", "ark", "openai", "glm"}
+	if slices.Contains(supported, provider) {
+		return nil
+	}
+	return fmt.Errorf("不支持的vision提供商: %s", provider)
+}
+
+func validateVisionConfig(provider string, cfg map[string]string) error {
+	switch provider {
+	case "placeholder":
+		return nil
+	case "sdwebui":
+		endpoint := ""
+		if cfg != nil {
+			endpoint = cfg["endpoint"]
+			if endpoint == "" {
+				endpoint = cfg["base_url"]
+			}
+		}
+		if endpoint == "" {
+			return fmt.Errorf("sdwebui 需要 endpoint")
+		}
+		return nil
+	case "dashscope", "gemini", "ark", "openai", "glm":
+		endpoint := ""
+		if cfg != nil {
+			endpoint = cfg["endpoint"]
+			if endpoint == "" {
+				endpoint = cfg["base_url"]
+			}
+		}
+		if endpoint == "" {
+			return fmt.Errorf("%s 需要 endpoint", provider)
+		}
+		// api_key can be provided via env fallback.
+		return nil
+	default:
+		return fmt.Errorf("不支持的vision提供商: %s", provider)
+	}
+}
+
+// UpdateVisionConfig updates vision-related settings and persists them.
+func UpdateVisionConfig(provider string, visionCfg map[string]string, defaultModel string, modelProviders map[string]string, models []VisionModelInfo) error {
+	configMutex.Lock()
+	defer configMutex.Unlock()
+
+	if currentConfig == nil {
+		return fmt.Errorf("配置系统未初始化")
+	}
+	if provider == "" {
+		return fmt.Errorf("vision provider 不能为空")
+	}
+	if err := validateVisionProvider(provider); err != nil {
+		return err
+	}
+
+	// Copy maps/slices to avoid aliasing.
+	newVisionCfg := make(map[string]string)
+	for k, v := range visionCfg {
+		newVisionCfg[k] = v
+	}
+
+	// Reuse existing Vision api_key when not provided and provider stays the same.
+	newVisionKey, hasNewKey := newVisionCfg["api_key"]
+	if !hasNewKey || newVisionKey == "" {
+		if currentConfig.VisionProvider == provider {
+			if existing := currentConfig.getDecryptedVisionAPIKey(); existing != "" {
+				newVisionCfg["api_key"] = existing
+			}
+		}
+	}
+	newModelProviders := make(map[string]string)
+	for k, v := range modelProviders {
+		newModelProviders[k] = v
+	}
+	newModels := make([]VisionModelInfo, len(models))
+	copy(newModels, models)
+
+	if err := validateVisionConfig(provider, newVisionCfg); err != nil {
+		return err
+	}
+
+	if defaultModel == "" {
+		// Sensible defaults.
+		if provider == "sdwebui" {
+			defaultModel = "sd"
+		} else if provider == "dashscope" {
+			defaultModel = "qwen-image-2.0"
+		} else if provider == "gemini" {
+			defaultModel = "nano-banana-pro"
+		} else if provider == "ark" {
+			defaultModel = "doubao-seedream-4.5"
+		} else if provider == "openai" {
+			defaultModel = "gpt-image-1.5"
+		} else if provider == "glm" {
+			defaultModel = "glm-image"
+		} else {
+			defaultModel = "placeholder"
+		}
+	}
+
+	// Ensure a default model provider mapping exists for the default model.
+	if defaultModel != "" {
+		// newModelProviders is always non-nil after initialization above
+		if _, ok := newModelProviders[defaultModel]; !ok {
+			newModelProviders[defaultModel] = provider
+		}
+	}
+
+	currentConfig.VisionProvider = provider
+	currentConfig.VisionDefaultModel = defaultModel
+
+	// Handle Vision api_key encryption/decryption based on useEncryption setting.
+	currentConfig.VisionConfig = make(map[string]string)
+	for k, v := range newVisionCfg {
+		if k == "api_key" {
+			if v == "" {
+				continue
+			}
+			if err := currentConfig.setEncryptedVisionAPIKey(v); err != nil {
+				return fmt.Errorf("failed to %s Vision API key: %w",
+					map[bool]string{true: "encrypt", false: "store"}[isEncryptionEnabled()], err)
+			}
+			continue
+		}
+		currentConfig.VisionConfig[k] = v
+	}
+
+	currentConfig.VisionModelProviders = newModelProviders
+	currentConfig.VisionModels = newModels
+
+	return SaveConfig()
 }
 
 // UpdateLLMConfig 更新LLM配置
@@ -607,6 +957,11 @@ func SaveConfig() error {
 		if k != "api_key" {
 			configToSave.LLMConfig[k] = v
 		}
+	}
+
+	// Extra safety: avoid persisting Vision api_key in plaintext when encryption is enabled.
+	if isEncryptionEnabled() && configToSave.VisionConfig != nil {
+		delete(configToSave.VisionConfig, "api_key")
 	}
 
 	// 序列化并保存
