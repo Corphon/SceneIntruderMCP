@@ -42,7 +42,11 @@ func Logger() gin.HandlerFunc {
 // ErrorHandler 中间件处理错误
 func ErrorHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		rh := NewResponseHelper()
 		c.Next()
+		if c.Writer.Written() {
+			return
+		}
 
 		// 检查是否有错误
 		if len(c.Errors) > 0 {
@@ -53,18 +57,18 @@ func ErrorHandler() gin.HandlerFunc {
 			switch err.Type {
 			case gin.ErrorTypeBind:
 				// 参数绑定错误
-				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				rh.BadRequest(c, err.Error())
 			case gin.ErrorTypeRender:
 				// 响应渲染错误
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "服务器内部错误"})
+				rh.InternalError(c, "服务器内部错误")
 			case gin.ErrorTypePrivate:
 				// 自定义错误，状态码可能已经设置
 				if !c.Writer.Written() {
-					c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+					rh.InternalError(c, err.Error())
 				}
 			default:
 				// 其他错误
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "未知错误"})
+				rh.InternalError(c, "未知错误")
 			}
 		}
 	}
@@ -73,6 +77,7 @@ func ErrorHandler() gin.HandlerFunc {
 // Auth 中间件验证请求身份
 func Auth() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		rh := NewResponseHelper()
 		// 获取API密钥
 		apiKey := c.GetHeader("X-API-Key")
 		if apiKey == "" {
@@ -80,14 +85,16 @@ func Auth() gin.HandlerFunc {
 		}
 
 		if apiKey == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "API密钥缺失"})
+			rh.Error(c, http.StatusUnauthorized, ErrorAPIKeyMissing, "API密钥缺失")
+			c.Abort()
 			return
 		}
 
 		// 从配置中获取有效的API密钥进行验证
 		cfg := config.GetCurrentConfig()
 		if cfg == nil {
-			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "配置系统未初始化"})
+			rh.InternalError(c, "配置系统未初始化")
+			c.Abort()
 			return
 		}
 
@@ -98,7 +105,8 @@ func Auth() gin.HandlerFunc {
 			validAPIKey = cfg.LLMConfig["api_key"]
 		}
 		if validAPIKey == "" || apiKey != validAPIKey {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "无效的API密钥"})
+			rh.Error(c, http.StatusUnauthorized, ErrorUnauthorized, "无效的API密钥")
+			c.Abort()
 			return
 		}
 
@@ -117,6 +125,7 @@ func RequestSizeLimiter(maxSize int64) gin.HandlerFunc {
 // Timeout 请求超时中间件
 func Timeout(timeout time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		rh := NewResponseHelper()
 		// 创建超时上下文
 		ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 		defer cancel()
@@ -141,9 +150,10 @@ func Timeout(timeout time.Duration) gin.HandlerFunc {
 		case <-ctx.Done():
 			// 请求超时
 			if ctx.Err() == context.DeadlineExceeded {
-				c.AbortWithStatusJSON(http.StatusRequestTimeout, gin.H{
-					"error": "请求处理超时",
-				})
+				if !c.Writer.Written() {
+					rh.Error(c, http.StatusRequestTimeout, "REQUEST_TIMEOUT", "请求处理超时")
+					c.Abort()
+				}
 			}
 		}
 	}
