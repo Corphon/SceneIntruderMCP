@@ -19,7 +19,24 @@ type UsageStats struct {
 	MonthlyTokens int            `json:"monthly_tokens"`
 	DailyStats    map[string]int `json:"daily_stats"`
 	MonthlyStats  map[string]int `json:"monthly_stats"`
-	LastUpdated   time.Time      `json:"last_updated"`
+
+	// Vision stats (Phase5 monitoring). Optional for backward compatibility.
+	TodayVisionRequests int `json:"today_vision_requests,omitempty"`
+	TodayVisionFailures int `json:"today_vision_failures,omitempty"`
+
+	VisionDailyRequests map[string]int `json:"vision_daily_requests,omitempty"`
+	VisionDailyFailures map[string]int `json:"vision_daily_failures,omitempty"`
+
+	VisionMonthlyRequests map[string]int `json:"vision_monthly_requests,omitempty"`
+	VisionMonthlyFailures map[string]int `json:"vision_monthly_failures,omitempty"`
+
+	// Aggregated latency (ms) for today's vision requests.
+	TodayVisionLatencyCount int64 `json:"today_vision_latency_count,omitempty"`
+	TodayVisionLatencySumMs int64 `json:"today_vision_latency_sum_ms,omitempty"`
+	TodayVisionLatencyMinMs int64 `json:"today_vision_latency_min_ms,omitempty"`
+	TodayVisionLatencyMaxMs int64 `json:"today_vision_latency_max_ms,omitempty"`
+
+	LastUpdated time.Time `json:"last_updated"`
 }
 
 // StatsService 提供API使用统计功能
@@ -78,11 +95,21 @@ func (s *StatsService) initStatsUnlocked() {
 
 	// 加载失败或文件不存在，创建新的统计数据
 	s.cachedStats = &UsageStats{
-		TodayRequests: 0,
-		MonthlyTokens: 0,
-		DailyStats:    make(map[string]int),
-		MonthlyStats:  make(map[string]int),
-		LastUpdated:   time.Now(),
+		TodayRequests:           0,
+		MonthlyTokens:           0,
+		DailyStats:              make(map[string]int),
+		MonthlyStats:            make(map[string]int),
+		TodayVisionRequests:     0,
+		TodayVisionFailures:     0,
+		VisionDailyRequests:     make(map[string]int),
+		VisionDailyFailures:     make(map[string]int),
+		VisionMonthlyRequests:   make(map[string]int),
+		VisionMonthlyFailures:   make(map[string]int),
+		TodayVisionLatencyCount: 0,
+		TodayVisionLatencySumMs: 0,
+		TodayVisionLatencyMinMs: 0,
+		TodayVisionLatencyMaxMs: 0,
+		LastUpdated:             time.Now(),
 	}
 
 	// 保存初始数据
@@ -116,6 +143,12 @@ func (s *StatsService) updateStatsForNewPeriod(stats *UsageStats) {
 	// 检查是否需要重置每日计数
 	if today != lastDate {
 		stats.TodayRequests = 0
+		stats.TodayVisionRequests = 0
+		stats.TodayVisionFailures = 0
+		stats.TodayVisionLatencyCount = 0
+		stats.TodayVisionLatencySumMs = 0
+		stats.TodayVisionLatencyMinMs = 0
+		stats.TodayVisionLatencyMaxMs = 0
 		updated = true
 	}
 
@@ -152,6 +185,18 @@ func (s *StatsService) loadStats() (*UsageStats, error) {
 	}
 	if stats.MonthlyStats == nil {
 		stats.MonthlyStats = make(map[string]int)
+	}
+	if stats.VisionDailyRequests == nil {
+		stats.VisionDailyRequests = make(map[string]int)
+	}
+	if stats.VisionDailyFailures == nil {
+		stats.VisionDailyFailures = make(map[string]int)
+	}
+	if stats.VisionMonthlyRequests == nil {
+		stats.VisionMonthlyRequests = make(map[string]int)
+	}
+	if stats.VisionMonthlyFailures == nil {
+		stats.VisionMonthlyFailures = make(map[string]int)
 	}
 
 	return &stats, nil
@@ -235,21 +280,100 @@ func (s *StatsService) updateStatsForCurrentPeriod() {
 func (s *StatsService) createStatsCopy() *UsageStats {
 	if s.cachedStats == nil {
 		return &UsageStats{
-			TodayRequests: 0,
-			MonthlyTokens: 0,
-			DailyStats:    make(map[string]int),
-			MonthlyStats:  make(map[string]int),
-			LastUpdated:   time.Now(),
+			TodayRequests:         0,
+			MonthlyTokens:         0,
+			DailyStats:            make(map[string]int),
+			MonthlyStats:          make(map[string]int),
+			VisionDailyRequests:   make(map[string]int),
+			VisionDailyFailures:   make(map[string]int),
+			VisionMonthlyRequests: make(map[string]int),
+			VisionMonthlyFailures: make(map[string]int),
+			LastUpdated:           time.Now(),
 		}
 	}
 
 	return &UsageStats{
-		TodayRequests: s.cachedStats.TodayRequests,
-		MonthlyTokens: s.cachedStats.MonthlyTokens,
-		DailyStats:    copyIntMap(s.cachedStats.DailyStats),
-		MonthlyStats:  copyIntMap(s.cachedStats.MonthlyStats),
-		LastUpdated:   s.cachedStats.LastUpdated,
+		TodayRequests:           s.cachedStats.TodayRequests,
+		MonthlyTokens:           s.cachedStats.MonthlyTokens,
+		DailyStats:              copyIntMap(s.cachedStats.DailyStats),
+		MonthlyStats:            copyIntMap(s.cachedStats.MonthlyStats),
+		TodayVisionRequests:     s.cachedStats.TodayVisionRequests,
+		TodayVisionFailures:     s.cachedStats.TodayVisionFailures,
+		VisionDailyRequests:     copyIntMap(s.cachedStats.VisionDailyRequests),
+		VisionDailyFailures:     copyIntMap(s.cachedStats.VisionDailyFailures),
+		VisionMonthlyRequests:   copyIntMap(s.cachedStats.VisionMonthlyRequests),
+		VisionMonthlyFailures:   copyIntMap(s.cachedStats.VisionMonthlyFailures),
+		TodayVisionLatencyCount: s.cachedStats.TodayVisionLatencyCount,
+		TodayVisionLatencySumMs: s.cachedStats.TodayVisionLatencySumMs,
+		TodayVisionLatencyMinMs: s.cachedStats.TodayVisionLatencyMinMs,
+		TodayVisionLatencyMaxMs: s.cachedStats.TodayVisionLatencyMaxMs,
+		LastUpdated:             s.cachedStats.LastUpdated,
 	}
+}
+
+// RecordVisionRequest 记录一次 Vision provider 请求的统计（计数 + 失败数 + 今日时延聚合）。
+func (s *StatsService) RecordVisionRequest(provider string, modelKey string, duration time.Duration, err error) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if s.cachedStats == nil {
+		s.initStatsUnlocked()
+	}
+	if s.needsPeriodUpdate() {
+		s.updateStatsForCurrentPeriod()
+	}
+
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	month := now.Format("2006-01")
+
+	// Ensure maps are initialized for backward compatibility.
+	if s.cachedStats.VisionDailyRequests == nil {
+		s.cachedStats.VisionDailyRequests = make(map[string]int)
+	}
+	if s.cachedStats.VisionDailyFailures == nil {
+		s.cachedStats.VisionDailyFailures = make(map[string]int)
+	}
+	if s.cachedStats.VisionMonthlyRequests == nil {
+		s.cachedStats.VisionMonthlyRequests = make(map[string]int)
+	}
+	if s.cachedStats.VisionMonthlyFailures == nil {
+		s.cachedStats.VisionMonthlyFailures = make(map[string]int)
+	}
+
+	s.cachedStats.TodayVisionRequests++
+	s.cachedStats.VisionDailyRequests[today]++
+	s.cachedStats.VisionMonthlyRequests[month]++
+
+	ms := duration.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	s.cachedStats.TodayVisionLatencyCount++
+	s.cachedStats.TodayVisionLatencySumMs += ms
+	if s.cachedStats.TodayVisionLatencyMinMs == 0 || ms < s.cachedStats.TodayVisionLatencyMinMs {
+		s.cachedStats.TodayVisionLatencyMinMs = ms
+	}
+	if ms > s.cachedStats.TodayVisionLatencyMaxMs {
+		s.cachedStats.TodayVisionLatencyMaxMs = ms
+	}
+
+	if err != nil {
+		s.cachedStats.TodayVisionFailures++
+		s.cachedStats.VisionDailyFailures[today]++
+		s.cachedStats.VisionMonthlyFailures[month]++
+	}
+
+	// provider/modelKey currently unused in persistent stats to keep schema minimal.
+	_ = provider
+	_ = modelKey
+
+	s.cachedStats.LastUpdated = now
+	s.isDirty = true
+	if now.Sub(s.lastSaveTime) > s.saveInterval {
+		return s.saveStatsImmediate()
+	}
+	return nil
 }
 
 // 简化的映射复制
@@ -335,11 +459,21 @@ func (s *StatsService) ResetStats() error {
 
 	// 创建新的统计数据
 	newStats := &UsageStats{
-		TodayRequests: 0,
-		MonthlyTokens: 0,
-		DailyStats:    make(map[string]int),
-		MonthlyStats:  make(map[string]int),
-		LastUpdated:   time.Now(),
+		TodayRequests:           0,
+		MonthlyTokens:           0,
+		DailyStats:              make(map[string]int),
+		MonthlyStats:            make(map[string]int),
+		TodayVisionRequests:     0,
+		TodayVisionFailures:     0,
+		VisionDailyRequests:     make(map[string]int),
+		VisionDailyFailures:     make(map[string]int),
+		VisionMonthlyRequests:   make(map[string]int),
+		VisionMonthlyFailures:   make(map[string]int),
+		TodayVisionLatencyCount: 0,
+		TodayVisionLatencySumMs: 0,
+		TodayVisionLatencyMinMs: 0,
+		TodayVisionLatencyMaxMs: 0,
+		LastUpdated:             time.Now(),
 	}
 
 	// 保存新的统计数据
