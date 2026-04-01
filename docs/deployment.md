@@ -25,6 +25,10 @@ For local validation of the full v2.0.0 UI, verify these routes after boot:
 - `/scripts` — New Script workspace
 - `/scenes/:id/comic` — comics 5-step workflow
 
+As of v2.1.0, also verify:
+
+- `/scenes/:id/comic/video` — independent Video Studio
+
 ## Frontend assets (how they are served)
 
 The Go server serves a SPA:
@@ -83,6 +87,42 @@ Recommended GLM image values:
 - default model: `glm-image`
 - endpoint: `https://open.bigmodel.cn/api/paas/v4`
 
+### Video module deployment notes (v2.1.0)
+
+The Video module currently supports a real DashScope async provider path plus a local degraded fallback render.
+
+Common persisted video settings:
+
+- `video_provider`
+- `video_default_model`
+- `video_config.endpoint`
+- `video_config.api_key`
+- `video_config.public_base_url`
+- `video_config.clip_retry_count`
+- `video_config.clip_cache_enabled`
+- `video_config.fallback_compose`
+
+Environment fallback:
+
+- `DASHSCOPE_API_KEY`
+
+Recommended DashScope values:
+
+- provider: `dashscope`
+- default model: `wan2.6-i2v-flash`
+- endpoint: `https://dashscope.aliyuncs.com/api/v1`
+
+Operational notes:
+
+- The current provider request requires a reachable `img_url`.
+  - Preferred: set `video_config.public_base_url` so the backend can translate local comic frame images into public URLs like `/api/scenes/:id/comic/images/:frameID`.
+  - Alternative: explicitly pass `image_url` / `img_url` from the client.
+- Provider result `video_url` values are treated as temporary download links.
+  - The backend downloads them immediately and persists them into `data/comics/scene_<id>/video/clips/`.
+  - Frontend preview/export should prefer the persisted local asset, not the temporary remote URL.
+- The current fallback render is `html_slideshow`, so **FFmpeg is not a hard dependency yet**.
+  - If you later add true local `preview.mp4` composition, declare `ffmpeg` as an optional but explicit runtime dependency.
+
 ### LLM credential encryption
 
 The config file stores the LLM API key encrypted (AES-GCM) under `encrypted_llm_config.api_key`.
@@ -111,6 +151,11 @@ The frontend also relies on **SSE** for long-running jobs:
 - `/api/progress/:taskID`
 
 When proxying, make sure SSE responses are not buffered aggressively, otherwise comics/script progress updates may appear delayed.
+
+This also matters for Video Studio progress because:
+
+- `/api/progress/:taskID` carries timeline / clip / compose progress events
+- overview refresh and recovery UI rely on these long-task signals converging promptly
 
 When proxying, ensure:
 
