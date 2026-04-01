@@ -19,9 +19,7 @@ func init() {
 	llm.Register("anthropic", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"claude-3.5-sonnet",
-				"claude-3.7-sonnet",
-				"claude-3.7-sonnet-thinking",
+				"claude-4.5-haiku",
 			},
 			baseURL:    "https://api.anthropic.com",
 			apiVersion: "2023-06-01",
@@ -146,6 +144,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("anthropic", model, req.ExtraParams)
 
 	// 构建Anthropic请求
 	messages := []map[string]interface{}{
@@ -169,11 +168,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("anthropic", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -259,6 +257,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("anthropic", model, req.ExtraParams)
 
 	// 构建Anthropic请求
 	messages := []map[string]interface{}{
@@ -283,11 +282,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("anthropic", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
