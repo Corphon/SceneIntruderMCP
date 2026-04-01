@@ -1,115 +1,58 @@
-# SceneIntruderMCP API Documentation
+# SceneIntruderMCP API Reference
 
-This document describes the HTTP API and WebSocket endpoints exposed by the backend.
+This document describes the API surface that is currently wired in the codebase.
 
-- Base URL (REST): `http://localhost:8080/api`
+- REST base URL: `http://localhost:8080/api`
 - WebSocket base: `ws://localhost:8080/ws`
 
-## Authentication
+## Common conventions
 
-### Login
+### Authentication
 
-Use `POST /api/auth/login` to obtain a Bearer token.
+- Login: `POST /api/auth/login`
+- Logout: `POST /api/auth/logout`
+- Use bearer token in `Authorization: Bearer <token>`
 
-Request:
+Guest fallback is still supported for many scene-related routes. If the token is missing or invalid, the backend often falls back to `console_user` instead of failing hard.
 
-```http
-POST /api/auth/login
-Content-Type: application/json
+Important exceptions:
 
-{
-  "username": "admin",
-  "password": "admin"
-}
-```
+- `/api/users/:user_id/...` requires authenticated ownership.
+- `/api/scripts/*` requires authenticated access.
+- Some write operations explicitly use stricter auth middleware.
 
-Response (200):
+### Response shape
 
-```json
-{
-  "success": true,
-  "data": {
-    "token": "...",
-    "user_id": "admin"
-  },
-  "message": "登录成功",
-  "timestamp": "2025-01-01T00:00:00Z"
-}
-```
-
-### Using the token
-
-Send the token via:
-
-```http
-Authorization: Bearer <token>
-```
-
-### Guest fallback behavior
-
-If `Authorization` is missing/invalid, most endpoints continue in “guest mode” with `user_id = console_user`.
-
-Exceptions:
-
-- User-scoped endpoints under `/api/users/:user_id/...` enforce that you are authenticated **and** `:user_id` matches the token user.
-- Some operations are explicitly protected by `AuthMiddleware()`.
-
-### Production security notes
-
-- Set `AUTH_SECRET_KEY` in production (minimum 32 bytes; longer values will be truncated to 32 bytes).
-- Tokens expire after 24 hours.
-
-## Rate limiting
-
-Rate limiting is enabled on `/api` and responses include:
-
-- `X-RateLimit-Limit`
-- `X-RateLimit-Remaining`
-- `X-RateLimit-Reset` (unix timestamp)
-
-Limits:
-
-- Default (all `/api/*`): 100 req/min per IP
-- Chat + interactions groups: 30 req/min per user key (`X-User-ID` header; falls back to IP)
-- Upload + analyze: 10 req/hour per user key (`X-User-ID` header; falls back to IP)
-
-## Response format
-
-Most REST endpoints respond with the unified structure:
+Most endpoints return the unified response envelope:
 
 ```json
 {
   "success": true,
   "data": {},
   "message": "...",
-  "timestamp": "2025-01-01T00:00:00Z",
+  "timestamp": "...",
   "request_id": "..."
 }
 ```
 
-Error responses usually look like:
+### Long-running jobs
 
-```json
-{
-  "success": false,
-  "error": {
-    "code": "BAD_REQUEST",
-    "message": "...",
-    "details": "..."
-  },
-  "timestamp": "2025-01-01T00:00:00Z",
-  "request_id": "..."
-}
-```
+Many generation and analysis flows are asynchronous:
 
-Some older handlers may still return `{"error": "..."}` directly. This is being phased out in favor of the unified `APIResponse`.
+1. start a job
+2. receive `task_id`
+3. subscribe to `GET /api/progress/:taskID`
+4. fetch the final artifact/result through its `GET` endpoint
 
-## REST endpoints
+SSE endpoint:
 
-### Auth
+- `GET /api/progress/:taskID`
 
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
+### Rate limiting
+
+The `/api` group is rate-limited globally. Chat/interactions and analysis/upload paths use stricter rate limits than ordinary routes.
+
+## Settings and configuration APIs
 
 ### Settings
 
@@ -117,13 +60,37 @@ Some older handlers may still return `{"error": "..."}` directly. This is being 
 - `POST /api/settings`
 - `POST /api/settings/test-connection`
 
-### LLM
+Notes:
+
+- `GET /api/settings` is the main frontend source of truth for `llm_provider`, `vision_provider`, `video_provider`, `vision_models`, and `video_models`.
+- `POST /api/settings/test-connection` currently validates **LLM connectivity only**.
+
+### LLM configuration
 
 - `GET /api/llm/status`
 - `GET /api/llm/models?provider=<provider>`
 - `PUT /api/llm/config`
 
-### Scenes
+Current backend-supported LLM provider names:
+
+- `openai`
+- `anthropic`
+- `google`
+- `deepseek`
+- `qwen`
+- `mistral`
+- `grok`
+- `glm`
+- `githubmodels`
+- `openrouter`
+- `nvidia`
+
+## Auth APIs
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+
+## Scene APIs
 
 - `GET /api/scenes`
 - `POST /api/scenes`
@@ -135,53 +102,198 @@ Some older handlers may still return `{"error": "..."}` directly. This is being 
 - `GET /api/scenes/:id/nodes/:node_id/content`
 - `GET /api/scenes/:id/aggregate`
 
-#### v2 Comics (analysis / prompts / key elements)
+## Scene item APIs
 
-These endpoints start asynchronous jobs (returning 202 + `task_id`) and allow fetching persisted results after completion. For progress, subscribe to `GET /api/progress/:taskID` (SSE).
+- `GET /api/scenes/:id/items`
+- `POST /api/scenes/:id/items`
+- `GET /api/scenes/:id/items/:item_id`
+- `PUT /api/scenes/:id/items/:item_id`
+- `DELETE /api/scenes/:id/items/:item_id`
 
-For the standalone comics entry added in v2.0.0, the typical flow is:
+## Story APIs
 
-1. `POST /api/scenes/shell` to create an empty comic workspace
-2. Navigate to `/scenes/:id/comic?entry=comic_standalone`
-3. Start analysis with `source_text` instead of grounding on an existing story node
+- `GET /api/scenes/:id/story`
+- `POST /api/scenes/:id/story/choice`
+- `POST /api/scenes/:id/story/advance`
+- `POST /api/scenes/:id/story/command`
+- `POST /api/scenes/:id/story/nodes/:node_id/insert`
+- `POST /api/scenes/:id/story/rewind`
+- `GET /api/scenes/:id/story/branches`
+- `GET /api/scenes/:id/story/choices`
+- `POST /api/scenes/:id/story/batch`
+- `POST /api/scenes/:id/story/tasks/:task_id/objectives/:objective_id/complete`
+- `POST /api/scenes/:id/story/locations/:location_id/unlock`
+- `POST /api/scenes/:id/story/locations/:location_id/explore`
 
-- `POST /api/scenes/:id/comic/analysis` — Start comic breakdown analysis (persists `data/comics/scene_<id>/analysis.json`)
-- `GET /api/scenes/:id/comic/analysis` — Fetch analysis result
-- `POST /api/scenes/:id/comic/prompts` — Start per-frame prompt generation (persists `data/comics/scene_<id>/prompts/*.json`)
-- `GET /api/scenes/:id/comic/prompts` — Fetch all frame prompts
-- `POST /api/scenes/:id/comic/key_elements` — Start key elements extraction (persists `data/comics/scene_<id>/key_elements.json`)
-- `GET /api/scenes/:id/comic/key_elements` — Fetch key elements
-- `POST /api/scenes/:id/comic/references` — Upload reference images (multipart; persists `data/comics/scene_<id>/references/*` + `references/index.json`)
-- `POST /api/scenes/:id/comic/generate` — Start image generation (asynchronous; persists `data/comics/scene_<id>/images/*.png`)
-- `POST /api/scenes/:id/comic/frames/:frameID/regenerate` — Regenerate one frame (asynchronous)
-- `GET /api/scenes/:id/comic/images/:frameID` — Fetch a single frame PNG (for preview; reads `data/comics/scene_<id>/images/<frameID>.png`)
-- `GET /api/scenes/:id/comic` — Comic overview (availability + counts)
-- `GET /api/scenes/:id/comic/export?format=zip|html` — Download export (ZIP/HTML)
+## Comics APIs
 
-Notes:
+Base group: `/api/scenes/:id/comic`
 
-- These routes are protected by `RequireAuthForScene()`.
-  - If `Authorization` is missing/invalid, the server typically continues in guest mode.
-  - If you do provide a valid token, the middleware may validate that the scene exists (and can later be extended to enforce ownership/permissions).
-- To run as an authenticated user, add: `-H "Authorization: Bearer <token>"`
+- `GET /api/scenes/:id/comic`
+- `DELETE /api/scenes/:id/comic`
+- `GET /api/scenes/:id/comic/export?format=zip|html`
+- `POST /api/scenes/:id/comic/analysis`
+- `GET /api/scenes/:id/comic/analysis`
+- `PUT /api/scenes/:id/comic/analysis`
+- `POST /api/scenes/:id/comic/prompts`
+- `GET /api/scenes/:id/comic/prompts`
+- `PUT /api/scenes/:id/comic/prompts/:frameID`
+- `POST /api/scenes/:id/comic/key_elements`
+- `GET /api/scenes/:id/comic/key_elements`
+- `PUT /api/scenes/:id/comic/key_elements`
+- `POST /api/scenes/:id/comic/references`
+- `GET /api/scenes/:id/comic/references`
+- `GET /api/scenes/:id/comic/references/:elementID/image`
+- `DELETE /api/scenes/:id/comic/references/:elementID`
+- `POST /api/scenes/:id/comic/generate`
+- `POST /api/scenes/:id/comic/frames/generate`
+- `POST /api/scenes/:id/comic/frames/:frameID/regenerate`
+- `GET /api/scenes/:id/comic/images/:frameID`
 
-Copy-paste curl workflow (replace placeholders):
+## Video APIs
 
-Start analysis (202 + `task_id`):
+Base group: `/api/scenes/:id/comic/video`
+
+- `POST /api/scenes/:id/comic/video/timeline`
+- `GET /api/scenes/:id/comic/video/timeline`
+- `PUT /api/scenes/:id/comic/video/frames/:frameID`
+- `POST /api/scenes/:id/comic/video/generate`
+- `POST /api/scenes/:id/comic/video/frames/:frameID/regenerate`
+- `GET /api/scenes/:id/comic/video`
+- `DELETE /api/scenes/:id/comic/video`
+- `GET /api/scenes/:id/comic/video/clips/:frameID/asset`
+- `GET /api/scenes/:id/comic/video/render`
+- `GET /api/scenes/:id/comic/video/export?format=zip|html`
+
+Important runtime note:
+
+- Some providers need a reachable image URL for reference input. In deployment, `video_config.public_base_url` is usually required.
+
+## Scripts APIs
+
+Base group: `/api/scripts`
+
+- `GET /api/scripts`
+- `POST /api/scripts`
+- `PUT /api/scripts/:id`
+- `DELETE /api/scripts/:id`
+- `GET /api/scripts/:id`
+- `GET /api/scripts/:id/characters`
+- `PUT /api/scripts/:id/characters`
+- `GET /api/scripts/:id/items`
+- `PUT /api/scripts/:id/items`
+- `PUT /api/scripts/:id/chapter_draft`
+- `PUT /api/scripts/:id/draft`
+- `POST /api/scripts/:id/generate`
+- `POST /api/scripts/:id/command`
+- `POST /api/scripts/:id/rewind`
+- `GET /api/scripts/:id/export?format=json|markdown|txt|html`
+
+## Chat and interaction APIs
+
+- `POST /api/chat`
+- `POST /api/chat/emotion`
+- `POST /api/interactions/trigger`
+- `POST /api/interactions/simulate`
+- `POST /api/interactions/aggregate`
+- `GET /api/interactions/:scene_id`
+- `GET /api/interactions/:scene_id/:character1_id/:character2_id`
+
+## Analyze / upload / cancel APIs
+
+- `POST /api/upload`
+- `POST /api/analyze`
+- `GET /api/progress/:taskID`
+- `POST /api/cancel/:taskID`
+
+## Export APIs
+
+- `GET /api/scenes/:id/export/scene`
+- `GET /api/scenes/:id/export/interactions`
+- `GET /api/scenes/:id/export/story`
+
+## User APIs
+
+Base group: `/api/users/:user_id`
+
+- `GET /api/users/:user_id`
+- `PUT /api/users/:user_id`
+- `GET /api/users/:user_id/preferences`
+- `PUT /api/users/:user_id/preferences`
+- `GET /api/users/:user_id/items`
+- `POST /api/users/:user_id/items`
+- `GET /api/users/:user_id/items/:item_id`
+- `PUT /api/users/:user_id/items/:item_id`
+- `DELETE /api/users/:user_id/items/:item_id`
+- `GET /api/users/:user_id/skills`
+- `POST /api/users/:user_id/skills`
+- `GET /api/users/:user_id/skills/:skill_id`
+- `PUT /api/users/:user_id/skills/:skill_id`
+- `DELETE /api/users/:user_id/skills/:skill_id`
+
+## Config and operations APIs
+
+- `GET /api/config/health`
+- `GET /api/config/metrics`
+- `GET /api/ws/status`
+- `POST /api/ws/cleanup`
+
+## WebSocket endpoints
+
+- `GET /ws/scene/:id`
+- `GET /ws/user/status`
+
+The backend uses plain Gorilla WebSocket, not Socket.IO.
+
+## Practical examples
+
+### Get settings
+
+```bash
+curl -sS http://localhost:8080/api/settings
+```
+
+### Start standalone comic analysis
 
 ```bash
 curl -sS -X POST \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
   http://localhost:8080/api/scenes/<scene_id>/comic/analysis \
-  -d '{}'
+  -d '{"source_text":"A detective enters the station.","target_frames":6}'
 ```
 
-Subscribe to progress (SSE) until `status=completed/failed` (then the server closes the stream):
+### Subscribe to progress
 
 ```bash
-curl -N \
-  -H "Accept: text/event-stream" \
+curl -N -H "Accept: text/event-stream" \
   http://localhost:8080/api/progress/<task_id>
+```
+
+### Save settings with NVIDIA + GLM + DashScope video
+
+```json
+{
+  "llm_provider": "nvidia",
+  "llm_config": {
+    "api_key": "***",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "default_model": "moonshotai/kimi-k2.5"
+  },
+  "vision_provider": "glm",
+  "vision_default_model": "glm-image",
+  "vision_config": {
+    "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "***"
+  },
+  "video_provider": "dashscope",
+  "video_default_model": "wan2.6-i2v-flash",
+  "video_config": {
+    "endpoint": "https://dashscope.aliyuncs.com/api/v1",
+    "api_key": "***",
+    "public_base_url": "https://your-domain.example"
+  }
+}
 ```
 
 Fetch results:
