@@ -2,12 +2,12 @@
 
 <div align="center">
 
-![SceneIntruderMCP Logo](static/images/logo.png)
+![SceneIntruderMCP Logo](static/temp/logo.png)
 
 **AI-native storytelling workspace for scenes, comics, scripts, and video**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-apache-green.svg)](LICENSE)
 
 English | [简体中文](README_CN.md)
 
