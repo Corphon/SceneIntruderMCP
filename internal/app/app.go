@@ -26,6 +26,7 @@ import (
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/google"
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/grok"
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/mistral"
+	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/nvidia"
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/openai"
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/openrouter"
 	_ "github.com/Corphon/SceneIntruderMCP/internal/llm/providers/qwen"
@@ -137,6 +138,12 @@ func InitServices() error {
 	}
 	container.Register("comic_repo", comicRepo)
 
+	videoRepo, err := services.NewVideoRepository(cfg.DataDir + "/comics")
+	if err != nil {
+		return fmt.Errorf("初始化 video 存储失败: %w", err)
+	}
+	container.Register("video_repo", videoRepo)
+
 	// 7.5 v2 vision service（Phase1：至少 1 个可用 provider）
 	visionService := services.NewVisionService(comicRepo)
 	visionService.Stats = statsService
@@ -157,6 +164,12 @@ func InitServices() error {
 		storyService,
 	)
 	container.Register("comic", comicService)
+
+	videoService := services.NewVideoService(videoRepo, comicRepo, jobQueue, progressService, nil)
+	if err := services.ApplyVideoConfig(videoService, cfg); err != nil {
+		utils.GetLogger().Warn("failed to apply video config; using mock video provider", map[string]interface{}{"err": err.Error()})
+	}
+	container.Register("video", videoService)
 
 	sceneAggregateService := services.NewSceneAggregateService(
 		sceneService, characterService, contextService, storyService, progressService)
