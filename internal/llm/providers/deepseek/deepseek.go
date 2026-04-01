@@ -20,7 +20,6 @@ func init() {
 		return &Provider{
 			recommendedModels: []string{
 				"deepseek-chat",
-				"deepseek-reasoner",
 			},
 			baseURL: "https://api.deepseek.com/v1",
 		}
@@ -49,7 +48,7 @@ func (p *Provider) Initialize(config map[string]string) error {
 	if model, exists := config["default_model"]; exists && model != "" {
 		p.defaultModel = model
 	} else {
-		p.defaultModel = "deepseek-reasoner" // 默认使用通用聊天模型
+		p.defaultModel = "deepseek-chat" // 默认关闭推理模式，使用聊天模型
 	}
 
 	if baseURL, exists := config["base_url"]; exists && baseURL != "" {
@@ -151,6 +150,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("deepseek", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -184,11 +184,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("deepseek", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -272,6 +271,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("deepseek", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -305,11 +305,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("deepseek", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
