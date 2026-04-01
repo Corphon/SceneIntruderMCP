@@ -47,6 +47,10 @@ const (
 	ErrorComicImageNotFound       = "COMIC_IMAGE_NOT_FOUND"
 	ErrorComicReferencesNotFound  = "COMIC_REFERENCES_NOT_FOUND"
 	ErrorComicReferenceNotFound   = "COMIC_REFERENCE_NOT_FOUND"
+	ErrorVideoServiceNotReady     = "VIDEO_SERVICE_NOT_READY"
+	ErrorVideoTimelineNotFound    = "VIDEO_TIMELINE_NOT_FOUND"
+	ErrorVideoOverviewNotFound    = "VIDEO_OVERVIEW_NOT_FOUND"
+	ErrorVideoFrameNotFound       = "VIDEO_FRAME_NOT_FOUND"
 
 	// 文件相关错误
 	ErrorFileUploadFailed = "FILE_UPLOAD_FAILED"
