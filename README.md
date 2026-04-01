@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![SceneIntruderMCP Logo](static/temp/logo.png)
+![SceneIntruderMCP Logo](temp/logo.png)
 
 **AI-native storytelling workspace for scenes, comics, scripts, and video**
 
