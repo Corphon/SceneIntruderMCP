@@ -23,7 +23,6 @@ func init() {
 				"gpt-4o-mini",
 				"gpt-4.1",
 				"gpt-4.1-mini",
-				"gpt-5-nano",
 			},
 			baseURL: "https://api.openai.com/v1",
 		}
@@ -148,6 +147,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("openai", model, req.ExtraParams)
 
 	// 构建OpenAI请求
 	messages := []map[string]string{
@@ -180,11 +180,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("openai", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -271,6 +270,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("openai", model, req.ExtraParams)
 
 	// 构建OpenAI请求
 	messages := []map[string]string{
@@ -303,11 +303,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("openai", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
