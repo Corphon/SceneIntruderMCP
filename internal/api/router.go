@@ -195,6 +195,17 @@ func SetupRouter() (*gin.Engine, error) {
 				comicGroup.POST("/frames/:frameID/regenerate", handler.StartComicRegenerateFrame)
 				// Phase3：comics 概览
 				comicGroup.GET("", handler.GetComicOverview)
+				// v2.1.0：独立 Video 模块（首版）
+				comicGroup.POST("/video/timeline", handler.BuildComicVideoTimeline)
+				comicGroup.GET("/video/timeline", handler.GetComicVideoTimeline)
+				comicGroup.PUT("/video/frames/:frameID", handler.UpdateComicVideoFrame)
+				comicGroup.POST("/video/generate", handler.StartComicVideoGenerate)
+				comicGroup.POST("/video/frames/:frameID/regenerate", handler.StartComicVideoRegenerateFrame)
+				comicGroup.GET("/video", handler.GetComicVideoOverview)
+				comicGroup.DELETE("/video", handler.DeleteComicVideo)
+				comicGroup.GET("/video/clips/:frameID/asset", handler.GetComicVideoClipAsset)
+				comicGroup.GET("/video/render", handler.GetComicVideoRenderArtifact)
+				comicGroup.GET("/video/export", handler.ExportComicVideo)
 				// Phase4：图片直出（用于前端预览）
 				comicGroup.GET("/images/:frameID", handler.GetComicFrameImage)
 				// Phase3：导出（ZIP）
