@@ -43,6 +43,7 @@ type AppConfig struct {
 
 	// Encrypted Vision API key storage (stored as encrypted string)
 	EncryptedVisionConfig map[string]string `json:"encrypted_vision_config,omitempty"`
+	EncryptedVideoConfig  map[string]string `json:"encrypted_video_config,omitempty"`
 
 	// Vision 相关配置（Phase5）
 	VisionProvider       string            `json:"vision_provider,omitempty"`
@@ -50,6 +51,13 @@ type AppConfig struct {
 	VisionConfig         map[string]string `json:"vision_config,omitempty"`
 	VisionModelProviders map[string]string `json:"vision_model_providers,omitempty"`
 	VisionModels         []VisionModelInfo `json:"vision_models,omitempty"`
+
+	// Video 相关配置（v2.1）
+	VideoProvider       string            `json:"video_provider,omitempty"`
+	VideoDefaultModel   string            `json:"video_default_model,omitempty"`
+	VideoConfig         map[string]string `json:"video_config,omitempty"`
+	VideoModelProviders map[string]string `json:"video_model_providers,omitempty"`
+	VideoModels         []VideoModelInfo  `json:"video_models,omitempty"`
 }
 
 // VisionModelInfo describes one vision model option that can be surfaced to the frontend.
@@ -59,6 +67,13 @@ type VisionModelInfo struct {
 	Label                  string `json:"label"`
 	Provider               string `json:"provider"`
 	SupportsReferenceImage bool   `json:"supports_reference_image"`
+}
+
+type VideoModelInfo struct {
+	Key                      string `json:"key"`
+	Label                    string `json:"label"`
+	Provider                 string `json:"provider"`
+	SupportsImageConditioned bool   `json:"supports_image_conditioned"`
 }
 
 // Config 存储应用配置
@@ -352,6 +367,70 @@ func (c *AppConfig) setEncryptedVisionAPIKey(apiKey string) error {
 	return nil
 }
 
+func (c *AppConfig) getDecryptedVideoAPIKey() string {
+	if !isEncryptionEnabled() {
+		if c.VideoConfig != nil {
+			return c.VideoConfig["api_key"]
+		}
+		return ""
+	}
+
+	if c.EncryptedVideoConfig != nil {
+		encryptedKey := c.EncryptedVideoConfig["api_key"]
+		if encryptedKey != "" {
+			decryptedKey, err := decryptAPIKey(encryptedKey)
+			if err == nil {
+				return decryptedKey
+			}
+			utils.GetLogger().Warn("无法解密已保存的Video API密钥（可能是加密密钥已变更）", nil)
+			utils.GetLogger().Info("请在设置页面重新配置Video API密钥", nil)
+			delete(c.EncryptedVideoConfig, "api_key")
+		}
+	}
+
+	if c.VideoConfig != nil {
+		return c.VideoConfig["api_key"]
+	}
+	return ""
+}
+
+func (c *AppConfig) setEncryptedVideoAPIKey(apiKey string) error {
+	if !isEncryptionEnabled() {
+		if c.VideoConfig == nil {
+			c.VideoConfig = make(map[string]string)
+		}
+		c.VideoConfig["api_key"] = apiKey
+		return nil
+	}
+
+	if c.EncryptedVideoConfig == nil {
+		c.EncryptedVideoConfig = make(map[string]string)
+	}
+
+	encryptedKey, err := encryptAPIKey(apiKey)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt Video API key: %w", err)
+	}
+	c.EncryptedVideoConfig["api_key"] = encryptedKey
+	return nil
+}
+
+func (c *AppConfig) getVideoConfig() map[string]string {
+	out := make(map[string]string)
+	if c.VideoConfig != nil {
+		for k, v := range c.VideoConfig {
+			if k == "api_key" {
+				continue
+			}
+			out[k] = v
+		}
+	}
+	if v := c.getDecryptedVideoAPIKey(); v != "" {
+		out["api_key"] = v
+	}
+	return out
+}
+
 // getVisionConfig returns the current vision config with decrypted api_key injected.
 func (c *AppConfig) getVisionConfig() map[string]string {
 	out := make(map[string]string)
@@ -417,6 +496,7 @@ func InitConfig(dataDir string) error {
 		LLMConfig:             make(map[string]string), // Empty config initially
 		EncryptedLLMConfig:    make(map[string]string),
 		EncryptedVisionConfig: make(map[string]string),
+		EncryptedVideoConfig:  make(map[string]string),
 		VisionProvider:        "placeholder",
 		VisionDefaultModel:    "placeholder",
 		VisionConfig:          make(map[string]string),
@@ -436,6 +516,23 @@ func InitConfig(dataDir string) error {
 			{Key: "sd", Label: "sd", Provider: "", SupportsReferenceImage: true},
 			{Key: "midjourney", Label: "midjourney", Provider: "", SupportsReferenceImage: false},
 			{Key: "placeholder", Label: "Placeholder", Provider: "placeholder", SupportsReferenceImage: false},
+		},
+		VideoProvider:     "dashscope",
+		VideoDefaultModel: "wan2.6-i2v-flash",
+		VideoConfig:       make(map[string]string),
+		VideoModelProviders: map[string]string{
+			"wan2.6-i2v-flash":        "dashscope",
+			"kling-v3":                "kling",
+			"veo-2":                   "google",
+			"veo-2-vertex":            "vertex",
+			"doubao-seedance-1-5-pro": "ark",
+		},
+		VideoModels: []VideoModelInfo{
+			{Key: "wan2.6-i2v-flash", Label: "wan2.6-i2v-flash", Provider: "dashscope", SupportsImageConditioned: true},
+			{Key: "kling-v3", Label: "kling-v3", Provider: "kling", SupportsImageConditioned: true},
+			{Key: "veo-2", Label: "veo-2", Provider: "google", SupportsImageConditioned: true},
+			{Key: "veo-2-vertex", Label: "veo-2-vertex", Provider: "vertex", SupportsImageConditioned: true},
+			{Key: "doubao-seedance-1-5-pro", Label: "doubao-seedance-1-5-pro", Provider: "ark", SupportsImageConditioned: true},
 		},
 	}
 
@@ -512,6 +609,33 @@ func InitConfig(dataDir string) error {
 					hasMeaningfulValues = true
 				}
 
+				if savedConfig.VideoProvider != "" && savedConfig.VideoProvider != "dashscope" {
+					hasMeaningfulValues = true
+				}
+				if savedConfig.VideoDefaultModel != "" && savedConfig.VideoDefaultModel != "wan2.6-i2v-flash" {
+					hasMeaningfulValues = true
+				}
+				if savedConfig.VideoConfig != nil {
+					if v := savedConfig.VideoConfig["endpoint"]; v != "" {
+						hasMeaningfulValues = true
+					}
+					if v := savedConfig.VideoConfig["base_url"]; v != "" {
+						hasMeaningfulValues = true
+					}
+					if v := savedConfig.VideoConfig["api_key"]; v != "" {
+						hasMeaningfulValues = true
+					}
+				}
+				if savedConfig.EncryptedVideoConfig != nil && savedConfig.EncryptedVideoConfig["api_key"] != "" {
+					hasMeaningfulValues = true
+				}
+				if len(savedConfig.VideoModelProviders) > 0 {
+					hasMeaningfulValues = true
+				}
+				if len(savedConfig.VideoModels) > 0 {
+					hasMeaningfulValues = true
+				}
+
 				if hasMeaningfulValues {
 					// 合并配置，保留文件中的LLM设置，但使用最新的基础配置
 					savedConfig.Port = baseConfig.Port
@@ -564,6 +688,24 @@ func InitConfig(dataDir string) error {
 					if savedConfig.VisionModels == nil {
 						savedConfig.VisionModels = []VisionModelInfo{}
 					}
+					if savedConfig.VideoProvider == "" {
+						savedConfig.VideoProvider = "dashscope"
+					}
+					if savedConfig.VideoDefaultModel == "" {
+						savedConfig.VideoDefaultModel = "wan2.6-i2v-flash"
+					}
+					if savedConfig.VideoConfig == nil {
+						savedConfig.VideoConfig = make(map[string]string)
+					}
+					if savedConfig.EncryptedVideoConfig == nil {
+						savedConfig.EncryptedVideoConfig = make(map[string]string)
+					}
+					if savedConfig.VideoModelProviders == nil {
+						savedConfig.VideoModelProviders = make(map[string]string)
+					}
+					if savedConfig.VideoModels == nil {
+						savedConfig.VideoModels = []VideoModelInfo{}
+					}
 
 					// Handle backward compatibility with unencrypted Vision API keys in old configs.
 					if savedConfig.VisionConfig != nil {
@@ -579,6 +721,22 @@ func InitConfig(dataDir string) error {
 								utils.GetLogger().Info("配置: 加密已禁用，Vision API密钥将以明文形式存储", nil)
 							}
 							delete(savedConfig.VisionConfig, "api_key")
+						}
+					}
+
+					if savedConfig.VideoConfig != nil {
+						if apiKey := savedConfig.VideoConfig["api_key"]; apiKey != "" {
+							if isEncryptionEnabled() {
+								if err := savedConfig.setEncryptedVideoAPIKey(apiKey); err != nil {
+									utils.GetLogger().Warn("无法加密旧配置中的Video API密钥", map[string]interface{}{"err": err})
+									utils.GetLogger().Info("建议通过设置页面重新配置Video API密钥", nil)
+								} else {
+									utils.GetLogger().Info("已自动将旧配置中的Video API密钥升级为加密存储", nil)
+								}
+							} else {
+								utils.GetLogger().Info("配置: 加密已禁用，Video API密钥将以明文形式存储", nil)
+							}
+							delete(savedConfig.VideoConfig, "api_key")
 						}
 					}
 
@@ -623,6 +781,7 @@ func GetCurrentConfig() *AppConfig {
 			LLMConfig:             make(map[string]string),
 			EncryptedLLMConfig:    make(map[string]string),
 			EncryptedVisionConfig: make(map[string]string),
+			EncryptedVideoConfig:  make(map[string]string),
 			VisionProvider:        "placeholder",
 			VisionDefaultModel:    "placeholder",
 			VisionConfig:          make(map[string]string),
@@ -643,6 +802,23 @@ func GetCurrentConfig() *AppConfig {
 				{Key: "midjourney", Label: "midjourney", Provider: "", SupportsReferenceImage: false},
 				{Key: "placeholder", Label: "Placeholder", Provider: "placeholder", SupportsReferenceImage: false},
 			},
+			VideoProvider:     "dashscope",
+			VideoDefaultModel: "wan2.6-i2v-flash",
+			VideoConfig:       make(map[string]string),
+			VideoModelProviders: map[string]string{
+				"wan2.6-i2v-flash":        "dashscope",
+				"kling-v3":                "kling",
+				"veo-2":                   "google",
+				"veo-2-vertex":            "vertex",
+				"doubao-seedance-1-5-pro": "ark",
+			},
+			VideoModels: []VideoModelInfo{
+				{Key: "wan2.6-i2v-flash", Label: "wan2.6-i2v-flash", Provider: "dashscope", SupportsImageConditioned: true},
+				{Key: "kling-v3", Label: "kling-v3", Provider: "kling", SupportsImageConditioned: true},
+				{Key: "veo-2", Label: "veo-2", Provider: "google", SupportsImageConditioned: true},
+				{Key: "veo-2-vertex", Label: "veo-2-vertex", Provider: "vertex", SupportsImageConditioned: true},
+				{Key: "doubao-seedance-1-5-pro", Label: "doubao-seedance-1-5-pro", Provider: "ark", SupportsImageConditioned: true},
+			},
 		}
 
 		// Set encrypted API key if available
@@ -659,6 +835,7 @@ func GetCurrentConfig() *AppConfig {
 	configCopy.LLMConfig = currentConfig.getLLMConfig()
 	// Return a copy with decrypted Vision config.
 	configCopy.VisionConfig = currentConfig.getVisionConfig()
+	configCopy.VideoConfig = currentConfig.getVideoConfig()
 	if currentConfig.VisionModelProviders != nil {
 		configCopy.VisionModelProviders = make(map[string]string, len(currentConfig.VisionModelProviders))
 		for k, v := range currentConfig.VisionModelProviders {
@@ -668,6 +845,16 @@ func GetCurrentConfig() *AppConfig {
 	if currentConfig.VisionModels != nil {
 		configCopy.VisionModels = make([]VisionModelInfo, len(currentConfig.VisionModels))
 		copy(configCopy.VisionModels, currentConfig.VisionModels)
+	}
+	if currentConfig.VideoModelProviders != nil {
+		configCopy.VideoModelProviders = make(map[string]string, len(currentConfig.VideoModelProviders))
+		for k, v := range currentConfig.VideoModelProviders {
+			configCopy.VideoModelProviders[k] = v
+		}
+	}
+	if currentConfig.VideoModels != nil {
+		configCopy.VideoModels = make([]VideoModelInfo, len(currentConfig.VideoModels))
+		copy(configCopy.VideoModels, currentConfig.VideoModels)
 	}
 	return &configCopy
 }
@@ -712,6 +899,35 @@ func validateVisionConfig(provider string, cfg map[string]string) error {
 		return nil
 	default:
 		return fmt.Errorf("不支持的vision提供商: %s", provider)
+	}
+}
+
+func validateVideoProvider(provider string) error {
+	supported := []string{"mock", "dashscope", "kling", "google", "vertex", "ark"}
+	if slices.Contains(supported, provider) {
+		return nil
+	}
+	return fmt.Errorf("不支持的video提供商: %s", provider)
+}
+
+func validateVideoConfig(provider string, cfg map[string]string) error {
+	switch provider {
+	case "mock":
+		return nil
+	case "dashscope", "kling", "google", "vertex", "ark":
+		endpoint := ""
+		if cfg != nil {
+			endpoint = cfg["endpoint"]
+			if endpoint == "" {
+				endpoint = cfg["base_url"]
+			}
+		}
+		if endpoint == "" {
+			return fmt.Errorf("%s video 需要 endpoint", provider)
+		}
+		return nil
+	default:
+		return fmt.Errorf("不支持的video提供商: %s", provider)
 	}
 }
 
@@ -808,6 +1024,84 @@ func UpdateVisionConfig(provider string, visionCfg map[string]string, defaultMod
 	return SaveConfig()
 }
 
+func UpdateVideoConfig(provider string, videoCfg map[string]string, defaultModel string, modelProviders map[string]string, models []VideoModelInfo) error {
+	configMutex.Lock()
+	defer configMutex.Unlock()
+
+	if currentConfig == nil {
+		return fmt.Errorf("配置系统未初始化")
+	}
+	if provider == "" {
+		return fmt.Errorf("video provider 不能为空")
+	}
+	if err := validateVideoProvider(provider); err != nil {
+		return err
+	}
+
+	newVideoCfg := make(map[string]string)
+	for k, v := range videoCfg {
+		newVideoCfg[k] = v
+	}
+	newVideoKey, hasNewKey := newVideoCfg["api_key"]
+	if !hasNewKey || newVideoKey == "" {
+		if currentConfig.VideoProvider == provider {
+			if existing := currentConfig.getDecryptedVideoAPIKey(); existing != "" {
+				newVideoCfg["api_key"] = existing
+			}
+		}
+	}
+	newModelProviders := make(map[string]string)
+	for k, v := range modelProviders {
+		newModelProviders[k] = v
+	}
+	newModels := make([]VideoModelInfo, len(models))
+	copy(newModels, models)
+
+	if err := validateVideoConfig(provider, newVideoCfg); err != nil {
+		return err
+	}
+	if defaultModel == "" {
+		switch provider {
+		case "kling":
+			defaultModel = "kling-v3"
+		case "google":
+			defaultModel = "veo-2"
+		case "vertex":
+			defaultModel = "veo-2-vertex"
+		case "ark":
+			defaultModel = "doubao-seedance-1-5-pro"
+		default:
+			defaultModel = "wan2.6-i2v-flash"
+		}
+	}
+	if defaultModel != "" {
+		if _, ok := newModelProviders[defaultModel]; !ok {
+			newModelProviders[defaultModel] = provider
+		}
+	}
+
+	currentConfig.VideoProvider = provider
+	currentConfig.VideoDefaultModel = defaultModel
+	currentConfig.VideoConfig = make(map[string]string)
+	for k, v := range newVideoCfg {
+		if k == "api_key" {
+			if v == "" {
+				continue
+			}
+			if err := currentConfig.setEncryptedVideoAPIKey(v); err != nil {
+				return fmt.Errorf("failed to %s Video API key: %w",
+					map[bool]string{true: "encrypt", false: "store"}[isEncryptionEnabled()], err)
+			}
+			continue
+		}
+		currentConfig.VideoConfig[k] = v
+	}
+	currentConfig.VideoModelProviders = newModelProviders
+	currentConfig.VideoModels = newModels
+
+	return SaveConfig()
+}
+
 // UpdateLLMConfig 更新LLM配置
 func UpdateLLMConfig(provider string, config map[string]string) error {
 	configMutex.Lock()
@@ -897,7 +1191,7 @@ func UpdateFullConfig(provider string, llmConfig map[string]string, encryptedLLM
 func validateLLMProvider(provider string) error {
 	supportedProviders := []string{
 		"openai", "anthropic", "google", "githubmodels", "grok",
-		"mistral", "qwen", "glm", "deepseek", "openrouter",
+		"mistral", "qwen", "glm", "deepseek", "openrouter", "nvidia",
 	}
 
 	if slices.Contains(supportedProviders, provider) {
@@ -962,6 +1256,9 @@ func SaveConfig() error {
 	// Extra safety: avoid persisting Vision api_key in plaintext when encryption is enabled.
 	if isEncryptionEnabled() && configToSave.VisionConfig != nil {
 		delete(configToSave.VisionConfig, "api_key")
+	}
+	if isEncryptionEnabled() && configToSave.VideoConfig != nil {
+		delete(configToSave.VideoConfig, "api_key")
 	}
 
 	// 序列化并保存
