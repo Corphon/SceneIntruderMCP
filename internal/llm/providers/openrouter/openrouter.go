@@ -19,12 +19,10 @@ func init() {
 	llm.Register("openrouter", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"mistralai/devstral-2512:free",
-				"kwaipilot/kat-coder-pro:free",
-				"qwen/qwen3-coder:free",
-				"qwen/qwen3-235b-a22b:free",
-				"amazon/nova-2-lite-v1:free",
-				"nousresearch/hermes-3-llama-3.1-405b:free",
+				"Qwen: Qwen3.6 Plus Preview (free)",
+				"nvidia/nemotron-3-super-120b-a12b:free",
+				"arcee-ai/trinity-large-preview:free",
+				"stepfun/step-3.5-flash:free",
 			},
 			baseURL: "https://openrouter.ai/api/v1",
 		}
@@ -161,6 +159,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("openrouter", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -194,11 +193,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("openrouter", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -281,6 +279,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("openrouter", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -314,11 +313,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("openrouter", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
