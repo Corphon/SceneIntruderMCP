@@ -1,125 +1,284 @@
 # SceneIntruderMCP 部署指南
 
-本文档以“当前代码实际行为”为准，说明后端启动、静态资源加载、配置/密钥、反向代理注意事项。
+本文档描述当前项目真实可用的部署方式，而不是早期设想中的简化版本。
 
-截至 v2.0.0，部署产物已同时包含三类前端工作区：互动场景、comics 5-step 工作台，以及 New Script 写作助手；整体仍然是“单个 Go 后端 + 单个 SPA 前端 bundle”的部署模型。
+## 部署模型
+
+当前应用的部署形态是：
+
+- **一个 Go 服务端二进制**
+- 提供 **一个 React SPA 构建产物**
+- 数据持久化落在 `data/` 目录
+
+服务同时暴露：
+
+- `/api` 下的 REST API
+- `/api/progress/:taskID` 的 SSE 进度流
+- `/ws/*` 下的原生 WebSocket
+- `/`、`/settings`、`/scripts`、`/scenes/:id/comic`、`/scenes/:id/comic/video` 等 SPA 路由
 
 ## 系统要求
 
-- Go 1.21+
-- Node.js 18+（仅在需要构建前端时需要）
+最低实用要求：
 
-## 快速启动（开发环境）
+- Go 1.21+
+- Node.js 18+（仅构建前端时需要）
+- npm 9+
+- 可写的 `data/` 与 `logs/` 目录
+
+生产环境建议：
+
+- Linux 主机或容器环境
+- 带 TLS 的反向代理
+- 为 `data/` 与 `logs/` 提供持久卷
+
+## 构建与启动顺序
+
+### 1. 安装后端依赖
 
 ```bash
 go mod download
-go run ./cmd/server
 ```
 
-默认地址：`http://localhost:8080`
-
-启动后建议至少检查以下路由是否可访问：
-
-- `/` —— 首页 / scenes
-- `/settings` —— LLM + Vision 设置
-- `/scripts` —— New Script 工作区
-- `/scenes/:id/comic` —— comics 5-step 工作流
-
-## 前端静态资源（Go 服务如何提供）
-
-Go 服务以 SPA 方式提供前端：
-
-- `STATIC_DIR` 目录通过 `/assets` 与 `/static` 暴露
-- `TEMPLATES_DIR/index.html` 作为 SPA 入口
-
-启动时会检查 `frontend/dist`：
-
-- 若存在，会把 `frontend/dist/assets` 同步到 `STATIC_DIR`（如果不是同一路径）
-- 会将 `frontend/dist/index.html` 写入 `TEMPLATES_DIR/index.html`
-
-若日志提示未找到 `frontend/dist`，请先构建前端：
+### 2. 构建前端资源
 
 ```bash
 cd frontend
 npm install
 npm run build
+cd ..
 ```
 
-## 配置
+### 3. 启动服务
 
-配置分两层：
+```bash
+go run ./cmd/server
+```
 
-1) **环境变量**（启动时读取）
-2) **持久化配置文件** `${DATA_DIR}/config.json`（默认：`data/config.json`）
+或直接构建二进制：
 
-首次启动时会初始化并保存 `data/config.json`。
+```bash
+go build -o sceneintruder ./cmd/server
+./sceneintruder
+```
 
-### 常用环境变量
+默认端口：`8080`
 
-- `PORT`（默认 `8080`）
-- `DATA_DIR`（默认 `data`）
-- `LOG_DIR`（默认 `logs`）
-- `STATIC_DIR`（默认 `frontend/dist/assets`）
-- `TEMPLATES_DIR`（默认 `frontend/dist`）
-- `DEBUG_MODE`（默认 `true`）
+## 静态资源如何提供
 
-### 生产环境常见 provider 凭据回退
+Go 服务会从配置目录提供 SPA：
 
-后端支持优先从环境变量读取 provider 凭据，适合不希望将密钥持久化写入 `data/config.json` 的部署方式。
+- `STATIC_DIR` → 挂载到 `/assets` 与 `/static`
+- `TEMPLATES_DIR/index.html` → SPA 入口文件
 
-- LLM 示例：`OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`DEEPSEEK_API_KEY`、`GROK_API_KEY`、`GITHUB_TOKEN` 等
-- GLM 图像示例：`GLM_API_KEY`、`BIGMODEL_API_KEY`、`ZHIPUAI_API_KEY`
+默认值指向前端构建产物：
 
-v2.0.0 出图链路最常见的持久化 Vision 字段包括：
+- `STATIC_DIR=frontend/dist/assets`
+- `TEMPLATES_DIR=frontend/dist`
 
-- `vision_provider`
-- `vision_default_model`
-- `vision_config.endpoint`
-- `vision_config.api_key`
+如果 `frontend/dist` 不存在，后端虽然还能启动，但浏览器端 UI 将无法正常使用。
 
-若使用 GLM Image，推荐值为：
+## 运行时配置
 
-- provider：`glm`
-- 默认模型：`glm-image`
-- endpoint：`https://open.bigmodel.cn/api/paas/v4`
+配置来源有两层：
 
-### LLM 凭据加密
+1. 环境变量
+2. 持久化配置文件 `data/config.json`
 
-配置文件会将 LLM API Key 以 AES-GCM 加密后存储在 `encrypted_llm_config.api_key`。
+重要环境变量：
 
-- 生产环境建议设置 `CONFIG_ENCRYPTION_KEY`（至少 32 字符）
-- 开发环境：若未设置 `CONFIG_ENCRYPTION_KEY` 且 `DEBUG_MODE=true`，会生成持久化密钥并写入 `data/.encryption_key`
-- 可通过 `DISABLE_CONFIG_ENCRYPTION=true` 禁用加密（不推荐）
+- `PORT`
+- `DATA_DIR`
+- `LOG_DIR`
+- `STATIC_DIR`
+- `TEMPLATES_DIR`
+- `DEBUG_MODE`
+- `AUTH_SECRET_KEY`
+- `CONFIG_ENCRYPTION_KEY`
+- `DISABLE_CONFIG_ENCRYPTION`
+- `ALLOWED_ORIGIN`
 
-请妥善保管 `data/.encryption_key`。删除或变更该文件会导致旧的加密 API Key 无法解密，需要重新配置。
+## 密钥与加密
 
-## 认证（生产环境）
+### API 凭据存储
 
-生产环境建议设置 `AUTH_SECRET_KEY` 以保证 Token 签名稳定且安全。
+provider 凭据设计上应保存在 `data/config.json` 中，但默认采用加密存储。
 
-- Token 默认 24 小时过期。
+生产环境建议：
 
-## 反向代理注意事项（Nginx/Caddy）
+- 设置 `CONFIG_ENCRYPTION_KEY`
+- 不要设置 `DISABLE_CONFIG_ENCRYPTION`
 
-本项目的 WebSocket 为 **原生 WebSocket**：
+开发环境回退：
 
-- `/ws/scene/:id`
-- `/ws/user/status`
+- 若 `CONFIG_ENCRYPTION_KEY` 未设置且 `DEBUG_MODE=true`，系统会自动生成 `data/.encryption_key`
 
-前端的长任务进度还依赖 **SSE**：
+运维规则：
 
-- `/api/progress/:taskID`
+- `data/.encryption_key` 必须与 `data/config.json` 一起备份
 
-反代时请避免对 SSE 响应做激进缓冲，否则 comics / scripts 的进度更新会明显滞后。
+如果密钥文件丢失或变化，旧的加密 API Key 将无法解密。
 
-反代时需确保：
+### 鉴权密钥
 
-- 转发 WebSocket Upgrade 相关头
-- `Host`/`Origin` 保持一致（服务端会校验 Origin，同源是最安全的默认）
+生产环境必须设置 `AUTH_SECRET_KEY`。
 
-若由反向代理终止 TLS，请使用 `wss://` 访问。
+否则 token 签名无法视为稳定和安全。
 
-另外，comics 参考图上传走 multipart，请确认代理层允许足够的上传体积。
+## Provider 部署说明
+
+### LLM
+
+当前文档所承认的后端正式支持 provider：
+
+- `openai`
+- `anthropic`
+- `google`
+- `deepseek`
+- `qwen`
+- `mistral`
+- `grok`
+- `glm`
+- `githubmodels`
+- `openrouter`
+- `nvidia`
+
+NVIDIA 默认配置：
+
+- base URL：`https://integrate.api.nvidia.com/v1`
+- 默认模型：`moonshotai/kimi-k2.5`
+
+结构化分析安全说明：
+
+- LLM 层默认关闭 reasoning / thinking
+- Google、Qwen、NVIDIA 会自动注入 provider 级默认抑制参数
+
+### Vision
+
+当前支持：
+
+- `placeholder`
+- `sdwebui`
+- `dashscope`
+- `gemini`
+- `ark`
+- `openai`
+- `glm`
+
+生产环境建议：
+
+- 配好 `vision_provider`、`vision_default_model`、`vision_config.endpoint`
+- 不要只依赖 `test-connection`，应实际发起一次出图验证
+
+### Video
+
+当前支持：
+
+- `dashscope`
+- `kling`
+- `google`
+- `vertex`
+- `ark`
+- `mock`
+
+重要说明：
+
+- 某些视频 provider 需要公网可访问的参考图 URL
+- 因此对外部署时通常必须设置 `video_config.public_base_url`
+
+常用视频配置键：
+
+- `endpoint`
+- `api_key`
+- `public_base_url`
+- `clip_retry_count`
+- `fallback_compose`
+
+## 反向代理要求
+
+若前面使用 Nginx、Caddy 或其他反代，需要保证：
+
+- `/api/progress/:taskID` 的 **SSE 流式响应**
+- `/ws/scene/:id`、`/ws/user/status` 的 **WebSocket Upgrade**
+
+反代检查清单：
+
+- 不要对 SSE 做激进缓冲
+- 正确转发 `Upgrade` / `Connection` 头
+- 保持 `Host` 与 `Origin`
+- 允许 comics 参考图 multipart 上传
+
+若 TLS 在代理层终止：
+
+- 浏览器端 WebSocket 应使用 `wss://`
+- 同时正确设置 `ALLOWED_ORIGIN`
+
+## 建议目录布局
+
+```text
+/opt/sceneintruder/
+  sceneintruder
+  frontend/dist/
+  data/
+    config.json
+    .encryption_key
+    comics/
+    scenes/
+    scripts/
+    stories/
+    users/
+    exports/
+  logs/
+```
+
+## 备份优先级
+
+这些路径建议一起备份：
+
+- `data/config.json`
+- `data/.encryption_key`
+- `data/scenes`
+- `data/stories`
+- `data/comics`
+- `data/scripts`
+- `data/users`
+
+通常可丢弃：
+
+- `temp/`
+- 已经有外部采集的瞬时日志
+
+## 发布前检查清单
+
+发布前至少执行：
+
+1. `go test ./...`
+2. `cd frontend && npm test && npm run lint && npm run build`
+3. 确认 `frontend/dist` 已生成
+4. 确认 `AUTH_SECRET_KEY` 与 `CONFIG_ENCRYPTION_KEY`
+5. 若开放 Video Studio，确认 `video_config.public_base_url`
+6. 在 Settings 中确认至少一个可用 LLM provider
+
+## 生产环境首轮冒烟验证
+
+启动后建议至少验证：
+
+- `/`
+- `/settings`
+- `/scripts`
+- `/api/settings`
+- `/api/llm/status`
+- 任意一条 `/api/progress/:taskID` SSE 链路
+- 任意一个 `/api/scenes/:id/comic/images/:frameID` 图片直出
+
+若对外开放 Video Studio，还应验证：
+
+- `/scenes/:id/comic/video`
+- `/api/scenes/:id/comic/video`
+
+## 本文档不做的事
+
+本文档不强行规定 Docker、Kubernetes 或某个云厂商专属脚本。以当前代码形态看，本项目最准确的部署表述仍然是：**Go 后端 + SPA 构建产物 + 本地持久化存储 + 可选反向代理**。
 
 <!--
 
