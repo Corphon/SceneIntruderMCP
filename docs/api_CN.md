@@ -1,115 +1,58 @@
 # SceneIntruderMCP API 文档
 
-本文档描述后端提供的 HTTP API 与 WebSocket 接口（以代码实现为准）。
+本文档只描述当前代码里真实存在的 API 面，而不是早期规划中的理想接口集。
 
 - REST Base URL：`http://localhost:8080/api`
 - WebSocket：`ws://localhost:8080/ws`
 
-## 身份验证
+## 通用约定
 
-### 登录
+### 身份验证
 
-通过 `POST /api/auth/login` 获取 Bearer Token。
+- 登录：`POST /api/auth/login`
+- 登出：`POST /api/auth/logout`
+- 请求头：`Authorization: Bearer <token>`
 
-请求：
+许多 scene 相关接口仍支持 guest 降级：当 token 缺失或无效时，后端常会回退为 `console_user`，而不是直接拒绝。
 
-```http
-POST /api/auth/login
-Content-Type: application/json
+主要例外：
 
-{
-  "username": "admin",
-  "password": "admin"
-}
-```
+- `/api/users/:user_id/...` 要求登录且校验归属
+- `/api/scripts/*` 要求登录
+- 部分写接口使用更严格的认证中间件
 
-响应（200）：
+### 响应结构
 
-```json
-{
-  "success": true,
-  "data": {
-    "token": "...",
-    "user_id": "admin"
-  },
-  "message": "登录成功",
-  "timestamp": "2025-01-01T00:00:00Z"
-}
-```
-
-### 使用 Token
-
-请求头携带：
-
-```http
-Authorization: Bearer <token>
-```
-
-### 访客模式（guest）降级
-
-当未携带或携带无效 `Authorization` 时，多数接口会以访客模式继续执行，并将 `user_id` 视为 `console_user`。
-
-例外：
-
-- `/api/users/:user_id/...` 用户资源接口要求已登录且 `:user_id` 必须与 Token 中的用户一致（访客仅允许访问 `console_user`）。
-- 一些敏感操作显式使用 `AuthMiddleware()` 保护。
-
-### 生产环境安全建议
-
-- 生产环境请设置 `AUTH_SECRET_KEY`（至少 32 字节；更长会截断为 32 字节）。
-- Token 有效期为 24 小时。
-
-## 限流
-
-`/api` 下启用限流，并会返回以下响应头：
-
-- `X-RateLimit-Limit`
-- `X-RateLimit-Remaining`
-- `X-RateLimit-Reset`（unix 时间戳）
-
-限流策略：
-
-- 默认（所有 `/api/*`）：100 次/分钟/IP
-- Chat + interactions：30 次/分钟/用户键（优先取 `X-User-ID`；缺失则回退到 IP）
-- upload + analyze：10 次/小时/用户键（优先取 `X-User-ID`；缺失则回退到 IP）
-
-## 通用响应格式
-
-多数 REST 接口使用统一结构：
+多数接口使用统一包裹结构：
 
 ```json
 {
   "success": true,
   "data": {},
   "message": "...",
-  "timestamp": "2025-01-01T00:00:00Z",
+  "timestamp": "...",
   "request_id": "..."
 }
 ```
 
-错误响应通常为：
+### 长任务
 
-```json
-{
-  "success": false,
-  "error": {
-    "code": "BAD_REQUEST",
-    "message": "...",
-    "details": "..."
-  },
-  "timestamp": "2025-01-01T00:00:00Z",
-  "request_id": "..."
-}
-```
+分析、生成、导出中的很多链路都是异步任务，基本模式是：
 
-少数旧路径可能直接返回 `{"error": "..."}`。该行为正在逐步收敛到统一 `APIResponse`。
+1. 发起任务
+2. 返回 `task_id`
+3. 订阅 `GET /api/progress/:taskID`
+4. 再通过对应 `GET` 接口读取最终结果
 
-## REST 接口清单
+SSE 入口：
 
-### Auth
+- `GET /api/progress/:taskID`
 
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
+### 限流
+
+`/api` 全局启用限流；其中 chat / interactions、upload / analyze 组会比普通接口更严格。
+
+## 配置与设置接口
 
 ### Settings
 
@@ -117,13 +60,37 @@ Authorization: Bearer <token>
 - `POST /api/settings`
 - `POST /api/settings/test-connection`
 
-### LLM
+说明：
+
+- `GET /api/settings` 是前端获取 `llm_provider`、`vision_provider`、`video_provider`、`vision_models`、`video_models` 的主要事实来源。
+- `POST /api/settings/test-connection` 当前只验证 **LLM 连通性**。
+
+### LLM 配置
 
 - `GET /api/llm/status`
 - `GET /api/llm/models?provider=<provider>`
 - `PUT /api/llm/config`
 
-### Scenes
+当前后端正式支持的 LLM provider 名称：
+
+- `openai`
+- `anthropic`
+- `google`
+- `deepseek`
+- `qwen`
+- `mistral`
+- `grok`
+- `glm`
+- `githubmodels`
+- `openrouter`
+- `nvidia`
+
+## Auth 接口
+
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+
+## Scene 接口
 
 - `GET /api/scenes`
 - `POST /api/scenes`
@@ -135,53 +102,198 @@ Authorization: Bearer <token>
 - `GET /api/scenes/:id/nodes/:node_id/content`
 - `GET /api/scenes/:id/aggregate`
 
-#### v2 Comics（分镜 / 提示词 / 关键元素）
+## Scene 物品接口
 
-这些接口用于启动异步任务（返回 202 + `task_id`），并在任务完成后读取落盘结果。进度请订阅 `GET /api/progress/:taskID`（SSE）。
+- `GET /api/scenes/:id/items`
+- `POST /api/scenes/:id/items`
+- `GET /api/scenes/:id/items/:item_id`
+- `PUT /api/scenes/:id/items/:item_id`
+- `DELETE /api/scenes/:id/items/:item_id`
 
-v2.0.0 新增的 standalone comics 典型流程为：
+## Story 接口
 
-1. 先通过 `POST /api/scenes/shell` 创建一个空的 comics 工作区
-2. 前端跳转到 `/scenes/:id/comic?entry=comic_standalone`
-3. 再通过 `source_text` 启动分镜分析，而不是依赖已有 story node
+- `GET /api/scenes/:id/story`
+- `POST /api/scenes/:id/story/choice`
+- `POST /api/scenes/:id/story/advance`
+- `POST /api/scenes/:id/story/command`
+- `POST /api/scenes/:id/story/nodes/:node_id/insert`
+- `POST /api/scenes/:id/story/rewind`
+- `GET /api/scenes/:id/story/branches`
+- `GET /api/scenes/:id/story/choices`
+- `POST /api/scenes/:id/story/batch`
+- `POST /api/scenes/:id/story/tasks/:task_id/objectives/:objective_id/complete`
+- `POST /api/scenes/:id/story/locations/:location_id/unlock`
+- `POST /api/scenes/:id/story/locations/:location_id/explore`
 
-- `POST /api/scenes/:id/comic/analysis` — 启动分镜分析（落盘 `data/comics/scene_<id>/analysis.json`）
-- `GET /api/scenes/:id/comic/analysis` — 读取分镜分析结果
-- `POST /api/scenes/:id/comic/prompts` — 启动每帧提示词生成（落盘 `data/comics/scene_<id>/prompts/*.json`）
-- `GET /api/scenes/:id/comic/prompts` — 读取所有帧提示词
-- `POST /api/scenes/:id/comic/key_elements` — 启动关键元素提取（落盘 `data/comics/scene_<id>/key_elements.json`）
-- `GET /api/scenes/:id/comic/key_elements` — 读取关键元素
-- `POST /api/scenes/:id/comic/references` — 上传参考图（multipart；落盘 `data/comics/scene_<id>/references/*` + `references/index.json`）
-- `POST /api/scenes/:id/comic/generate` — 启动图片生成（异步；落盘 `data/comics/scene_<id>/images/*.png`）
-- `POST /api/scenes/:id/comic/frames/:frameID/regenerate` — 单帧重绘（异步）
-- `GET /api/scenes/:id/comic/images/:frameID` — 获取单帧 PNG 图片（用于前端预览；读取 `data/comics/scene_<id>/images/<frameID>.png`）
-- `GET /api/scenes/:id/comic` — comics 概览（是否有分析/提示词/关键元素，参考图数量、图片数量等）
-- `GET /api/scenes/:id/comic/export?format=zip|html` — 导出下载（ZIP/HTML）
+## Comics 接口
 
-说明：
+基础前缀：`/api/scenes/:id/comic`
 
-- 这些路由使用 `RequireAuthForScene()` 保护。
-  - 未携带/携带无效 `Authorization` 时，通常会按 guest 模式继续执行。
-  - 若携带有效 token，中间件可能会额外校验场景是否存在（未来也可扩展为校验归属/权限）。
-- 若希望以“已登录用户”身份调用，可额外添加请求头：`-H "Authorization: Bearer <token>"`
+- `GET /api/scenes/:id/comic`
+- `DELETE /api/scenes/:id/comic`
+- `GET /api/scenes/:id/comic/export?format=zip|html`
+- `POST /api/scenes/:id/comic/analysis`
+- `GET /api/scenes/:id/comic/analysis`
+- `PUT /api/scenes/:id/comic/analysis`
+- `POST /api/scenes/:id/comic/prompts`
+- `GET /api/scenes/:id/comic/prompts`
+- `PUT /api/scenes/:id/comic/prompts/:frameID`
+- `POST /api/scenes/:id/comic/key_elements`
+- `GET /api/scenes/:id/comic/key_elements`
+- `PUT /api/scenes/:id/comic/key_elements`
+- `POST /api/scenes/:id/comic/references`
+- `GET /api/scenes/:id/comic/references`
+- `GET /api/scenes/:id/comic/references/:elementID/image`
+- `DELETE /api/scenes/:id/comic/references/:elementID`
+- `POST /api/scenes/:id/comic/generate`
+- `POST /api/scenes/:id/comic/frames/generate`
+- `POST /api/scenes/:id/comic/frames/:frameID/regenerate`
+- `GET /api/scenes/:id/comic/images/:frameID`
 
-可复制 curl 示例（替换占位符）：
+## Video 接口
 
-启动分镜分析（返回 202 + `task_id`）：
+基础前缀：`/api/scenes/:id/comic/video`
+
+- `POST /api/scenes/:id/comic/video/timeline`
+- `GET /api/scenes/:id/comic/video/timeline`
+- `PUT /api/scenes/:id/comic/video/frames/:frameID`
+- `POST /api/scenes/:id/comic/video/generate`
+- `POST /api/scenes/:id/comic/video/frames/:frameID/regenerate`
+- `GET /api/scenes/:id/comic/video`
+- `DELETE /api/scenes/:id/comic/video`
+- `GET /api/scenes/:id/comic/video/clips/:frameID/asset`
+- `GET /api/scenes/:id/comic/video/render`
+- `GET /api/scenes/:id/comic/video/export?format=zip|html`
+
+运行时说明：
+
+- 某些视频 provider 需要可访问的参考图 URL，因此部署时通常需要配置 `video_config.public_base_url`。
+
+## Scripts 接口
+
+基础前缀：`/api/scripts`
+
+- `GET /api/scripts`
+- `POST /api/scripts`
+- `PUT /api/scripts/:id`
+- `DELETE /api/scripts/:id`
+- `GET /api/scripts/:id`
+- `GET /api/scripts/:id/characters`
+- `PUT /api/scripts/:id/characters`
+- `GET /api/scripts/:id/items`
+- `PUT /api/scripts/:id/items`
+- `PUT /api/scripts/:id/chapter_draft`
+- `PUT /api/scripts/:id/draft`
+- `POST /api/scripts/:id/generate`
+- `POST /api/scripts/:id/command`
+- `POST /api/scripts/:id/rewind`
+- `GET /api/scripts/:id/export?format=json|markdown|txt|html`
+
+## Chat 与互动接口
+
+- `POST /api/chat`
+- `POST /api/chat/emotion`
+- `POST /api/interactions/trigger`
+- `POST /api/interactions/simulate`
+- `POST /api/interactions/aggregate`
+- `GET /api/interactions/:scene_id`
+- `GET /api/interactions/:scene_id/:character1_id/:character2_id`
+
+## 上传 / 分析 / 取消接口
+
+- `POST /api/upload`
+- `POST /api/analyze`
+- `GET /api/progress/:taskID`
+- `POST /api/cancel/:taskID`
+
+## 导出接口
+
+- `GET /api/scenes/:id/export/scene`
+- `GET /api/scenes/:id/export/interactions`
+- `GET /api/scenes/:id/export/story`
+
+## 用户接口
+
+基础前缀：`/api/users/:user_id`
+
+- `GET /api/users/:user_id`
+- `PUT /api/users/:user_id`
+- `GET /api/users/:user_id/preferences`
+- `PUT /api/users/:user_id/preferences`
+- `GET /api/users/:user_id/items`
+- `POST /api/users/:user_id/items`
+- `GET /api/users/:user_id/items/:item_id`
+- `PUT /api/users/:user_id/items/:item_id`
+- `DELETE /api/users/:user_id/items/:item_id`
+- `GET /api/users/:user_id/skills`
+- `POST /api/users/:user_id/skills`
+- `GET /api/users/:user_id/skills/:skill_id`
+- `PUT /api/users/:user_id/skills/:skill_id`
+- `DELETE /api/users/:user_id/skills/:skill_id`
+
+## 配置与运维接口
+
+- `GET /api/config/health`
+- `GET /api/config/metrics`
+- `GET /api/ws/status`
+- `POST /api/ws/cleanup`
+
+## WebSocket 接口
+
+- `GET /ws/scene/:id`
+- `GET /ws/user/status`
+
+后端使用的是原生 Gorilla WebSocket，而不是 Socket.IO。
+
+## 实用示例
+
+### 获取设置
+
+```bash
+curl -sS http://localhost:8080/api/settings
+```
+
+### 发起 standalone comic 分镜分析
 
 ```bash
 curl -sS -X POST \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" \
   http://localhost:8080/api/scenes/<scene_id>/comic/analysis \
-  -d '{}'
+  -d '{"source_text":"侦探走进废弃车站，在停摆的时钟下发现了第一条线索。","target_frames":6}'
 ```
 
-订阅进度（SSE），直到 `status=completed/failed`（然后服务端会关闭连接）：
+### 订阅进度
 
 ```bash
-curl -N \
-  -H "Accept: text/event-stream" \
+curl -N -H "Accept: text/event-stream" \
   http://localhost:8080/api/progress/<task_id>
+```
+
+### 保存 NVIDIA + GLM + DashScope Video 设置
+
+```json
+{
+  "llm_provider": "nvidia",
+  "llm_config": {
+    "api_key": "***",
+    "base_url": "https://integrate.api.nvidia.com/v1",
+    "default_model": "moonshotai/kimi-k2.5"
+  },
+  "vision_provider": "glm",
+  "vision_default_model": "glm-image",
+  "vision_config": {
+    "endpoint": "https://open.bigmodel.cn/api/paas/v4",
+    "api_key": "***"
+  },
+  "video_provider": "dashscope",
+  "video_default_model": "wan2.6-i2v-flash",
+  "video_config": {
+    "endpoint": "https://dashscope.aliyuncs.com/api/v1",
+    "api_key": "***",
+    "public_base_url": "https://your-domain.example"
+  }
+}
 ```
 
 读取落盘结果：
