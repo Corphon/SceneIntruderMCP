@@ -10,8 +10,11 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -131,6 +134,806 @@ func (h *Handler) StartComicAnalysis(c *gin.Context) {
 	}
 
 	h.Response.Accepted(c, gin.H{"task_id": taskID}, "分镜分析任务已受理")
+}
+
+func (h *Handler) BuildComicVideoTimeline(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	var req videoConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		h.Response.BadRequest(c, "视频 timeline 入参格式错误")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		h.Response.BadRequest(c, "视频 timeline 入参不合法", err.Error())
+		return
+	}
+
+	videoSvc := videoServiceForRequest(c, h.getVideoService())
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	timeline, err := videoSvc.BuildTimeline(sceneID, req.ToModel())
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := ErrorInternalError
+		message := "构建视频 timeline 失败"
+		switch {
+		case errors.Is(err, services.ErrVideoServiceNotReady), errors.Is(err, services.ErrVideoRepositoryNotReady):
+			status = http.StatusServiceUnavailable
+			code = ErrorVideoServiceNotReady
+			message = "VideoService 未就绪"
+		case errors.Is(err, services.ErrVideoReferenceImageURLRequired), errors.Is(err, services.ErrVideoPublicBaseURLInvalid):
+			status = http.StatusBadRequest
+			code = ErrorBadRequest
+			message = "视频参考图 URL 不可用"
+		case errors.Is(err, services.ErrVideoSourceNotReady), isStorageNotFound(err):
+			status = http.StatusBadRequest
+			code = ErrorBadRequest
+			message = "视频源素材尚未准备完成，请先完成 comics Step5"
+		}
+		h.Response.Error(c, status, code, message, err.Error())
+		return
+	}
+
+	h.Response.Success(c, timeline, "视频 timeline 构建成功")
+}
+
+func (h *Handler) GetComicVideoTimeline(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	videoSvc := videoServiceForRequest(c, h.getVideoService())
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	timeline, err := videoSvc.LoadTimeline(sceneID)
+	if err != nil {
+		if errors.Is(err, services.ErrVideoTimelineNotFound) || isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorVideoTimelineNotFound, "视频 timeline 不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取视频 timeline 失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, timeline, "视频 timeline 获取成功")
+}
+
+func (h *Handler) UpdateComicVideoFrame(c *gin.Context) {
+	sceneID := c.Param("id")
+	frameID := c.Param("frameID")
+	if strings.TrimSpace(sceneID) == "" || strings.TrimSpace(frameID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID或分镜ID")
+		return
+	}
+
+	var req struct {
+		Prompt            *string                         `json:"prompt,omitempty"`
+		NegativePrompt    *string                         `json:"negative_prompt,omitempty"`
+		ReferenceImageURL *string                         `json:"reference_image_url,omitempty"`
+		ImageURL          *string                         `json:"image_url,omitempty"`
+		ImgURL            *string                         `json:"img_url,omitempty"`
+		PromptOptions     *models.VideoPromptOptionsPatch `json:"prompt_options,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.Response.BadRequest(c, "视频分镜编辑入参格式错误")
+		return
+	}
+	if req.ReferenceImageURL == nil {
+		if req.ImageURL != nil {
+			req.ReferenceImageURL = req.ImageURL
+		} else if req.ImgURL != nil {
+			req.ReferenceImageURL = req.ImgURL
+		}
+	}
+	if req.Prompt == nil && req.NegativePrompt == nil && req.ReferenceImageURL == nil && req.PromptOptions == nil {
+		h.Response.BadRequest(c, "至少需要提供一个可编辑字段")
+		return
+	}
+
+	videoSvc := videoServiceForRequest(c, h.getVideoService())
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	timeline, err := videoSvc.UpdateTimelineClip(sceneID, frameID, models.VideoTimelineClipPatch{
+		Prompt:            req.Prompt,
+		NegativePrompt:    req.NegativePrompt,
+		ReferenceImageURL: req.ReferenceImageURL,
+		PromptOptions:     req.PromptOptions,
+	})
+	if err != nil {
+		switch {
+		case errors.Is(err, services.ErrVideoRepositoryNotReady), errors.Is(err, services.ErrVideoServiceNotReady):
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未就绪", err.Error())
+		case errors.Is(err, services.ErrVideoTimelineNotFound), isStorageNotFound(err):
+			h.Response.Error(c, http.StatusNotFound, ErrorVideoTimelineNotFound, "视频 timeline 不存在")
+		case errors.Is(err, services.ErrVideoFrameNotFound):
+			h.Response.Error(c, http.StatusNotFound, ErrorVideoFrameNotFound, "视频分镜不存在")
+		default:
+			h.Response.InternalError(c, "保存视频分镜失败", err.Error())
+		}
+		return
+	}
+
+	h.Response.Success(c, timeline, "视频分镜已更新，并已重置旧生成结果")
+}
+
+func (h *Handler) GetComicVideoOverview(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	videoSvc := videoServiceForRequest(c, h.getVideoService())
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	overview, err := videoSvc.LoadOverview(sceneID)
+	if err != nil {
+		if errors.Is(err, services.ErrVideoTimelineNotFound) || errors.Is(err, services.ErrVideoMetaNotFound) || isStorageNotFound(err) {
+			_, timelineErr := videoSvc.LoadTimeline(sceneID)
+			_, metaErr := videoSvc.Repo.LoadMeta(sceneID)
+			if (timelineErr != nil && (errors.Is(timelineErr, services.ErrVideoTimelineNotFound) || isStorageNotFound(timelineErr))) &&
+				(metaErr != nil && (errors.Is(metaErr, services.ErrVideoMetaNotFound) || isStorageNotFound(metaErr))) {
+				overview = &models.VideoOverview{
+					SceneID: sceneID,
+					Clips:   []models.VideoClipOverviewItem{},
+					Recovery: &models.VideoRecoveryInfo{
+						Status:            "idle",
+						PendingFrameIDs:   []string{},
+						FailedFrameIDs:    []string{},
+						CompletedFrameIDs: []string{},
+					},
+				}
+				decorateVideoOverviewURLs(sceneID, overview)
+				h.Response.Success(c, overview, "视频概览为空，尚未初始化 video 工作区")
+				return
+			}
+			h.Response.Error(c, http.StatusNotFound, ErrorVideoOverviewNotFound, "视频概览不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取视频概览失败", err.Error())
+		return
+	}
+	decorateVideoOverviewURLs(sceneID, overview)
+
+	h.Response.Success(c, overview, "视频概览获取成功")
+}
+
+func (h *Handler) GetComicVideoClipAsset(c *gin.Context) {
+	sceneID := c.Param("id")
+	frameID := c.Param("frameID")
+	if err := validateComicSceneID(sceneID); err != nil {
+		h.Response.BadRequest(c, "场景ID不合法", err.Error())
+		return
+	}
+	if strings.TrimSpace(frameID) == "" {
+		h.Response.BadRequest(c, "缺少分镜ID")
+		return
+	}
+
+	videoSvc := h.getVideoService()
+	if videoSvc == nil || videoSvc.Repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	clip, err := videoSvc.LoadClipResult(sceneID, frameID)
+	if err != nil {
+		if errors.Is(err, services.ErrVideoFrameNotFound) || isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorVideoFrameNotFound, "视频分镜结果不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取视频分镜结果失败", err.Error())
+		return
+	}
+	if clip == nil || strings.TrimSpace(clip.LocalPath) == "" {
+		h.Response.Error(c, http.StatusNotFound, ErrorFileNotFound, "本地视频分镜资产不存在")
+		return
+	}
+	if err := serveRelativeVideoFile(c, videoSvc.Repo.BaseDir, clip.LocalPath); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorFileNotFound, "本地视频分镜资产不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取本地视频分镜资产失败", err.Error())
+	}
+}
+
+func (h *Handler) GetComicVideoRenderArtifact(c *gin.Context) {
+	sceneID := c.Param("id")
+	if err := validateComicSceneID(sceneID); err != nil {
+		h.Response.BadRequest(c, "场景ID不合法", err.Error())
+		return
+	}
+
+	videoSvc := h.getVideoService()
+	if videoSvc == nil || videoSvc.Repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	meta, err := videoSvc.Repo.LoadMeta(sceneID)
+	if err != nil {
+		if errors.Is(err, services.ErrVideoMetaNotFound) || isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorVideoOverviewNotFound, "视频 render artifact 不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取视频 meta 失败", err.Error())
+		return
+	}
+	if meta == nil || strings.TrimSpace(meta.RenderArtifactPath) == "" {
+		h.Response.Error(c, http.StatusNotFound, ErrorFileNotFound, "视频 render artifact 不存在")
+		return
+	}
+	if err := serveRelativeVideoFile(c, videoSvc.Repo.BaseDir, meta.RenderArtifactPath); err != nil {
+		if isStorageNotFound(err) {
+			h.Response.Error(c, http.StatusNotFound, ErrorFileNotFound, "视频 render artifact 不存在")
+			return
+		}
+		h.Response.InternalError(c, "读取视频 render artifact 失败", err.Error())
+	}
+}
+
+func decorateVideoOverviewURLs(sceneID string, overview *models.VideoOverview) {
+	if overview == nil {
+		return
+	}
+	for i := range overview.Clips {
+		frameID := strings.TrimSpace(overview.Clips[i].FrameID)
+		if frameID == "" {
+			continue
+		}
+		overview.Clips[i].ImageURL = buildComicFrameImageAPIURL(sceneID, frameID)
+		if strings.TrimSpace(overview.Clips[i].LocalPath) != "" {
+			overview.Clips[i].LocalAssetURL = buildComicVideoClipAssetAPIURL(sceneID, frameID)
+		}
+	}
+	if overview.Meta != nil && strings.TrimSpace(overview.Meta.RenderArtifactPath) != "" {
+		overview.RenderArtifactURL = buildComicVideoRenderArtifactAPIURL(sceneID)
+	}
+}
+
+func buildComicFrameImageAPIURL(sceneID string, frameID string) string {
+	return "/api/scenes/" + url.PathEscape(sceneID) + "/comic/images/" + url.PathEscape(frameID)
+}
+
+func buildComicVideoClipAssetAPIURL(sceneID string, frameID string) string {
+	return "/api/scenes/" + url.PathEscape(sceneID) + "/comic/video/clips/" + url.PathEscape(frameID) + "/asset"
+}
+
+func buildComicVideoRenderArtifactAPIURL(sceneID string) string {
+	return "/api/scenes/" + url.PathEscape(sceneID) + "/comic/video/render"
+}
+
+func videoServiceForRequest(c *gin.Context, svc *services.VideoService) *services.VideoService {
+	if svc == nil {
+		return nil
+	}
+	if strings.TrimSpace(svc.PublicBaseURL) != "" {
+		return svc
+	}
+	baseURL := inferRequestPublicBaseURL(c.Request)
+	if baseURL == "" {
+		return svc
+	}
+	clone := *svc
+	clone.PublicBaseURL = baseURL
+	return &clone
+}
+
+func inferRequestPublicBaseURL(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	host := strings.TrimSpace(req.Header.Get("X-Forwarded-Host"))
+	if host == "" {
+		host = strings.TrimSpace(req.Host)
+	}
+	host = strings.TrimSpace(strings.Split(host, ",")[0])
+	if host == "" || !isLikelyPublicHost(host) {
+		return ""
+	}
+	scheme := strings.TrimSpace(strings.Split(req.Header.Get("X-Forwarded-Proto"), ",")[0])
+	if scheme == "" {
+		if req.TLS != nil {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	}
+	if scheme != "http" && scheme != "https" {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
+func isLikelyPublicHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return false
+	}
+	parsedHost := host
+	if strings.HasPrefix(parsedHost, "[") && strings.Contains(parsedHost, "]") {
+		parsedHost = strings.TrimPrefix(strings.Split(parsedHost, "]")[0], "[")
+	} else if h, _, err := net.SplitHostPort(parsedHost); err == nil {
+		parsedHost = h
+	}
+	parsedHost = strings.Trim(parsedHost, "[]")
+	lower := strings.ToLower(parsedHost)
+	if lower == "localhost" || lower == "127.0.0.1" || lower == "::1" {
+		return false
+	}
+	if ip := net.ParseIP(parsedHost); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() {
+			return false
+		}
+	}
+	return true
+}
+
+func serveRelativeVideoFile(c *gin.Context, baseDir string, relativePath string) error {
+	rel := filepath.ToSlash(strings.TrimSpace(relativePath))
+	if rel == "" {
+		return fmt.Errorf("relative path required")
+	}
+	abs := filepath.Join(baseDir, filepath.FromSlash(rel))
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return err
+	}
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(abs)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Data(http.StatusOK, contentType, data)
+	return nil
+}
+
+func (h *Handler) StartComicVideoGenerate(c *gin.Context) {
+	sceneID := c.Param("id")
+	if strings.TrimSpace(sceneID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID")
+		return
+	}
+
+	var req videoConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		h.Response.BadRequest(c, "视频生成入参格式错误")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		h.Response.BadRequest(c, "视频生成入参不合法", err.Error())
+		return
+	}
+
+	videoSvc := videoServiceForRequest(c, h.getVideoService())
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	taskID, err := videoSvc.GenerateVideoAsync(c.Request.Context(), sceneID, req.ToModel())
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := ErrorInternalError
+		message := "启动视频生成失败"
+		if errors.Is(err, services.ErrVideoServiceNotReady) || errors.Is(err, services.ErrVideoRepositoryNotReady) {
+			status = http.StatusServiceUnavailable
+			code = ErrorVideoServiceNotReady
+			message = "VideoService 未就绪"
+		} else if errors.Is(err, services.ErrVideoReferenceImageURLRequired) || errors.Is(err, services.ErrVideoPublicBaseURLInvalid) {
+			status = http.StatusBadRequest
+			code = ErrorBadRequest
+			message = "视频参考图 URL 不可用"
+		}
+		h.Response.Error(c, status, code, message, err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "视频生成任务已受理")
+}
+
+func (h *Handler) StartComicVideoRegenerateFrame(c *gin.Context) {
+	sceneID := c.Param("id")
+	frameID := c.Param("frameID")
+	if strings.TrimSpace(sceneID) == "" || strings.TrimSpace(frameID) == "" {
+		h.Response.BadRequest(c, "缺少场景ID或分镜ID")
+		return
+	}
+
+	var req videoConfigRequest
+	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
+		h.Response.BadRequest(c, "视频分镜重生成入参格式错误")
+		return
+	}
+	if err := req.Validate(); err != nil {
+		h.Response.BadRequest(c, "视频分镜重生成入参不合法", err.Error())
+		return
+	}
+
+	videoSvc := h.getVideoService()
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	taskID, err := videoSvc.RegenerateClipAsync(c.Request.Context(), sceneID, frameID, req.ToModel())
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := ErrorInternalError
+		message := "启动视频分镜重生成失败"
+		switch {
+		case errors.Is(err, services.ErrVideoServiceNotReady), errors.Is(err, services.ErrVideoRepositoryNotReady):
+			status = http.StatusServiceUnavailable
+			code = ErrorVideoServiceNotReady
+			message = "VideoService 未就绪"
+		case errors.Is(err, services.ErrVideoReferenceImageURLRequired), errors.Is(err, services.ErrVideoPublicBaseURLInvalid):
+			status = http.StatusBadRequest
+			code = ErrorBadRequest
+			message = "视频参考图 URL 不可用"
+		case errors.Is(err, services.ErrVideoTimelineNotFound), isStorageNotFound(err):
+			status = http.StatusNotFound
+			code = ErrorVideoTimelineNotFound
+			message = "视频 timeline 不存在"
+		case errors.Is(err, services.ErrVideoFrameNotFound):
+			status = http.StatusNotFound
+			code = ErrorVideoFrameNotFound
+			message = "视频分镜不存在"
+		}
+		h.Response.Error(c, status, code, message, err.Error())
+		return
+	}
+
+	h.Response.Accepted(c, gin.H{"task_id": taskID}, "视频分镜重生成任务已受理")
+}
+
+func (h *Handler) DeleteComicVideo(c *gin.Context) {
+	sceneID := c.Param("id")
+	if err := validateComicSceneID(sceneID); err != nil {
+		h.Response.BadRequest(c, "场景ID不合法", err.Error())
+		return
+	}
+
+	videoSvc := h.getVideoService()
+	if videoSvc == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+	if err := videoSvc.ResetVideoWorkspace(sceneID); err != nil {
+		if errors.Is(err, services.ErrVideoRepositoryNotReady) {
+			h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未就绪", err.Error())
+			return
+		}
+		h.Response.InternalError(c, "重置 video 工作区失败", err.Error())
+		return
+	}
+
+	h.Response.Success(c, gin.H{"scene_id": sceneID}, "video 工作区已重置")
+}
+
+func (h *Handler) ExportComicVideo(c *gin.Context) {
+	sceneID := c.Param("id")
+	if err := validateComicSceneID(sceneID); err != nil {
+		h.Response.BadRequest(c, "场景ID不合法", err.Error())
+		return
+	}
+
+	format := strings.ToLower(strings.TrimSpace(c.DefaultQuery("format", "zip")))
+	if format != "zip" && format != "html" && format != "mp4" {
+		h.Response.Error(c, http.StatusBadRequest, ErrorExportFormatInvalid, "不支持的导出格式", "支持的格式: zip/html/mp4")
+		return
+	}
+
+	videoSvc := h.getVideoService()
+	if videoSvc == nil || videoSvc.Repo == nil {
+		h.Response.Error(c, http.StatusServiceUnavailable, ErrorVideoServiceNotReady, "VideoService 未初始化")
+		return
+	}
+
+	timeline, timelineErr := videoSvc.LoadTimeline(sceneID)
+	meta, metaErr := videoSvc.Repo.LoadMeta(sceneID)
+	if (timelineErr != nil && (errors.Is(timelineErr, services.ErrVideoTimelineNotFound) || isStorageNotFound(timelineErr))) &&
+		(metaErr != nil && (errors.Is(metaErr, services.ErrVideoMetaNotFound) || isStorageNotFound(metaErr))) {
+		h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 video 数据")
+		return
+	}
+	if timelineErr != nil && !errors.Is(timelineErr, services.ErrVideoTimelineNotFound) && !isStorageNotFound(timelineErr) {
+		h.Response.InternalError(c, "读取视频 timeline 失败", timelineErr.Error())
+		return
+	}
+	if metaErr != nil && !isStorageNotFound(metaErr) {
+		h.Response.InternalError(c, "读取视频 meta 失败", metaErr.Error())
+		return
+	}
+
+	if format == "html" || format == "mp4" {
+		if meta == nil || strings.TrimSpace(meta.RenderArtifactPath) == "" {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "当前没有可导出的 video render artifact")
+			return
+		}
+		relPath := filepath.ToSlash(strings.TrimSpace(meta.RenderArtifactPath))
+		ext := strings.ToLower(filepath.Ext(relPath))
+		expectedExt := map[string]string{"html": ".html", "mp4": ".mp4"}[format]
+		if ext != expectedExt {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "当前没有可导出的 video render artifact")
+			return
+		}
+		dir := filepath.ToSlash(filepath.Dir(relPath))
+		name := filepath.Base(relPath)
+		content, err := videoSvc.Repo.FileStorage.LoadTextFile(dir, name)
+		if err != nil {
+			if isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "video render artifact 不存在")
+				return
+			}
+			h.Response.InternalError(c, "读取 video render artifact 失败", err.Error())
+			return
+		}
+		ts := time.Now().Format("20060102_150405")
+		filename := fmt.Sprintf("video_%s_%s%s", sceneID, ts, expectedExt)
+		contentType := "text/html; charset=utf-8"
+		if format == "mp4" {
+			contentType = "video/mp4"
+		}
+		c.Header("Content-Type", contentType)
+		c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+		c.Header("Cache-Control", "no-store")
+		c.Status(http.StatusOK)
+		_, _ = c.Writer.Write(content)
+		return
+	}
+
+	type zipItem struct {
+		absPath string
+		zipName string
+	}
+	items := make([]zipItem, 0, 32)
+	dirs := make([]string, 0, 8)
+	dirSet := make(map[string]struct{})
+	videoRoot := filepath.ToSlash(filepath.Join("scene_"+sceneID, "video"))
+	absVideoDir := filepath.Join(videoSvc.Repo.BaseDir, filepath.FromSlash(videoRoot))
+
+	addDir := func(rel string) {
+		name := filepath.ToSlash(filepath.Join(videoRoot, rel))
+		if !strings.HasSuffix(name, "/") {
+			name += "/"
+		}
+		if _, ok := dirSet[name]; ok {
+			return
+		}
+		dirSet[name] = struct{}{}
+		dirs = append(dirs, name)
+	}
+
+	addIfExists := func(rel string) error {
+		abs := filepath.Join(absVideoDir, filepath.FromSlash(rel))
+		st, err := os.Stat(abs)
+		if err != nil {
+			if isStorageNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if st.IsDir() {
+			return nil
+		}
+		items = append(items, zipItem{absPath: abs, zipName: filepath.ToSlash(filepath.Join(videoRoot, rel))})
+		return nil
+	}
+
+	for _, rel := range []string{"timeline.json", "meta.json"} {
+		if err := addIfExists(rel); err != nil {
+			h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+			return
+		}
+	}
+	addDir("audio")
+	addDir(filepath.Join("audio", "narration"))
+	addDir(filepath.Join("audio", "music"))
+	addDir(filepath.Join("audio", "sfx"))
+	if timeline != nil {
+		seenImages := make(map[string]struct{}, len(timeline.Clips))
+		for _, clip := range timeline.Clips {
+			imagePath := filepath.ToSlash(strings.TrimSpace(clip.ImagePath))
+			if imagePath == "" {
+				continue
+			}
+			if _, ok := seenImages[imagePath]; ok {
+				continue
+			}
+			seenImages[imagePath] = struct{}{}
+			abs := filepath.Join(videoSvc.Repo.BaseDir, filepath.FromSlash(imagePath))
+			st, err := os.Stat(abs)
+			if err != nil {
+				if isStorageNotFound(err) {
+					continue
+				}
+				h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+				return
+			}
+			if st.IsDir() {
+				continue
+			}
+			addDir("images")
+			items = append(items, zipItem{
+				absPath: abs,
+				zipName: filepath.ToSlash(filepath.Join(videoRoot, "images", filepath.Base(imagePath))),
+			})
+		}
+	}
+	for _, subdir := range []string{"clips", "renders"} {
+		absSubdir := filepath.Join(absVideoDir, subdir)
+		entries, err := os.ReadDir(absSubdir)
+		if err != nil {
+			if !isStorageNotFound(err) {
+				h.Response.Error(c, http.StatusInternalServerError, ErrorExportFailed, "导出失败", err.Error())
+				return
+			}
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			items = append(items, zipItem{
+				absPath: filepath.Join(absSubdir, e.Name()),
+				zipName: filepath.ToSlash(filepath.Join(videoRoot, subdir, e.Name())),
+			})
+		}
+	}
+
+	if len(items) == 0 {
+		if timeline == nil && meta == nil {
+			h.Response.Error(c, http.StatusNotFound, ErrorExportDataEmpty, "没有可导出的 video 数据")
+			return
+		}
+	}
+
+	ts := time.Now().Format("20060102_150405")
+	filename := fmt.Sprintf("video_%s_%s.zip", sceneID, ts)
+	c.Header("Content-Type", "application/zip")
+	c.Header("Content-Disposition", "attachment; filename=\""+filename+"\"")
+	c.Header("Cache-Control", "no-store")
+	c.Status(http.StatusOK)
+
+	zw := zip.NewWriter(c.Writer)
+	defer func() { _ = zw.Close() }()
+	for _, dir := range dirs {
+		if _, err := zw.Create(dir); err != nil {
+			continue
+		}
+	}
+	for _, it := range items {
+		st, err := os.Stat(it.absPath)
+		if err != nil || st.IsDir() {
+			continue
+		}
+		hdr, err := zip.FileInfoHeader(st)
+		if err != nil {
+			continue
+		}
+		hdr.Name = it.zipName
+		hdr.Method = zip.Deflate
+		w, err := zw.CreateHeader(hdr)
+		if err != nil {
+			continue
+		}
+		f, err := os.Open(it.absPath)
+		if err != nil {
+			continue
+		}
+		_, _ = io.Copy(w, f)
+		_ = f.Close()
+	}
+}
+
+type videoConfigRequest struct {
+	ComicSnapshotID   string `json:"comic_snapshot_id,omitempty"`
+	Provider          string `json:"provider,omitempty"`
+	Model             string `json:"model,omitempty"`
+	TargetDurationSec int    `json:"target_duration_sec,omitempty"`
+	FPS               int    `json:"fps,omitempty"`
+	Resolution        string `json:"resolution,omitempty"`
+	Duration          int    `json:"duration,omitempty"`
+	Audio             *bool  `json:"audio,omitempty"`
+	AudioEnabled      *bool  `json:"audio_enabled,omitempty"`
+	ShotType          string `json:"shot_type,omitempty"`
+	PromptExtend      *bool  `json:"prompt_extend,omitempty"`
+	AudioURL          string `json:"audio_url,omitempty"`
+	ImageURL          string `json:"image_url,omitempty"`
+	ImgURL            string `json:"img_url,omitempty"`
+	PromptOptions     struct {
+		Language            string `json:"language,omitempty"`
+		DialogueStyle       string `json:"dialogue_style,omitempty"`
+		DialogueDensity     string `json:"dialogue_density,omitempty"`
+		DialogueEmotion     string `json:"dialogue_emotion_intensity,omitempty"`
+		MotionStrength      string `json:"motion_strength,omitempty"`
+		EnvironmentMotion   string `json:"environment_motion,omitempty"`
+		EnvironmentLayer    string `json:"environment_layer_preference,omitempty"`
+		ExpressionIntensity string `json:"expression_intensity,omitempty"`
+		CameraStyle         string `json:"camera_style,omitempty"`
+		CameraPacing        string `json:"camera_pacing,omitempty"`
+		CameraTransition    string `json:"camera_transition_style,omitempty"`
+		PromptSuffix        string `json:"prompt_suffix,omitempty"`
+	} `json:"prompt_options,omitempty"`
+}
+
+func (r videoConfigRequest) Validate() error {
+	if r.TargetDurationSec < 0 {
+		return fmt.Errorf("target_duration_sec 不能小于 0")
+	}
+	if r.Duration < 0 {
+		return fmt.Errorf("duration 不能小于 0")
+	}
+	if r.FPS < 0 {
+		return fmt.Errorf("fps 不能小于 0")
+	}
+	return nil
+}
+
+func (r videoConfigRequest) ToModel() models.VideoConfig {
+	audioEnabled := false
+	if r.AudioEnabled != nil {
+		audioEnabled = *r.AudioEnabled
+	} else if r.Audio != nil {
+		audioEnabled = *r.Audio
+	}
+	promptExtend := false
+	if r.PromptExtend != nil {
+		promptExtend = *r.PromptExtend
+	}
+	imageURL := strings.TrimSpace(r.ImageURL)
+	if imageURL == "" {
+		imageURL = strings.TrimSpace(r.ImgURL)
+	}
+	return models.VideoConfig{
+		ComicSnapshotID:   strings.TrimSpace(r.ComicSnapshotID),
+		Provider:          strings.TrimSpace(r.Provider),
+		Model:             strings.TrimSpace(r.Model),
+		TargetDurationSec: r.TargetDurationSec,
+		FPS:               r.FPS,
+		Resolution:        strings.TrimSpace(r.Resolution),
+		Duration:          r.Duration,
+		AudioEnabled:      audioEnabled,
+		ShotType:          strings.TrimSpace(r.ShotType),
+		PromptExtend:      promptExtend,
+		AudioURL:          strings.TrimSpace(r.AudioURL),
+		ImageURL:          imageURL,
+		PromptOptions: models.VideoPromptOptions{
+			Language:            strings.TrimSpace(r.PromptOptions.Language),
+			DialogueStyle:       strings.TrimSpace(r.PromptOptions.DialogueStyle),
+			DialogueDensity:     strings.TrimSpace(r.PromptOptions.DialogueDensity),
+			DialogueEmotion:     strings.TrimSpace(r.PromptOptions.DialogueEmotion),
+			MotionStrength:      strings.TrimSpace(r.PromptOptions.MotionStrength),
+			EnvironmentMotion:   strings.TrimSpace(r.PromptOptions.EnvironmentMotion),
+			EnvironmentLayer:    strings.TrimSpace(r.PromptOptions.EnvironmentLayer),
+			ExpressionIntensity: strings.TrimSpace(r.PromptOptions.ExpressionIntensity),
+			CameraStyle:         strings.TrimSpace(r.PromptOptions.CameraStyle),
+			CameraPacing:        strings.TrimSpace(r.PromptOptions.CameraPacing),
+			CameraTransition:    strings.TrimSpace(r.PromptOptions.CameraTransition),
+			PromptSuffix:        strings.TrimSpace(r.PromptOptions.PromptSuffix),
+		},
+	}
 }
 
 func (h *Handler) CreateSceneShell(c *gin.Context) {
@@ -4355,6 +5158,16 @@ func (h *Handler) getComicRepo() *services.ComicRepository {
 	return repo
 }
 
+func (h *Handler) getVideoService() *services.VideoService {
+	container := di.GetContainer()
+	videoService, ok := container.Get("video").(*services.VideoService)
+	if !ok {
+		utils.GetLogger().Warn("cannot get video service from container", map[string]interface{}{})
+		return nil
+	}
+	return videoService
+}
+
 // 构建故事分支视图结构
 func buildStoryBranchView(storyData *models.StoryData) map[string]interface{} {
 	// 构建节点映射，方便查找
@@ -4567,6 +5380,25 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		"vision_config":          visionConfig,
 		"vision_model_providers": cfg.VisionModelProviders,
 		"vision_models":          cfg.VisionModels,
+		"video_provider":         cfg.VideoProvider,
+		"video_default_model":    cfg.VideoDefaultModel,
+		"video_config": func() map[string]interface{} {
+			videoConfig := make(map[string]interface{})
+			if cfg.VideoConfig != nil {
+				for k, v := range cfg.VideoConfig {
+					if k == "api_key" {
+						continue
+					}
+					videoConfig[k] = v
+				}
+				videoConfig["has_api_key"] = cfg.VideoConfig["api_key"] != ""
+			} else {
+				videoConfig["has_api_key"] = false
+			}
+			return videoConfig
+		}(),
+		"video_model_providers": cfg.VideoModelProviders,
+		"video_models":          cfg.VideoModels,
 	}
 
 	h.Response.Success(c, data, "设置获取成功")
@@ -4584,6 +5416,12 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 		VisionConfig         map[string]interface{}   `json:"vision_config"`
 		VisionModelProviders map[string]interface{}   `json:"vision_model_providers"`
 		VisionModels         []config.VisionModelInfo `json:"vision_models"`
+
+		VideoProvider       string                  `json:"video_provider"`
+		VideoDefaultModel   string                  `json:"video_default_model"`
+		VideoConfig         map[string]interface{}  `json:"video_config"`
+		VideoModelProviders map[string]interface{}  `json:"video_model_providers"`
+		VideoModels         []config.VideoModelInfo `json:"video_models"`
 	}
 
 	if err := c.ShouldBindJSON(&request); err != nil {
@@ -4657,6 +5495,23 @@ func (h *Handler) SaveSettings(c *gin.Context) {
 		)
 		if err != nil {
 			h.Response.InternalError(c, "保存Vision配置失败", err.Error())
+			return
+		}
+	}
+
+	if request.VideoProvider != "" {
+		videoCfg := toStringMap(request.VideoConfig)
+		videoModelProviders := toStringMap(request.VideoModelProviders)
+		err := h.ConfigService.UpdateVideoConfig(
+			request.VideoProvider,
+			videoCfg,
+			request.VideoDefaultModel,
+			videoModelProviders,
+			request.VideoModels,
+			"web_ui",
+		)
+		if err != nil {
+			h.Response.InternalError(c, "保存Video配置失败", err.Error())
 			return
 		}
 	}
