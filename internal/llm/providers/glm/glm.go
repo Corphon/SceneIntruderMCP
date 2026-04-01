@@ -23,11 +23,8 @@ func init() {
 	llm.Register("glm", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"glm-4",
-				"glm-4-plus",
-				"glm-4.5-air",
-				"glm-4.5",
-				"glm-4.6",
+				"glm-4.7-Flash",
+				"glm-5",
 			},
 			baseURL: "https://open.bigmodel.cn/api/paas/v4",
 		}
@@ -125,6 +122,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("glm", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -159,11 +157,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("glm", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -251,6 +248,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("glm", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -284,11 +282,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("glm", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
