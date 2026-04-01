@@ -4,258 +4,285 @@
 
 ![SceneIntruderMCP Logo](temp/logo.png)
 
-**🎭 AI驱动的沉浸式互动叙事绘画平台**
+**面向场景、漫画、视频与剧本的一体化 AI 原生创作工作台**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
-[![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
+[![License](https://img.shields.io/badge/License-apache-green.svg)](LICENSE)
 
 [English](README.md) | 简体中文
 
 </div>
 
-## 🌟 项目简介
+## 项目现在的定位
 
-SceneIntruderMCP 现已演进为一个 AI 原生叙事工作台：同时覆盖互动场景、连环画 comics 分镜工作流，以及 New Script 写作助手三条完整创作链路，并将结构化分析、异步生成和可配置 LLM/Vision provider 收口到同一个应用中。
+SceneIntruderMCP 已不再是最初那种“简单分析文本并搭个页面”的轻量样板，而是一个统一的创作平台。当前版本由一个 Go 后端和一个 React SPA 组成，串起四条主链路：
 
-### ✨ 核心特性
+1. **互动场景**：文本分析、角色/物品/上下文抽取、剧情推进与回溯。
+2. **Comics Studio**：5 步工作流，覆盖分镜、提示词、关键元素、参考图、出图与导出。
+3. **Video Studio**：基于 comics 结果构建 timeline、异步生成 clip、查看恢复态并导出。
+4. **New Script**：创建剧本项目、生成首稿、继续改写章节并导出。
 
-#### 🧠 **智能文本分析**
-- **多维度解析**: 自动提取场景、角色、物品、情节要素
-- **双语支持**: 完美支持中英文内容的智能识别和处理
-- **深度分析**: 基于文学理论的专业级文本类型识别
+此外，系统已经把 **LLM / Vision / Video provider 配置**、**SSE 长任务进度**、**文件系统持久化** 收敛到统一运行时里。
 
-#### 🎭 **AI角色系统**
-- **情感智能**: 8维度情感分析 (情绪、动作、表情、语调等)
-- **角色一致性**: 维护长期记忆和个性特征
-- **动态互动**: 角色间自动触发的智能对话
+## 当前能力全景
 
-#### 📖 **动态故事引擎**
-- **非线性叙事**: 支持复杂的故事分支和时间线管理
-- **智能选择生成**: AI基于上下文动态创建4类选择 (行动/对话/探索/策略)
-- **故事回溯**: 完整的时间线回滚和状态管理
+### 后端与运行时
 
-#### 🎬 **v2 Comics 工作台**
-- **首页独立入口**: 可从 Home 直接通过 `POST /api/scenes/shell` 创建独立 comic 工作区
-- **5 步工作流**: 分镜分析 → 提示词 → 关键元素 → Prompt Review → 出图/导出
-- **SSE 进度流**: 长任务统一通过 `GET /api/progress/:task_id` 推送进度
-- **参考图链路**: 支持 element 级参考图上传与重绘复用
-- **模型驱动配置**: Step4 从 Settings 的 `vision_models` 获取可选模型
+- Go + Gin 服务端
+- 同一二进制同时提供 API 与前端 SPA
+- 统一配置文件 `data/config.json`
+- API 凭据加密存储（`data/.encryption_key` 或 `CONFIG_ENCRYPTION_KEY`）
+- SSE 进度订阅：`GET /api/progress/:taskID`
+- 原生 WebSocket 场景/用户通道
+- 基于文件系统的 scenes / stories / comics / scripts / exports / users 存储
 
-#### ✍️ **New Script 写作空间**
-- **项目式创作**: 创建剧本项目、初始化大纲/首稿，并持续迭代章节
-- **辅助模式**: 通过 `/api/scripts/:id/command` 暴露 inspiration / completion / polish 等写作辅助
-- **草稿版本化**: 支持回滚、导出以及基于 `chapter_draft.json` 的章节级持久化编辑
+### 前端工作区
 
-#### 🎮 **游戏化体验**
-- **用户定制**: 自定义道具和技能系统
-- **创意控制**: 3级创意程度控制 (严格/平衡/扩展)
-- **进度追踪**: 实时故事完成度和统计分析
+- `/` —— scenes 首页
+- `/settings` —— LLM / Vision / Video 设置
+- `/scenes/:id` —— scene 详情
+- `/scenes/:id/story` —— story 模式
+- `/scenes/:id/comic` —— Comics Studio
+- `/scenes/:id/comic/video` —— Video Studio
+- `/scripts` / `/scripts/:id` —— Script 工作区
 
-#### 🎒 **用户道具与技能管理**
-- **自定义道具**: 用户可以定义具有可自定义属性的独特道具
-- **自定义技能**: 用户可以创建和管理具有不同效果和等级的技能
-- **属性系统**: 遏品可以有多个属性（攻击力、防御力、魔力、耐久度等）
-- **稀有度等级**: 遏品支持不同的稀有度等级：普通、罕见、史诗、传说
-- **技能树**: 层级化技能系统，带有前置要求和条件
-- **角色互动**: 遏品和技能可以影响角色互动和故事情节
-- **API集成**: 通过API提供完整的CRUD操作来管理用户定义的内容
+### 当前后端已正式接线的 LLM provider
 
-#### 🔗 **多LLM支持**
-- **OpenAI GPT**: GPT-3.5/4/4o/5-chat 系列
-- **Anthropic Claude**: Claude-3/3.5/3.7 系列
-- **DeepSeek**: DeepSeek-R1/Coder 系列
-- **Google Gemini**: Gemini-2.0/1.5 系列 (包含思维模型)
-- **Grok**: xAI 的 Grok-2/2-mini/3 系列
-- **Mistral**: Mistral-large/small 系列
-- **Qwen**: 阿里云 Qwen2.5/32b 系列 (包含 qwq 模型)
-- **GitHub Models**: 通过 GitHub Models 平台 (GPT-4o, o1 系列, Phi-4 等)
-- **OpenRouter**: 开源模型聚合平台，提供免费层级
-- **GLM**: 智谱AI的 GLM-4/4-plus 系列
+后端当前已注册：
 
-#### 🖼️ **多 Vision Provider 支持**
-- **内置 provider**: `sdwebui`、`dashscope`、`gemini`、`ark`、`openai`、`glm`、`placeholder`
-- **推荐智谱图像模型**: `glm-image`
-- **统一 Vision 设置**: 可在 Settings 页集中配置 `vision_provider`、`vision_default_model`、`vision_config.endpoint`、`vision_config.api_key`
+- `openai`
+- `anthropic`
+- `google`
+- `deepseek`
+- `qwen`
+- `mistral`
+- `grok`
+- `glm`
+- `githubmodels`
+- `openrouter`
+- `nvidia`
 
-## 🏗️ 技术架构
+说明：
 
-### 📁 项目结构
+- 为避免结构化分析被 think / reasoning 污染，LLM 层现在默认关闭推理模式。
+- 支持 provider 原生关闭时会显式关闭；不支持时会回退到更安全的非 reasoning 模型。
+- Google、Qwen、NVIDIA 已做 provider 级默认抑制。
+- 前端 Settings 仍保留 `ollama` 选项，但它 **不在当前后端正式支持矩阵内**，因此本文档不把它列为可用 provider。
 
+### Vision provider
+
+- `placeholder`
+- `sdwebui`
+- `dashscope`
+- `gemini`
+- `ark`
+- `openai`
+- `glm`
+
+前端实际使用的模型列表来自 `GET /api/settings` 返回的：
+
+- `vision_default_model`
+- `vision_models`
+- `vision_model_providers`
+
+### Video provider
+
+- `dashscope`
+- `kling`
+- `google`
+- `vertex`
+- `ark`
+- `mock`
+
+对应默认模型与模型路由同样通过 `GET /api/settings` 下发：
+
+- `video_default_model`
+- `video_models`
+- `video_model_providers`
+
+## 架构概览
+
+```text
+frontend (React + Vite + MUI)
+                │
+                ├─ REST (/api/*)
+                ├─ SSE  (/api/progress/:taskID)
+                └─ WS   (/ws/*)
+                                │
+backend (Go + Gin)
+                │
+                ├─ config / auth / rate limit / handlers
+                ├─ LLM / Vision / Video / Story / Script / Comic services
+                └─ file storage under data/
 ```
 
-> ℹ️ **提示**：当前激活的提供商会读取其 `default_model` 配置。凡是未明确指定模型的 AI 请求都会自动回退到该值，因此只需在配置文件里修改一次即可全局切换模型，无需改动代码。
-SceneIntruderMCP/
-├── cmd/
-│   └── server/           # Application entry point
-│       └── main.go
-├── internal/
-│   ├── api/              # HTTP API routes and handlers
-│   ├── app/              # Application core logic
-│   ├── config/           # Configuration management
-│   ├── di/               # Dependency injection
-│   ├── llm/              # LLM provider abstraction layer
-│   │   └── providers/    # Various LLM provider implementations
-│   ├── models/           # Data model definitions
-│   ├── services/         # Business logic services
-│   └── storage/          # Storage abstraction layer
-├── frontend/
-│   └── dist/             # assets
-├── data/                 # Data storage directory
-│   ├── scenes/           # Scene data
-│   ├── stories/          # Story data
-│   ├── users/            # User data
-│   └── exports/          # Export files
-└── logs/                 # Application logs
-```
+核心目录：
 
-### 🔧 核心技术栈
+- `cmd/server` —— 启动入口
+- `internal/api` —— 路由、handler、中间件
+- `internal/app` —— 应用装配与 provider 注册
+- `internal/config` —— 配置与加密逻辑
+- `internal/llm` —— LLM 抽象与 reasoning 控制
+- `internal/services` —— 业务服务
+- `internal/vision` —— Vision provider
+- `frontend` —— SPA 前端
 
-- **后端**: Go 1.21+, Gin Web Framework
-- **AI集成**: 多LLM提供商支持，统一抽象接口
-- **存储**: 基于文件系统的JSON存储，支持扩展到数据库
-- **前端**: React，响应式设计
-- **部署**: 容器化支持，云原生架构
+## 快速开始
 
-## 🆕 版本亮点（v2.0.0 · 2026-03-06）
+### 环境要求
 
-- **Comics v2 已完成**：首页新增独立 **New Comic** 入口，创建 scene shell 后可直接进入 comics 5-step 工作流。
-- **Standalone 文本分析**：comics Step1 已支持 `source_text`，无需先有 story node 也能直接从故事文本生成分镜。
-- **Vision provider 完整接入**：Settings 现同时管理 LLM + Vision，并支持 `glm` / `glm-image`、provider 自动填充 endpoint/默认模型。
-- **文档与接口对齐**：`GET /api/settings` 已成为前端 Vision 模型列表的事实来源，comics、scripts、导出与部署说明均已同步到当前实现。
+- Go 1.21+
+- Node.js 18+
+- npm 9+
+- 至少一组可用 provider 凭据
 
----
+### 1. 安装依赖
 
-## 🆕 版本亮点（v1.4.0 · 2025-12-25）
-
-- **新增“新建剧本”写作助手（核心功能）** — 新增“一键新建剧本”写作流程，会创建剧本项目并自动生成初始章节大纲与第1章第1场草稿（封装 CreateProject + GenerateInitial）。使用方法：在“剧本”页面点击 **“新建剧本”** 即可开始，系统会初始化 `chapter_draft.json`，生成初始草稿与工作流项，项目随即可编辑与继续生成。
-
-## 🚀 快速开始
-
-### 📋 系统要求
-
-- Go 1.21 或更高版本
-- 至少一个LLM API密钥 (OpenAI/Claude/DeepSeek等)
-- 2GB+ 可用内存
-- 操作系统: Windows/Linux/macOS
-
-### 📦 安装步骤
-
-1. **克隆项目**
-```bash
-git clone https://github.com/Corphon/SceneIntruderMCP.git
-cd SceneIntruderMCP
-```
-
-2. **安装依赖**
 ```bash
 go mod download
+cd frontend
+npm install
+cd ..
 ```
 
-3. **配置环境**
+### 2. 构建前端资源
 
-首次启动时，服务会在 `data/config.json`（或 `${DATA_DIR}/config.json`）生成配置文件。
-你可以通过以下方式配置 LLM 与 Vision 提供商：
-
-- 打开设置页面：`http://localhost:8080/settings`，或
-- 直接编辑 `data/config.json`。
-
-v2.0.0 中常见的 Vision 配置字段包括：
-
-- `vision_provider`
-- `vision_default_model`
-- `vision_config.endpoint`
-- `vision_config.api_key`
-
-若使用 GLM Image，推荐值为：
-
-- provider：`glm`
-- 默认模型：`glm-image`
-- endpoint：`https://open.bigmodel.cn/api/paas/v4`
-
-4. **启动服务**
 ```bash
-# 开发模式
-go run cmd/server/main.go
-
-# 生产模式
-go build -o sceneintruder cmd/server/main.go
-./sceneintruder
+cd frontend
+npm run build
+cd ..
 ```
 
-5. **访问应用**
-```
-浏览器打开: http://localhost:8080
+### 3. 启动服务
+
+```bash
+go run ./cmd/server
 ```
 
-### ⚙️ 配置说明
+默认地址：`http://localhost:8080`
 
-#### `data/config.json` 配置示例
+### 4. 打开应用
+
+- 首页：`http://localhost:8080/`
+- 设置页：`http://localhost:8080/settings`
+
+## 配置模型
+
+运行时配置持久化在 `data/config.json`。
+
+最关键的字段：
+
+- `llm_provider`、`llm_config`
+- `vision_provider`、`vision_default_model`、`vision_config`
+- `video_provider`、`video_default_model`、`video_config`
+- `vision_models`、`vision_model_providers`
+- `video_models`、`video_model_providers`
+
+示例：
 
 ```json
 {
     "port": "8080",
     "data_dir": "data",
-    "static_dir": "frontend\\dist\\assets",
-    "templates_dir": "frontend\\dist",
+    "static_dir": "frontend/dist/assets",
+    "templates_dir": "frontend/dist",
     "log_dir": "logs",
     "debug_mode": true,
-    "llm_provider": "openrouter",
+    "llm_provider": "nvidia",
     "llm_config": {
-        "default_model": "mistralai/devstral-2512:free",
-        "base_url": "",
+        "api_key": "",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "default_model": "moonshotai/kimi-k2.5"
+    },
+    "vision_provider": "glm",
+    "vision_default_model": "glm-image",
+    "vision_config": {
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4",
         "api_key": ""
     },
-    "encrypted_llm_config": {
-        "api_key": "<encrypted_api_key_here>"
+    "video_provider": "dashscope",
+    "video_default_model": "wan2.6-i2v-flash",
+    "video_config": {
+        "endpoint": "https://dashscope.aliyuncs.com/api/v1",
+        "api_key": "",
+        "public_base_url": "https://your-domain.example"
     }
 }
 ```
 
-#### 🔐 配置加密与 `.encryption_key`
+### 加密说明
 
-- 如果未设置 `CONFIG_ENCRYPTION_KEY`，系统会自动生成 32 字节随机密钥并写入 `data/.encryption_key`，用于长期加密 API 凭据。
-- 该文件必须与 `data/config.json` 同步保留，否则所有已加密的密钥都将无法解密，需要重新在设置页填写。
-- 如需轮换密钥，可删除该文件并重启服务，然后立即更新新的 API 密钥，系统会自动生成并持久化新的密钥。
+- 开发模式下如果未设置 `CONFIG_ENCRYPTION_KEY`，系统会自动生成 `data/.encryption_key`。
+- 该文件必须和 `data/config.json` 一起保留。
+- 删除密钥文件后，旧的加密凭据将无法解密。
 
-## 📖 使用指南
+## 推荐首次使用路径
 
-### 🎬 创建场景
+1. 先构建前端资源。
+2. 启动后端。
+3. 在 Settings 里先配好一个可用的 LLM provider。
+4. 按需配置 Vision / Video provider。
+5. 创建 scene 或直接创建 standalone comic 工作区。
 
-1. **上传文本**: 支持小说、剧本、故事等多种文本格式
-2. **AI分析**: 系统自动提取角色、场景、物品等要素
-3. **场景生成**: 创建可交互的场景环境
+## 关键运行特性
 
-### 🎭 角色互动
+### 长任务模式
 
-1. **选择角色**: 从分析出的角色中选择互动对象
-2. **自然对话**: 与AI角色进行自然语言对话
-3. **情感反馈**: 观察角色的情绪、动作和表情变化
+分析、提示词生成、出图、剧本生成、视频生成均为异步任务，通常流程为：
 
-### 🖥️ 控制台 CLI 快速体验
+1. 发起任务并拿到 `task_id`
+2. 订阅 `GET /api/progress/:taskID`
+3. 再读取对应结果接口
 
-`cmd/demo` 提供了一套无需前端即可跑通完整流程的多语言控制台界面，便于快速联调和压测：
+### 访客与登录用户
 
-- **开箱即选语言**: 启动后即可在中文/英文界面间切换，所有提示与指令同步更新。
-- **LLM 一键配置**: 菜单默认优先引导配置 LLM，可直接从 `config.json` 读取，无需重复输入密钥。
-- **首节点自动推送**: 进入场景后系统会主动推进首个剧情节点，并用方框高亮展示最新内容。
-- **HUD 式互动看板**: 每轮交互前都会以方框列出可用的角色(@)、地点(@)、物品(/)、技能(/)与系统指令(!)。
-- **符号快捷指令**: `@角色/地点` 聚焦特定对象，`/物品/技能` 引入装备与能力，`!status/!tasks/!advance/...` 可随时查看状态或强制推进剧情。
-- **空输入继续剧情**: 直接回车即可让 AI 自动续写节点，方便快速冒烟测试故事引擎。
+- 许多 scene 相关接口在缺少有效授权时会降级到 `console_user`。
+- `/api/users/:user_id/...` 这类用户资源接口要求登录并校验归属。
+- scripts 路由要求登录。
 
-### 📚 故事分支
+### Video provider 注意事项
 
-1. **动态选择**: AI根据当前情况生成4种类型的选择
-2. **故事发展**: 基于选择推进非线性故事情节
-3. **分支管理**: 支持故事回溯和多分支探索
+部分视频 provider 需要公网可访问的参考图 URL，因此部署环境通常需要正确配置 `video_config.public_base_url`。
 
-### 📊 数据导出
+## 常用开发命令
 
-1. **交互记录**: 导出完整的对话历史
-2. **故事文档**: 生成结构化的故事文档
-3. **统计分析**: 角色互动和故事进展统计
+后端：
 
+```bash
+go test ./...
+go run ./cmd/server
+```
+
+前端：
+
+```bash
+cd frontend
+npm run dev
+npm test
+npm run lint
+npm run build
+```
+
+## 文档索引
+
+- [API 文档](docs/api_cn.md)
+- [部署文档](docs/deployment_cn.md)
+- [前端开发文档](docs/frontend_dev.md)
+- [English API](docs/api.md)
+- [English deployment](docs/deployment.md)
+
+## 当前项目边界
+
+本仓库现在应被视为：
+
+- 一个**多工作区创作平台**，
+- 带有**可配置 AI provider**，
+- 拥有**异步任务 / SSE / 恢复态**，
+- 并且具备**可部署、可运维、可持续扩展**的文档与运行约束。
+
+后续任何改动，都应以这个真实产品形态为基线，而不是回退到最初的简化想象。
+
+<!--
 ## 🛠️ API 接口文档
 
 ### 🔗 实际可用的 API 端点
@@ -851,3 +878,4 @@ go test ./internal/services/...
 Made with ❤️ by SceneIntruderMCP Team
 
 </div>
+-->
