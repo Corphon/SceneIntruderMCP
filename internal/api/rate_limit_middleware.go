@@ -111,12 +111,17 @@ func RateLimitMiddleware(limit int, window time.Duration, keyFunc func(*gin.Cont
 		if !rateLimiter.Allow(key, limit, window) {
 			// Get current rate limit values for headers
 			limit, remaining, reset := rateLimiter.GetRateLimitHeaders(key, limit, window)
+			retryAfter := int(time.Until(time.Unix(reset, 0)).Seconds())
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
 
 			c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", limit))
 			c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 			c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
+			c.Header("Retry-After", fmt.Sprintf("%d", retryAfter))
 
-			rh.Error(c, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded")
+			rh.Error(c, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Rate limit exceeded", fmt.Sprintf("Retry after %d seconds", retryAfter))
 			c.Abort()
 			return
 		}
@@ -167,6 +172,6 @@ func AnalysisRateLimit() gin.HandlerFunc {
 
 // DefaultRateLimit applies general rate limiting for most API endpoints
 func DefaultRateLimit() gin.HandlerFunc {
-	// 100 requests per minute by IP
-	return RateLimitByIP(100, time.Minute)
+	// 300 requests per minute by IP to avoid normal browsing/list pages being throttled too aggressively
+	return RateLimitByIP(300, time.Minute)
 }
