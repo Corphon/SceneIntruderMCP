@@ -19,8 +19,8 @@ func init() {
 	llm.Register("google", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-				"gemini-2.5-pro",
-				"gemini-2.5-flash",
+				"gemini-3.1-flash-lite",
+				"gemini-3-flash",
 			},
 			baseURL: "https://generativelanguage.googleapis.com/v1",
 		}
@@ -91,6 +91,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("google", model, req.ExtraParams)
 
 	// 构建Gemini请求
 	contents := []map[string]interface{}{
@@ -124,16 +125,15 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			// 如果是generationConfig中的参数
-			if k == "topK" || k == "candidateCount" {
-				requestBody["generationConfig"].(map[string]interface{})[k] = v
-			} else {
-				requestBody[k] = v
-			}
+	for k, v := range extraParams {
+		// 如果是generationConfig中的参数
+		if k == "topK" || k == "candidateCount" {
+			requestBody["generationConfig"].(map[string]interface{})[k] = v
+		} else {
+			requestBody[k] = v
 		}
 	}
+	llm.ApplyReasoningDefaults("google", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -225,6 +225,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("google", model, req.ExtraParams)
 
 	// 构建Gemini请求
 	contents := []map[string]interface{}{
@@ -258,6 +259,15 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if len(req.StopWords) > 0 {
 		requestBody["generationConfig"].(map[string]interface{})["stopSequences"] = req.StopWords
 	}
+
+	for k, v := range extraParams {
+		if k == "topK" || k == "candidateCount" {
+			requestBody["generationConfig"].(map[string]interface{})[k] = v
+		} else {
+			requestBody[k] = v
+		}
+	}
+	llm.ApplyReasoningDefaults("google", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
