@@ -19,7 +19,8 @@ func init() {
 	llm.Register("qwen", func() llm.Provider {
 		return &Provider{
 			recommendedModels: []string{
-
+				"qwen3.5-flash",
+				"qwen3.5-plus",
 				"qwen3-max",
 			},
 			baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1", // Default to compatibility mode
@@ -74,7 +75,7 @@ func (p *Provider) Initialize(config map[string]string) error {
 }
 
 func (p *Provider) GetName() string {
-	return "qwen"
+	return "Qwen"
 }
 
 func (p *Provider) GetSupportedModels() []string {
@@ -99,6 +100,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("qwen", model, req.ExtraParams)
 
 	// 构建请求
 	messages := []map[string]string{
@@ -132,11 +134,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("qwen", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -296,6 +297,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("qwen", model, req.ExtraParams)
 
 	// 构建请求 - 使用OpenAI兼容格式
 	messages := []map[string]string{
@@ -332,11 +334,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("qwen", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
