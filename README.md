@@ -2,312 +2,278 @@
 
 <div align="center">
 
-![SceneIntruderMCP Logo](temp/logo.png)
+![SceneIntruderMCP Logo](static/images/logo.png)
 
-**🎭 AI-Powered Immersive Interactive Storytelling & Comics Drawing Platform**
+**AI-native storytelling workspace for scenes, comics, scripts, and video**
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-blue.svg)](https://golang.org)
-[![License](https://img.shields.io/badge/License-Apache-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)](https://github.com/Corphon/SceneIntruderMCP)
-[![Coverage](https://img.shields.io/badge/Coverage-85%25-yellow.svg)](https://codecov.io)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 English | [简体中文](README_CN.md)
 
 </div>
 
-## 🌟 Project Overview
+## What this project is now
 
-SceneIntruderMCP is an AI-native storytelling workspace that now covers three complete creation flows: interactive scenes, a v2 comics studio, and the New Script writing assistant. It combines structured text analysis, long-running generation workflows, and configurable LLM/Vision providers in one integrated app.
+SceneIntruderMCP is no longer just a lightweight scene-analysis demo. The current product is a unified creative workspace built around one Go backend and one React SPA, with four connected modules:
 
-### ✨ Core Features
+1. **Interactive scenes** — analyze text into scene data, characters, items, context, and branching story flows.
+2. **Comics Studio** — a 5-step workflow for analysis, prompts, key elements, references, image generation, and export.
+3. **Video Studio** — build timeline data from comics results, generate clip assets asynchronously, inspect recovery state, and export bundles.
+4. **New Script** — create writing projects, generate initial drafts, revise chapters, and export manuscripts.
 
-#### 🧠 **Intelligent Text Analysis**
-- **Multi-dimensional Parsing**: Automatically extract scenes, characters, items, and plot elements
-- **Bilingual Support**: Perfect support for intelligent recognition and processing of Chinese and English content
-- **Deep Analysis**: Professional-grade text type identification based on literary theory
+The system also centralizes **LLM / Vision / Video provider configuration**, long-running task tracking via **SSE**, and file-based persistence under `data/`.
 
-#### 🎭 **AI Character System**
-- **Emotional Intelligence**: 8-dimensional emotional analysis (emotion, action, expression, tone, etc.)
-- **Character Consistency**: Maintain long-term memory and personality traits
-- **Dynamic Interaction**: Intelligently triggered automatic dialogues between characters
-- **Character Memory**: Persistent knowledge base that characters remember across interactions
-- **Relationship Mapping**: Dynamic relationship tracking between characters
-- **Personality Modeling**: Comprehensive personality profiles affecting dialogue and behavior
+## Current capability map
 
-#### 📖 **Dynamic Story Engine**
-- **Non-linear Narrative**: Support complex story branching and timeline management
-- **Intelligent Choice Generation**: AI dynamically creates 4 types of choices based on context (Action/Dialogue/Investigation/Strategy)
-- **Story Rewind**: Complete timeline rollback and state management
-- **Branch Visualization**: Visual representation of story branches and pathways
-- **Progressive Storytelling**: Continuous story development across sessions
-- **Context Preservation**: Maintain story context when returning to scenes
-- **Timeline Management**: Sophisticated handling of non-linear story timelines
+### Backend and runtime
 
-#### 🎬 **v2 Comics Studio**
-- **Standalone New Comic entry**: Create a comic workspace directly from Home via `POST /api/scenes/shell`
-- **5-step generation flow**: Analysis → prompts → key elements → prompt review → image generation/export
-- **SSE progress tracking**: Long-running jobs stream progress through `GET /api/progress/:task_id`
-- **Reference-image workflow**: Upload per-element references and reuse them during generation/regeneration
-- **Model-aware rendering**: Step4 consumes `vision_models` from Settings and supports provider-specific defaults
+- Go + Gin server
+- SPA hosting from the same binary
+- Unified config in `data/config.json`
+- Encrypted API key storage via `data/.encryption_key` or `CONFIG_ENCRYPTION_KEY`
+- SSE progress endpoint: `GET /api/progress/:taskID`
+- Plain WebSocket endpoints for scene/user realtime channels
+- File-based storage for scenes, stories, comics, scripts, exports, and users
 
-#### ✍️ **New Script Workspace**
-- **Project-based writing flow**: Create script projects, generate initial outline/draft, then iterate chapter by chapter
-- **Assist modes**: Inspiration, completion, and polish workflows exposed through `/api/scripts/:id/command`
-- **Draft versioning**: Rewind, export, and persist `chapter_draft.json` for per-chapter editing continuity
+### Frontend workspaces
 
-#### 🎲 **Interactive Game Mechanics**
-- **Inventory System**: Rich object management with interactive items
-- **Skill System**: User-defined abilities affecting story outcomes
-- **Character Relationships**: Track evolving relationships between characters
-- **World Building**: Dynamic scene and location management
-- **Quest Tracking**: Mission and objective management system
-- **Achievement System**: Recognition for story exploration and interaction milestones
+- `/` — scenes home
+- `/settings` — LLM, Vision, Video settings
+- `/scenes/:id` — scene detail
+- `/scenes/:id/story` — story mode
+- `/scenes/:id/comic` — Comics Studio
+- `/scenes/:id/comic/video` — Video Studio
+- `/scripts` / `/scripts/:id` — script workspace
 
-#### 🎮 **Gamified Experience**
-- **User Customization**: Custom items and skills system
-- **Creativity Control**: 3-level creativity control (Strict/Balanced/Expansive)
-- **Progress Tracking**: Real-time story completion and statistical analysis
+### LLM providers officially wired in backend
 
-#### 🎒 **User Items & Skills Management**
-- **Custom Items**: Users can define unique items with customizable properties
-- **Custom Skills**: Users can create and manage skills with different effects and levels
-- **Property System**: Items can have multiple properties (attack, defense, magic, durability, etc.)
-- **Rarity Levels**: Items support different rarity tiers: common, rare, epic, legendary
-- **Skill Trees**: Hierarchical skill system with prerequisites and requirements
-- **Character Interaction**: Items and skills can affect character interactions and story outcomes
-- **API Integration**: Full CRUD operations available via API for managing user-defined content
+The backend currently registers these providers:
 
-#### 🔗 **Multi-LLM Support**
-- **OpenAI GPT**: GPT-3.5/4/4o/5-chat series
-- **Anthropic Claude**: Claude-3/3.5/3.7 series
-- **DeepSeek**: DeepSeek-R1/Coder series
-- **Google Gemini**: Gemini-2.0/1.5 series with thinking models
-- **Grok**: xAI's Grok-2/2-mini/3 series
-- **Mistral**: Mistral-large/small series
-- **Qwen**: Alibaba Cloud Qwen2.5/32b series including qwq models
-- **GitHub Models**: Via GitHub Models platform (GPT-4o, o1 series, Phi-4, etc.)
-- **OpenRouter**: Open source model aggregation platform with free tiers
-- **GLM**: Zhipu AI's GLM-4/4-plus series
+- `openai`
+- `anthropic`
+- `google`
+- `deepseek`
+- `qwen`
+- `mistral`
+- `grok`
+- `glm`
+- `githubmodels`
+- `openrouter`
+- `nvidia`
 
-#### 🖼️ **Multi-Vision Support**
-- **Built-in providers**: `sdwebui`, `dashscope`, `gemini`, `ark`, `openai`, `glm`, `placeholder`
-- **Recommended GLM image model**: `glm-image`
-- **Centralized Vision settings**: Configure `vision_provider`, `vision_default_model`, `vision_config.endpoint`, and `vision_config.api_key` from the Settings page
+Notes:
 
-## 🏗️ Technical Architecture
+- Reasoning / thinking mode is now **default-off** across the LLM layer for structured analysis safety.
+- Provider-specific default suppression is applied where supported, including Google, Qwen, and NVIDIA.
+- The frontend still contains an `ollama` option in Settings UI, but it is **not** part of the current backend-supported provider matrix and is therefore not documented here as an officially available path.
 
-### 📁 Project Structure
+### Vision providers
 
+- `placeholder`
+- `sdwebui`
+- `dashscope`
+- `gemini`
+- `ark`
+- `openai`
+- `glm`
+
+Default model and model catalog are delivered through `GET /api/settings` via `vision_default_model`, `vision_models`, and `vision_model_providers`.
+
+### Video providers
+
+- `dashscope`
+- `kling`
+- `google`
+- `vertex`
+- `ark`
+- `mock`
+
+Default video model routing is also exposed through `GET /api/settings` via `video_default_model`, `video_models`, and `video_model_providers`.
+
+## Architecture overview
+
+```text
+frontend (React + Vite + MUI)
+                │
+                ├─ REST (/api/*)
+                ├─ SSE  (/api/progress/:taskID)
+                └─ WS   (/ws/*)
+                                │
+backend (Go + Gin)
+                │
+                ├─ config / auth / rate limit / API handlers
+                ├─ LLM / Vision / Video / Story / Script / Comic services
+                └─ file storage under data/
 ```
 
-> ℹ️ **Tip**: The `default_model` value for the active provider is now respected across the backend. Any AI call that doesn't explicitly pass a model name will automatically fall back to this configuration, so you can centrally switch models without touching code.
-SceneIntruderMCP/
-├── cmd/
-│   └── server/           # Application entry point
-│       └── main.go
-├── internal/
-│   ├── api/              # HTTP API routes and handlers
-│   ├── app/              # Application core logic
-│   ├── config/           # Configuration management
-│   ├── di/               # Dependency injection
-│   ├── llm/              # LLM provider abstraction layer
-│   │   └── providers/    # Various LLM provider implementations
-│   ├── models/           # Data model definitions
-│   ├── services/         # Business logic services
-│   └── storage/          # Storage abstraction layer
-├── frontend/
-│   └── dist/             # assets
-├── data/                 # Data storage directory
-│   ├── scenes/           # Scene data
-│   ├── stories/          # Story data
-│   ├── users/            # User data
-│   └── exports/          # Export files
-└── logs/                 # Application logs
-```
+Core source directories:
 
-### 🔧 Core Technology Stack
+- `cmd/server` — server entry
+- `internal/api` — router, handlers, middleware
+- `internal/app` — application bootstrapping and provider registration
+- `internal/config` — runtime config and encryption handling
+- `internal/llm` — provider abstraction and reasoning control
+- `internal/services` — business logic
+- `internal/vision` — vision providers
+- `frontend` — SPA client
 
-- **Backend**: Go 1.21+, Gin Web Framework
-- **AI Integration**: Multi-LLM provider support with unified abstraction interface
-- **Storage**: File system-based JSON storage with database extension support
-- **Frontend**: React, responsive design
-- **Deployment**: Containerization support, cloud-native architecture
+## Quick start
 
-## 🆕 Release Highlights (v2.0.0 · 2026-03-06)
+### Prerequisites
 
-- **Comics v2 is complete** – Home now has a standalone **New Comic** entry that creates a scene shell and jumps directly into the comics 5-step workflow.
-- **Standalone analysis input** – Comics Step1 supports `source_text`, so a comic workspace can be driven by direct story text without pre-existing story nodes.
-- **Vision provider readiness** – Settings now exposes both LLM and Vision configuration, including `glm` / `glm-image`, provider-based endpoint autofill, and recommended default values.
-- **Operationally aligned docs/APIs** – `GET /api/settings` now acts as the frontend source of truth for Vision model lists, while comics, scripts, export, and deployment guidance are synchronized.
+- Go 1.21+
+- Node.js 18+
+- npm 9+
+- At least one usable provider credential
 
----
+### 1. Install dependencies
 
-## 🆕 Release Highlights (v1.4.0 · 2025-12-25)
-
-- **New Script — One‑click writing assistant (core feature)** – Added a **"New Script"** assistant that creates a Script project and immediately generates an initial chapter outline and the first scene draft (an atomic CreateProject + GenerateInitial flow). Usage: open the **Scripts** page and click **New Script** to create a project; the system will initialize `chapter_draft.json`, create the first draft and workflow entry, and make the new project ready for editing and further generation.
-
----
-
-## 🆕 Release Highlights (v1.2.0 · 2025-11-27)
-
-- **Scene deletion cleanup** – `DELETE /api/scenes/{id}` now synchronously removes the matching `data/stories/<scene_id>` timeline, ensuring no orphaned story files remain after a scene is removed.
-- **GitHub Models fallback fixes** – Provider bootstrap now respects the configured `default_model` even when only GitHub Models credentials are supplied, eliminating the previous “connection failed” errors.
-- **Operational readiness upgrades** – Documented the persistent encryption key (`data/.encryption_key`), refreshed the API/deployment guides, and added a pre-release data cleanup checklist so release artifacts stay tidy.
-
-## 🧹 Pre-release Data Cleanup Checklist
-
-Before packaging a new build or resetting a shared demo environment, wipe transient data while preserving configuration secrets.
-
-### Remove before releasing
-- `data/scenes/*` – per-scene caches, characters, and context files
-- `data/stories/*` – story timelines (v1.2.0+ deletes these automatically alongside scenes)
-- `data/items/*` – scene item caches
-- `data/exports/*` – exported archives and interaction summaries
-- `data/stats/usage_stats.json` – accumulated telemetry
-- `temp/*` – temporary uploads and scratch files
-- `logs/*.log` – runtime logs (archive first if you need them)
-
-### Keep (or rotate with care)
-- `data/config.json` – persisted runtime settings and encrypted API keys
-- `data/.encryption_key` – AES-GCM key required to decrypt stored LLM credentials; deleting it forces you to re-enter every API key
-- `data/users/*.json` – built-in accounts such as `admin.json` and `console_user.json`
-
-> ℹ️ Scenes deleted prior to v1.2.0 may have left residual `data/stories/scene_*` folders. You can safely remove those directories manually to reclaim disk space.
-
-## 🚀 Quick Start
-
-### 📋 System Requirements
-
-- Go 1.21 or higher
-- At least one LLM API key (OpenAI/Claude/DeepSeek, etc.)
-- 2GB+ available memory
-- Operating System: Windows/Linux/macOS
-
-### 📦 Installation Steps
-
-1. **Clone the Project**
-```bash
-git clone https://github.com/Corphon/SceneIntruderMCP.git
-cd SceneIntruderMCP
-```
-
-2. **Install Dependencies**
 ```bash
 go mod download
+cd frontend
+npm install
+cd ..
 ```
 
-3. **Configure Environment**
+### 2. Build frontend assets
 
-On first start, the server initializes a configuration file at `data/config.json` (or `${DATA_DIR}/config.json`).
-You can configure both LLM and Vision providers either:
-
-- via the Settings UI: `http://localhost:8080/settings`, or
-- by editing `data/config.json` directly.
-
-For Vision/image generation in v2.0.0, the most common fields are:
-
-- `vision_provider`
-- `vision_default_model`
-- `vision_config.endpoint`
-- `vision_config.api_key`
-
-For GLM Image, the recommended values are:
-
-- provider: `glm`
-- default model: `glm-image`
-- endpoint: `https://open.bigmodel.cn/api/paas/v4`
-
-4. **Start Service**
 ```bash
-# Development mode
-go run cmd/server/main.go
-
-# Production mode
-go build -o sceneintruder cmd/server/main.go
-./sceneintruder
+cd frontend
+npm run build
+cd ..
 ```
 
-5. **Access Application**
-```
-Open browser: http://localhost:8080
+### 3. Start the server
+
+```bash
+go run ./cmd/server
 ```
 
-### ⚙️ Configuration Guide
+Default address: `http://localhost:8080`
 
-#### `data/config.json` Configuration Example
+### 4. Open the app
+
+- Home: `http://localhost:8080/`
+- Settings: `http://localhost:8080/settings`
+
+## Configuration model
+
+The runtime config is persisted to `data/config.json`.
+
+Important top-level fields:
+
+- `llm_provider`, `llm_config`
+- `vision_provider`, `vision_default_model`, `vision_config`
+- `video_provider`, `video_default_model`, `video_config`
+- `vision_models`, `vision_model_providers`
+- `video_models`, `video_model_providers`
+
+Minimal example:
 
 ```json
 {
     "port": "8080",
     "data_dir": "data",
-    "static_dir": "frontend\\dist\\assets",
-    "templates_dir": "frontend\\dist",
+    "static_dir": "frontend/dist/assets",
+    "templates_dir": "frontend/dist",
     "log_dir": "logs",
     "debug_mode": true,
-    "llm_provider": "openrouter",
+    "llm_provider": "nvidia",
     "llm_config": {
-        "default_model": "mistralai/devstral-2512:free",
-        "base_url": "",
+        "api_key": "",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "default_model": "moonshotai/kimi-k2.5"
+    },
+    "vision_provider": "glm",
+    "vision_default_model": "glm-image",
+    "vision_config": {
+        "endpoint": "https://open.bigmodel.cn/api/paas/v4",
         "api_key": ""
     },
-    "encrypted_llm_config": {
-        "api_key": "<encrypted_api_key_here>"
+    "video_provider": "dashscope",
+    "video_default_model": "wan2.6-i2v-flash",
+    "video_config": {
+        "endpoint": "https://dashscope.aliyuncs.com/api/v1",
+        "api_key": "",
+        "public_base_url": "https://your-domain.example"
     }
 }
 ```
 
-#### 🔐 Configuration Encryption & `.encryption_key`
+### Encryption notes
 
-- When `CONFIG_ENCRYPTION_KEY` isn’t provided, the backend generates a random 32-byte key and stores it in `data/.encryption_key` so encrypted API keys keep working between restarts.
-- The file must stay alongside `data/config.json`; deleting it invalidates every encrypted credential until you re-enter them through the settings UI.
-- To rotate the key intentionally, delete the file, restart the server, and immediately update the API keys—new data will be re-encrypted with the regenerated key.
-- Keep `.encryption_key` out of version control and deployment artefacts that are meant to be shared publicly.
+- If `CONFIG_ENCRYPTION_KEY` is absent in development mode, the app creates `data/.encryption_key` automatically.
+- Keep `data/.encryption_key` together with `data/config.json`.
+- Deleting the key file invalidates previously encrypted credentials.
 
-## 📖 User Guide
+## Recommended first-run path
 
-### 🎬 Creating Scenes
+1. Build frontend assets.
+2. Start backend.
+3. Open Settings and configure one working LLM provider.
+4. Optionally configure Vision and Video providers.
+5. Create a scene or a standalone comic workspace.
 
-1. **Upload Text**: Support various text formats including novels, scripts, stories
-2. **AI Analysis**: System automatically extracts characters, scenes, items, and other elements
-3. **Scene Generation**: Create interactive scene environments
+## Key operational behaviors
 
-### 🎭 Character Interaction
+### Long-running jobs
 
-1. **Select Character**: Choose interaction targets from analyzed characters
-2. **Natural Dialogue**: Engage in natural language conversations with AI characters
-3. **Emotional Feedback**: Observe character emotions, actions, and expression changes
+Analysis, prompt generation, image generation, script generation, and video generation are asynchronous. The usual pattern is:
 
-### 📚 Story Branching
+1. Start a job and receive `task_id`
+2. Subscribe to `GET /api/progress/:taskID`
+3. Fetch final result from the corresponding `GET` endpoint
 
-1. **Dynamic Choices**: AI generates 4 types of choices based on current situation
-2. **Story Development**: Advance non-linear story plots based on choices
-3. **Branch Management**: Support story rewind and multi-branch exploration
+### Guest vs authenticated usage
 
-### 📊 Data Export
+- Many scene-oriented routes degrade to `console_user` when auth is missing or invalid.
+- User-scoped routes under `/api/users/:user_id/...` require authenticated ownership.
+- Scripts routes require authenticated access.
 
-1. **Interaction Records**: Export complete dialogue history
-2. **Story Documents**: Generate structured story documents
-3. **Statistical Analysis**: Character interaction and story progress statistics
+### Video provider note
 
-#### 📁 Export Functionality Details
+Some video providers need a publicly reachable reference image URL. In practice, that means `video_config.public_base_url` should usually be configured for deployed environments.
 
-- **Multiple Formats**: Export data in JSON, Markdown, HTML, TXT, and CSV formats
-- **Comprehensive Scene Data**: Export full scene information including characters, locations, items, themes, atmosphere, and settings
-- **Character Interactions**: Export detailed interaction records between characters with timestamps and emotional context
-- **Story Branches**: Export complete story trees with all possible branches, choices, and outcomes
-- **Conversation History**: Export all character conversations with metadata
-- **Progress Statistics**: Export story progress metrics, interaction statistics, and timeline data
-- **User Preferences**: Export user customization settings, items, and skills
-- **Batch Export**: Support for exporting multiple scenes or stories simultaneously
-- **Scheduled Exports**: Option for automated periodic exports
-- **Filtered Exports**: Export based on time range, character participation, or interaction type
-- **Rich Metadata**: Include timestamps, version information, and export configuration
-- **Export Status Tracking**: Monitor ongoing export tasks with progress indicators
-- **Export History**: Maintain history of all performed exports
-- **File Organization**: Automatic organization of exported files in structured directories
-- **Export Quality Assurance**: Validation of exported data integrity
-- **Performance Optimization**: Efficient export processing for large datasets
+## Development commands
 
+Backend:
+
+```bash
+go test ./...
+go run ./cmd/server
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm run dev
+npm test
+npm run lint
+npm run build
+```
+
+## Documentation index
+
+- [API reference](docs/api.md)
+- [Deployment guide](docs/deployment.md)
+- [Frontend developer guide](docs/frontend_dev.md)
+- [中文 API 文档](docs/api_cn.md)
+- [中文部署文档](docs/deployment_cn.md)
+
+## Current scope boundary
+
+This repository already contains significantly more than an initial prototype. The maintained documentation now treats it as:
+
+- a **multi-workspace creative platform**,
+- with **provider-configurable AI services**,
+- **job-based asynchronous generation**,
+- and **documented operational deployment requirements**.
+
+That is the baseline future changes should preserve.
+
+<!--
 ## 🛠️ API Documentation
 
 ### 🔗 Actually Available API Endpoints
@@ -823,3 +789,4 @@ Thanks to all developers and users who have contributed to this project!
 Made with ❤️ by SceneIntruderMCP Team
 
 </div>
+-->
