@@ -188,6 +188,7 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("githubmodels", model, req.ExtraParams)
 
 	// 确定要使用的端点
 	endpoint := "/chat/completions"
@@ -227,11 +228,10 @@ func (p *Provider) CompleteText(ctx context.Context, req llm.CompletionRequest) 
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("githubmodels", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
@@ -312,6 +312,7 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	if model == "" {
 		model = p.defaultModel
 	}
+	model, extraParams, reasoningEnabled := llm.NormalizeReasoningRequest("githubmodels", model, req.ExtraParams)
 
 	// 确定要使用的端点
 	endpoint := "/chat/completions"
@@ -351,11 +352,10 @@ func (p *Provider) StreamCompletion(ctx context.Context, req llm.CompletionReque
 	}
 
 	// 添加任何额外参数
-	if req.ExtraParams != nil {
-		for k, v := range req.ExtraParams {
-			requestBody[k] = v
-		}
+	for k, v := range extraParams {
+		requestBody[k] = v
 	}
+	llm.ApplyReasoningDefaults("githubmodels", requestBody, model, reasoningEnabled)
 
 	// 序列化JSON
 	jsonData, err := json.Marshal(requestBody)
