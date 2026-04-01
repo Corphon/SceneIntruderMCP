@@ -12,11 +12,35 @@ import (
 
 // ProgressUpdate 表示进度更新
 type ProgressUpdate struct {
-	Progress  int    `json:"progress"`             // 进度百分比 (0-100)
-	Message   string `json:"message"`              // 描述性消息
-	Status    string `json:"status"`               // 状态：running, completed, failed
-	EventType string `json:"event_type,omitempty"` // 事件类型：progress, image_written...
-	FrameID   string `json:"frame_id,omitempty"`   // 可选：事件关联帧 ID（如 image_written）
+	Progress       int    `json:"progress"`                   // 进度百分比 (0-100)
+	Message        string `json:"message"`                    // 描述性消息
+	Status         string `json:"status"`                     // 状态：running, completed, failed
+	EventType      string `json:"event_type,omitempty"`       // 事件类型：progress, image_written...
+	FrameID        string `json:"frame_id,omitempty"`         // 可选：事件关联帧 ID（如 image_written）
+	Phase          string `json:"phase,omitempty"`            // 可选：阶段名（如 video_timeline_build）
+	VideoVersion   string `json:"video_version,omitempty"`    // 可选：video 版本
+	StageIndex     int    `json:"stage_index,omitempty"`      // 可选：当前阶段索引
+	StageTotal     int    `json:"stage_total,omitempty"`      // 可选：总阶段数
+	ProviderTaskID string `json:"provider_task_id,omitempty"` // 可选：上游 provider 任务 ID
+	ProviderStatus string `json:"provider_status,omitempty"`  // 可选：上游 provider 状态
+}
+
+type ProgressEventMeta struct {
+	Phase          string
+	VideoVersion   string
+	StageIndex     int
+	StageTotal     int
+	ProviderTaskID string
+	ProviderStatus string
+}
+
+type ProgressSnapshot struct {
+	TaskID     string
+	Progress   int
+	Message    string
+	Status     string
+	UpdateTime time.Time
+	StartTime  time.Time
 }
 
 // ProgressTracker 跟踪长时间运行任务的进度
@@ -105,6 +129,10 @@ func normalizeProgressEventType(eventType string) string {
 // EmitProgressEvent emits a structured progress event.
 // eventType defaults to "progress" when empty.
 func (t *ProgressTracker) EmitProgressEvent(progress int, message string, eventType string, frameID string) {
+	t.EmitProgressEventWithMeta(progress, message, eventType, frameID, nil)
+}
+
+func (t *ProgressTracker) EmitProgressEventWithMeta(progress int, message string, eventType string, frameID string, meta *ProgressEventMeta) {
 	t.mutex.Lock()
 	defer t.mutex.Unlock()
 
@@ -123,8 +151,30 @@ func (t *ProgressTracker) EmitProgressEvent(progress int, message string, eventT
 		EventType: normalizeProgressEventType(eventType),
 		FrameID:   strings.TrimSpace(frameID),
 	}
+	if meta != nil {
+		update.Phase = strings.TrimSpace(meta.Phase)
+		update.VideoVersion = strings.TrimSpace(meta.VideoVersion)
+		update.StageIndex = meta.StageIndex
+		update.StageTotal = meta.StageTotal
+		update.ProviderTaskID = strings.TrimSpace(meta.ProviderTaskID)
+		update.ProviderStatus = strings.TrimSpace(meta.ProviderStatus)
+	}
 
 	t.notifySubscribers(update, false)
+}
+
+func (t *ProgressTracker) Snapshot() ProgressSnapshot {
+	t.mutex.Lock()
+	defer t.mutex.Unlock()
+
+	return ProgressSnapshot{
+		TaskID:     t.TaskID,
+		Progress:   t.Progress,
+		Message:    t.Message,
+		Status:     t.Status,
+		UpdateTime: t.UpdateTime,
+		StartTime:  t.StartTime,
+	}
 }
 
 // Complete 标记任务完成
