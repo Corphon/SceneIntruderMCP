@@ -378,6 +378,74 @@ func (s *ConfigService) UpdateVisionConfig(provider string, visionCfg map[string
 	return nil
 }
 
+func (s *ConfigService) UpdateVideoConfig(provider string, videoCfg map[string]string, defaultModel string, modelProviders map[string]string, models []config.VideoModelInfo, changedBy string) error {
+	if provider == "" {
+		return errors.New("provider cannot be empty")
+	}
+
+	normalizedVideoCfg := make(map[string]string)
+	for k, v := range videoCfg {
+		normalizedVideoCfg[k] = v
+	}
+	normalizedModelProviders := make(map[string]string)
+	for k, v := range modelProviders {
+		normalizedModelProviders[k] = v
+	}
+	modelsCopy := make([]config.VideoModelInfo, len(models))
+	copy(modelsCopy, models)
+
+	var oldConfig *config.AppConfig
+	var subscribers []ConfigChangeSubscriber
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		oldConfig = s.getCurrentConfigUnsafe()
+		subscribers = make([]ConfigChangeSubscriber, len(s.subscribers))
+		copy(subscribers, s.subscribers)
+
+		s.recordAuditUnsafe("write", "Video配置", changedBy)
+		s.configVersion++
+	}()
+
+	if err := config.UpdateVideoConfig(provider, normalizedVideoCfg, defaultModel, normalizedModelProviders, modelsCopy); err != nil {
+		s.mu.Lock()
+		s.configVersion--
+		s.mu.Unlock()
+		return fmt.Errorf("更新video配置失败: %w", err)
+	}
+
+	var newConfig *config.AppConfig
+	func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
+		s.cachedConfig = config.GetCurrentConfig()
+		s.lastUpdated = time.Now()
+		newConfig = s.cachedConfig
+
+		s.recordChangeUnsafe("Video提供商", oldConfig.VideoProvider, provider, changedBy)
+		s.recordChangeUnsafe("Video默认模型", oldConfig.VideoDefaultModel, newConfig.VideoDefaultModel, changedBy)
+		s.recordChangeUnsafe("Video配置", oldConfig.VideoConfig, normalizedVideoCfg, changedBy)
+		s.recordChangeUnsafe("Video模型路由", oldConfig.VideoModelProviders, normalizedModelProviders, changedBy)
+		s.recordChangeUnsafe("Video模型列表", oldConfig.VideoModels, modelsCopy, changedBy)
+	}()
+
+	s.notifySubscribersAsyncSafe(oldConfig, newConfig, subscribers)
+
+	go func() {
+		container := di.GetContainer()
+		videoService, ok := container.Get("video").(*VideoService)
+		if !ok || videoService == nil {
+			return
+		}
+		cfg := config.GetCurrentConfig()
+		_ = ApplyVideoConfig(videoService, cfg)
+	}()
+
+	return nil
+}
+
 // 异步通知方法
 func (s *ConfigService) notifySubscribersAsyncSafe(oldConfig, newConfig *config.AppConfig, subscribers []ConfigChangeSubscriber) {
 	for _, subscriber := range subscribers {
@@ -418,7 +486,7 @@ func (s *ConfigService) validateLLMConfig(provider string, configMap map[string]
 	// 验证提供商
 	supportedProviders := []string{
 		"openai", "anthropic", "google", "githubmodels", "grok",
-		"mistral", "qwen", "glm", "deepseek", "openrouter",
+		"mistral", "qwen", "glm", "deepseek", "openrouter", "nvidia",
 	}
 
 	found := false
@@ -484,6 +552,8 @@ func (s *ConfigService) getDefaultModelForProvider(provider string) string {
 		return "deepseek-chat"
 	case "openrouter":
 		return "x-ai/grok-4.1-fast:free"
+	case "nvidia":
+		return "moonshotai/kimi-k2.5"
 	default:
 		return "gpt-4.1" // 默认回退
 	}
